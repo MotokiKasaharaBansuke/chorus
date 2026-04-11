@@ -1,0 +1,30 @@
+#!/bin/bash
+# Chorus CLI launcher
+# Usage: chorus [path]
+#   chorus .          → open current directory
+#   chorus /some/path → open specified directory
+#   chorus            → open without directory
+
+APP_NAME="chorus"
+APP_PATH="/Applications/Chorus.app"
+DEV_APP_PATH="$HOME/Develop/hobby/chorus/src-tauri/target/release/bundle/macos/${APP_NAME}.app"
+
+# Resolve target directory
+if [ -n "$1" ]; then
+  TARGET_DIR="$(cd "$1" 2>/dev/null && pwd || echo "$1")"
+else
+  TARGET_DIR="$(pwd)"
+fi
+
+# Find the app
+if [ -d "$APP_PATH" ]; then
+  LAUNCH="$APP_PATH"
+elif [ -d "$DEV_APP_PATH" ]; then
+  LAUNCH="$DEV_APP_PATH"
+else
+  echo "Chorus.app not found. Install to /Applications or build with: pnpm tauri build"
+  exit 1
+fi
+
+# Launch with directory as argument
+open -a "$LAUNCH" --args --directory "$TARGET_DIR"
