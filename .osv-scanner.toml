@@ -1,0 +1,86 @@
+# Known vulnerabilities in Tauri's transitive dependencies (not fixable upstream)
+# These are GTK/GLib bindings for Linux (not used on macOS) and other indirect deps
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0413"
+reason = "Tauri transitive dep (atk), Linux only"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0416"
+reason = "Tauri transitive dep (atk-sys), Linux only"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0057"
+reason = "Tauri transitive dep (fxhash)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0412"
+reason = "Tauri transitive dep (gdk), Linux only"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0418"
+reason = "Tauri transitive dep (gdk-sys), Linux only"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0411"
+reason = "Tauri transitive dep (gdkwayland-sys), Linux only"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0417"
+reason = "Tauri transitive dep (gdkx11), Linux only"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0414"
+reason = "Tauri transitive dep (gdkx11-sys), Linux only"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0429"
+reason = "Tauri transitive dep (glib), Linux only"
+
+[[IgnoredVulns]]
+id = "GHSA-wrw7-89jp-8q8g"
+reason = "Tauri transitive dep (glib), Linux only"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0415"
+reason = "Tauri transitive dep (gtk), Linux only"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0420"
+reason = "Tauri transitive dep (gtk-sys), Linux only"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0419"
+reason = "Tauri transitive dep (gtk3-macros), Linux only"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+reason = "Tauri transitive dep (proc-macro-error)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0097"
+reason = "Tauri transitive dep (rand), no security impact"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2017-0008"
+reason = "portable-pty transitive dep (serial)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0081"
+reason = "Tauri transitive dep (unic-char-property)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0075"
+reason = "Tauri transitive dep (unic-char-range)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0080"
+reason = "Tauri transitive dep (unic-common)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0100"
+reason = "Tauri transitive dep (unic-ucd-ident)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0098"
+reason = "Tauri transitive dep (unic-ucd-version)"
