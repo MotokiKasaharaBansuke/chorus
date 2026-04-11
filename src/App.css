@@ -1,0 +1,247 @@
+@import "@xterm/xterm/css/xterm.css";
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 100%; /* controlled by Cmd+/- zoom */
+}
+
+body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: #1a1a1a;
+  color: #cccccc;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', system-ui, sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+.app-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.sidebar-container {
+  flex-shrink: 0;
+  overflow: hidden;
+  display: flex;
+}
+
+.sidebar-resize {
+  width: 1px;
+  cursor: col-resize;
+  background: #2d2d2d;
+  flex-shrink: 0;
+  transition: background 0.1s;
+}
+.sidebar-resize:hover { background: #555; width: 2px; }
+
+/* (Top bar styles moved to top-bar.module.css) */
+
+/* ===== Main Area ===== */
+.main-area {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* ===== Content split (grid + bottom terminal) ===== */
+.content-split {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ===== Layout Area ===== */
+.layout-area {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  background: #181818;
+}
+
+/* ===== Bottom Terminal ===== */
+.bottom-terminal {
+  display: flex;
+  flex-direction: column;
+  background: #1a1a1a;
+  flex-shrink: 0;
+}
+
+.bottom-terminal-resize {
+  height: 3px;
+  cursor: row-resize;
+  background: #333;
+  flex-shrink: 0;
+  transition: background 0.1s;
+}
+
+.bottom-terminal-resize:hover {
+  background: #555;
+}
+
+.bottom-terminal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #1e1e1e;
+  border-bottom: 1px solid #2d2d2d;
+  flex-shrink: 0;
+  height: 30px;
+}
+
+.bottom-term-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  flex: 1;
+  overflow-x: auto;
+}
+
+.bottom-term-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  height: 30px;
+  font-size: 11px;
+  color: #666;
+  cursor: pointer;
+  border-right: 1px solid #2d2d2d;
+  white-space: nowrap;
+  user-select: none;
+  transition: color 0.1s;
+}
+
+.bottom-term-tab:hover {
+  color: #aaa;
+}
+
+.bottom-term-tab-active {
+  color: #ccc;
+  background: #1a1a1a;
+}
+
+.bottom-term-close {
+  background: none;
+  border: none;
+  color: #555;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.bottom-term-tab:hover .bottom-term-close {
+  opacity: 1;
+}
+
+.bottom-term-close:hover {
+  color: #ccc;
+}
+
+.bottom-term-add {
+  background: none;
+  border: none;
+  color: #555;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 10px;
+  height: 30px;
+}
+
+.bottom-term-add:hover {
+  color: #aaa;
+}
+
+.bottom-term-close-all {
+  background: none;
+  border: none;
+  color: #555;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 10px;
+  flex-shrink: 0;
+}
+
+.bottom-term-close-all:hover {
+  color: #ccc;
+}
+
+.bottom-terminal-content {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+/* (Old pane styles removed — now in pane-group.module.css) */
+
+/* ===== Empty State ===== */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: #444;
+  user-select: none;
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+}
+
+.empty-icon {
+  font-size: 36px;
+  margin-bottom: 16px;
+  opacity: 0.2;
+}
+
+.empty-state h2 {
+  font-size: 18px;
+  font-weight: 400;
+  color: #555;
+  margin-bottom: 6px;
+  letter-spacing: -0.01em;
+}
+
+.empty-state p {
+  font-size: 12px;
+  color: #444;
+}
+
+/* ===== Scrollbar ===== */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #444;
+}
