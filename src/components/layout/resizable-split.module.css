@@ -1,0 +1,45 @@
+.container {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  height: 100%;
+  width: 100%;
+}
+
+.horizontal { flex-direction: row; }
+.vertical { flex-direction: column; }
+
+.first {
+  overflow: hidden;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.second {
+  overflow: hidden;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Handles */
+.handle {
+  flex-shrink: 0;
+  background: #2d2d2d;
+  transition: background 0.1s;
+  z-index: 2;
+}
+.handle:hover, .dragging { background: #555; }
+
+.handleH {
+  width: 1px;
+  cursor: col-resize;
+}
+.handleH:hover, .handleH.dragging { width: 2px; }
+
+.handleV {
+  height: 1px;
+  cursor: row-resize;
+}
+.handleV:hover, .handleV.dragging { height: 2px; }

@@ -1,0 +1,32 @@
+.splitPane {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  height: 100%;
+}
+
+.left {
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.handle {
+  width: 1px;
+  cursor: col-resize;
+  background: #2d2d2d;
+  flex-shrink: 0;
+  transition: background 0.1s;
+}
+
+.handle:hover,
+.dragging {
+  background: #555;
+  width: 2px;
+}
+
+.right {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}

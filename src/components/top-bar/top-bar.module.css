@@ -1,0 +1,118 @@
+.topBar {
+  display: flex;
+  align-items: center;
+  background: #181818;
+  border-bottom: 1px solid #2d2d2d;
+  height: 28px;
+  padding: 0 8px 0 78px;
+  gap: 4px;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.left, .right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  -webkit-app-region: no-drag;
+  flex-shrink: 0;
+}
+
+.center {
+  flex: 1;
+  text-align: center;
+  font-size: 11px;
+  color: #444;
+  -webkit-app-region: drag;
+  font-weight: 400;
+  min-width: 0;
+}
+
+.btn {
+  -webkit-app-region: no-drag;
+  background: none;
+  border: none;
+  color: #555;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.btn:hover { color: #999; background: #2d2d2d; }
+.btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.dropdownWrap {
+  position: relative;
+  display: flex;
+}
+
+.dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: #252525;
+  border: 1px solid #333;
+  border-radius: 6px;
+  min-width: 180px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  z-index: 200;
+  overflow: hidden;
+  animation: fadeIn 0.1s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.dropdownTitle {
+  padding: 8px 12px;
+  font-size: 11px;
+  color: #666;
+  border-bottom: 1px solid #333;
+}
+
+.dropdownItem {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #aaa;
+  cursor: pointer;
+  transition: background 0.08s;
+  display: flex;
+  align-items: center;
+}
+.dropdownItem:hover { background: #333; color: #ccc; }
+.dropdownActive { color: #d97757; font-weight: 600; }
+
+.divider { height: 1px; background: #333; margin: 4px 0; }
+
+.fontRow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 8px 12px;
+}
+.fontBtn {
+  width: 24px; height: 24px;
+  border-radius: 4px;
+  border: 1px solid #444;
+  background: #2a2a2a;
+  color: #ccc;
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.fontBtn:hover { background: #333; border-color: #555; }
+.fontValue {
+  font-size: 12px;
+  color: #ccc;
+  font-weight: 500;
+  min-width: 36px;
+  text-align: center;
+}

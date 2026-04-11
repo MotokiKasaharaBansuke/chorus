@@ -1,0 +1,85 @@
+import { createSignal, Show } from "solid-js";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useTabStore } from "../../stores/tab-store";
+import { SidebarIcon, TerminalIcon } from "../icons";
+import type { CliMode } from "../../types";
+import styles from "./top-bar.module.css";
+
+interface TopBarProps {
+  paneCount: number;
+  isSidebarOpen: boolean;
+  onToggleSidebar: () => void;
+  onToggleTerminal: () => void;
+  onNewTab: () => void;
+  canOpenTab: boolean;
+  quickLaunchMode: CliMode;
+  onQuickLaunchModeChange: (mode: CliMode) => void;
+  fontSize: number;
+  onFontSizeChange: (size: number) => void;
+}
+
+export function TopBar(props: TopBarProps) {
+  const tabStore = useTabStore();
+  const [showSettings, setShowSettings] = createSignal(false);
+
+  return (
+    <div class={styles.topBar}>
+      <div class={styles.left}>
+        <button class={styles.btn} onClick={props.onToggleSidebar} title="Toggle Sidebar (⌘B)">
+          <SidebarIcon isOpen={props.isSidebarOpen} size={14} />
+        </button>
+      </div>
+
+      <div class={styles.center} data-tauri-drag-region onMouseDown={() => getCurrentWindow().startDragging()}>
+        {props.paneCount > 0 ? `${props.paneCount} tab${props.paneCount > 1 ? "s" : ""}` : "Chorus"}
+      </div>
+
+      <div class={styles.right}>
+        <button class={styles.btn} onClick={props.onToggleTerminal} title="Toggle Terminal (⌘`)">
+          <TerminalIcon size={14} />
+        </button>
+        <Show when={tabStore.layout && tabStore.layout.type === "split"}>
+          <button class={styles.btn} onClick={() => tabStore.equalize()} title="Equalize pane sizes (⌘E)">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <rect x="1" y="2" width="6" height="12" rx="1" stroke="currentColor" stroke-width="1.2" fill="none"/>
+              <rect x="9" y="2" width="6" height="12" rx="1" stroke="currentColor" stroke-width="1.2" fill="none"/>
+            </svg>
+          </button>
+        </Show>
+        <div class={styles.dropdownWrap}>
+          <button class={styles.btn} onClick={() => setShowSettings(!showSettings())} title="Settings (⌘1/⌘2)">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path d="M8 1a1 1 0 011 1v1.07a5 5 0 011.82.76l.75-.76a1 1 0 011.42 1.42l-.76.75A5 5 0 0113.93 7H15a1 1 0 010 2h-1.07a5 5 0 01-.76 1.82l.76.75a1 1 0 01-1.42 1.42l-.75-.76A5 5 0 019 12.93V14a1 1 0 01-2 0v-1.07a5 5 0 01-1.82-.76l-.75.76a1 1 0 01-1.42-1.42l.76-.75A5 5 0 012.07 9H1a1 1 0 010-2h1.07a5 5 0 01.76-1.82l-.76-.75a1 1 0 011.42-1.42l.75.76A5 5 0 017 3.07V2a1 1 0 011-1zm0 4.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5z" fill="currentColor"/>
+            </svg>
+          </button>
+          <Show when={showSettings()}>
+            <div class={styles.dropdown}>
+              <div class={styles.dropdownTitle}>Quick Launch Mode (⌘1/⌘2)</div>
+              <div class={`${styles.dropdownItem} ${props.quickLaunchMode === "default" ? styles.dropdownActive : ""}`}
+                onClick={() => { props.onQuickLaunchModeChange("default"); setShowSettings(false); }}>Default</div>
+              <div class={`${styles.dropdownItem} ${props.quickLaunchMode === "plan" ? styles.dropdownActive : ""}`}
+                onClick={() => { props.onQuickLaunchModeChange("plan"); setShowSettings(false); }}>Plan</div>
+              <div class={`${styles.dropdownItem} ${props.quickLaunchMode === "dangerously-skip-permissions" ? styles.dropdownActive : ""}`}
+                onClick={() => { props.onQuickLaunchModeChange("dangerously-skip-permissions"); setShowSettings(false); }}>
+                Bypass permissions
+                <span style={{ color: "#c74e39", "font-size": "10px", "margin-left": "4px" }}>DANGER</span>
+              </div>
+              <div class={styles.divider} />
+              <div class={styles.dropdownTitle}>Font Size</div>
+              <div class={styles.fontRow}>
+                <button class={styles.fontBtn} onClick={() => props.onFontSizeChange(props.fontSize - 1)}>−</button>
+                <span class={styles.fontValue}>{props.fontSize}px</span>
+                <button class={styles.fontBtn} onClick={() => props.onFontSizeChange(props.fontSize + 1)}>+</button>
+              </div>
+            </div>
+          </Show>
+        </div>
+        <button class={styles.btn} onClick={props.onNewTab} disabled={!props.canOpenTab} title="New Pane (⌘T)">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}

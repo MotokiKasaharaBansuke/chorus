@@ -1,0 +1,33 @@
+.indicator {
+  font-size: 9px;
+  margin-right: 4px;
+  display: inline-block;
+  min-width: 10px;
+  text-align: center;
+}
+
+.idle {
+  color: #555;
+}
+
+.running {
+  color: #3fb950;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.waiting {
+  color: #d29922;
+}
+
+.completed {
+  color: #58a6ff;
+}
+
+.error {
+  color: #f85149;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}

@@ -1,0 +1,67 @@
+.viewer {
+  display: flex; flex-direction: column; flex: 1; overflow: hidden;
+  background: #1a1a1a;
+}
+
+.header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; background: #1e1e1e;
+  border-bottom: 1px solid #2d2d2d; border-top: 2px solid #6e7681;
+  flex-shrink: 0;
+}
+
+.fileName {
+  font-size: 13px; font-weight: 500; color: #ccc;
+}
+
+.filePath {
+  font-size: 11px; color: #555; flex: 1; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+  font-family: 'SF Mono', monospace;
+}
+
+.closeBtn {
+  background: none; border: none; color: #555; cursor: pointer;
+  font-size: 14px; padding: 0 4px; border-radius: 3px;
+}
+
+.closeBtn:hover { color: #ccc; background: #333; }
+
+.body { flex: 1; overflow: auto; }
+
+.loading, .error {
+  padding: 16px; font-size: 12px; color: #666; text-align: center;
+}
+
+.error { color: #f85149; }
+
+.codeContainer {
+  display: flex; min-height: 100%;
+}
+
+.lineNumbers {
+  flex-shrink: 0; padding: 8px 0;
+  text-align: right; user-select: none;
+  border-right: 1px solid #2d2d2d;
+  background: #1a1a1a;
+}
+
+.lineNum {
+  padding: 0 12px 0 8px;
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 12px; line-height: 1.5; color: #444;
+  min-width: 40px;
+}
+
+.code {
+  flex: 1; margin: 0; padding: 8px 16px;
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 12px; line-height: 1.5; color: #ccc;
+  white-space: pre; overflow-x: auto; tab-size: 2;
+}
+
+/* Syntax highlighting */
+:global(.hl-keyword) { color: #c586c0; }
+:global(.hl-string) { color: #ce9178; }
+:global(.hl-comment) { color: #6a9955; font-style: italic; }
+:global(.hl-number) { color: #b5cea8; }

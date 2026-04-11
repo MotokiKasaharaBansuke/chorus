@@ -1,0 +1,107 @@
+.tabBar {
+  display: flex;
+  align-items: center;
+  background: #16162a;
+  border-bottom: 1px solid #2a2a4a;
+  height: 36px;
+  padding: 0 4px;
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+.tabList {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  gap: 2px;
+  -webkit-app-region: no-drag;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  max-width: 240px;
+  padding: 4px 8px;
+  background: #1e1e38;
+  border-radius: 6px 6px 0 0;
+  cursor: pointer;
+  font-size: 12px;
+  color: #8888aa;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.tab:hover {
+  background: #262648;
+  color: #bbbbdd;
+}
+
+.active {
+  background: #1a1a2e;
+  color: #e0e0e0;
+  border-bottom: 2px solid #74c0fc;
+}
+
+.dangerous {
+  border-top: 2px solid #ef4444;
+}
+
+.tabTitle {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dangerBadge {
+  font-size: 8px;
+  background: #ef4444;
+  color: white;
+  padding: 1px 4px;
+  border-radius: 3px;
+  margin-left: 4px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+.closeBtn {
+  background: none;
+  border: none;
+  color: #6b7280;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+  margin-left: 4px;
+  line-height: 1;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.closeBtn:hover {
+  background: #3a3a5e;
+  color: #e0e0e0;
+}
+
+.newTabBtn {
+  background: none;
+  border: none;
+  color: #6b7280;
+  cursor: pointer;
+  font-size: 18px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  -webkit-app-region: no-drag;
+}
+
+.newTabBtn:hover:not(:disabled) {
+  background: #262648;
+  color: #e0e0e0;
+}
+
+.newTabBtn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}

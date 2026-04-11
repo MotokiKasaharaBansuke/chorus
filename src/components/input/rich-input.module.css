@@ -1,0 +1,159 @@
+.container {
+  border-top: 1px solid #2d2d2d;
+  background: #1e1e1e;
+  padding: 6px 10px;
+}
+
+.imageBar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.imageThumb {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border-radius: 6px;
+  overflow: visible;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.imagePreview {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid #3d3d3d;
+  display: block;
+  transition: opacity 0.1s;
+}
+
+.imageThumb:hover .imagePreview {
+  opacity: 0.8;
+}
+
+.imageRemove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #444;
+  border: 1px solid #666;
+  color: #ccc;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.imageRemove:hover {
+  background: #e04040;
+  border-color: #e04040;
+  color: white;
+}
+
+.modalOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modalContent {
+  position: relative;
+  max-width: 80vw;
+  max-height: 80vh;
+}
+
+.modalImage {
+  display: block;
+  max-width: 100%;
+  max-height: 80vh;
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.modalClose {
+  position: absolute;
+  top: -12px;
+  right: -12px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #333;
+  border: 1px solid #555;
+  color: #ccc;
+  cursor: pointer;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.modalClose:hover {
+  background: #e04040;
+  border-color: #e04040;
+  color: white;
+}
+
+.inputRow {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.textarea {
+  flex: 1;
+  background: #2d2d2d;
+  border: 1px solid #3d3d3d;
+  border-radius: 6px;
+  color: #cccccc;
+  font-size: 12px;
+  font-family: 'SF Mono', 'Menlo', monospace;
+  padding: 6px 10px;
+  resize: none;
+  min-height: 18px;
+  max-height: 100px;
+  line-height: 1.4;
+  outline: none;
+}
+
+.textarea:focus {
+  border-color: #555;
+}
+
+.textarea::placeholder {
+  color: #555;
+}
+
+.sendBtn {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: #2ea043;
+  border: none;
+  color: white;
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.1s;
+}
+
+.sendBtn:hover {
+  background: #3fb950;
+}

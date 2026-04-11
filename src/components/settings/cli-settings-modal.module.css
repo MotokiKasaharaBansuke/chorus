@@ -1,0 +1,204 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  backdrop-filter: blur(4px);
+}
+
+.modal {
+  background: #252525;
+  border: 1px solid #3d3d3d;
+  border-radius: 10px;
+  padding: 24px;
+  width: 400px;
+  max-width: 90vw;
+  position: relative;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+}
+
+.title {
+  margin: 0 0 20px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #cccccc;
+}
+
+.field {
+  margin-bottom: 16px;
+}
+
+.field label {
+  display: block;
+  font-size: 11px;
+  color: #666;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.buttonGroup {
+  display: flex;
+  gap: 4px;
+}
+
+.buttonGroup button {
+  flex: 1;
+  padding: 7px 8px;
+  background: #2d2d2d;
+  border: 1px solid #3d3d3d;
+  border-radius: 6px;
+  color: #8b8b8b;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.1s ease;
+}
+
+.buttonGroup button:hover {
+  background: #333;
+  color: #ccc;
+}
+
+.selected {
+  background: #333 !important;
+  color: #cccccc !important;
+  border-color: #555 !important;
+}
+
+.dangerBtn {
+  border-color: #5a2020 !important;
+  color: #f85149 !important;
+}
+
+.dangerBtn.selected {
+  background: #3a1515 !important;
+  border-color: #f85149 !important;
+  color: #ffa198 !important;
+}
+
+.input {
+  width: 100%;
+  padding: 7px 10px;
+  background: #2d2d2d;
+  border: 1px solid #3d3d3d;
+  border-radius: 6px;
+  color: #cccccc;
+  font-size: 12px;
+  font-family: 'SF Mono', 'Menlo', monospace;
+  box-sizing: border-box;
+}
+
+.input:focus {
+  outline: none;
+  border-color: #555;
+}
+
+.input::placeholder {
+  color: #555;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.cancelBtn {
+  padding: 7px 14px;
+  background: transparent;
+  border: 1px solid #3d3d3d;
+  border-radius: 6px;
+  color: #8b8b8b;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.cancelBtn:hover {
+  background: #2d2d2d;
+}
+
+.submitBtn {
+  padding: 7px 18px;
+  background: #2ea043;
+  border: none;
+  border-radius: 6px;
+  color: white;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.submitBtn:hover {
+  background: #3fb950;
+}
+
+.dangerOverlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+}
+
+.dangerModal {
+  background: #2a1515;
+  border: 1px solid #f85149;
+  border-radius: 8px;
+  padding: 20px;
+  max-width: 300px;
+}
+
+.dangerModal h4 {
+  color: #f85149;
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.dangerModal p {
+  color: #b08080;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0 0 16px;
+}
+
+.dangerActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dangerCancelBtn {
+  padding: 7px 14px;
+  background: #333;
+  border: 1px solid #555;
+  border-radius: 6px;
+  color: #ccc;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.dangerCancelBtn:hover {
+  background: #444;
+}
+
+.dangerConfirmBtn {
+  padding: 7px 14px;
+  background: #f85149;
+  border: none;
+  border-radius: 6px;
+  color: white;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.dangerConfirmBtn:hover {
+  background: #ff6961;
+}

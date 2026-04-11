@@ -1,0 +1,7 @@
+.grid {
+  display: grid;
+  flex: 1;
+  gap: 1px;
+  background: #2a2a4a;
+  overflow: hidden;
+}

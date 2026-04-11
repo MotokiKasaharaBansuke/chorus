@@ -1,0 +1,152 @@
+.paneGroup {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+  min-width: 240px;
+  min-height: 200px;
+  background: #1a1a1a;
+}
+
+.focused {
+  outline: 1px solid #444;
+  outline-offset: -1px;
+}
+
+/* === Tab bar === */
+.tabBar {
+  display: flex;
+  align-items: stretch;
+  background: #181818;
+  border-bottom: 1px solid #2d2d2d;
+  height: 28px;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.tabList {
+  display: flex;
+  flex: 1;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabList::-webkit-scrollbar { display: none; }
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  font-size: 11px;
+  color: #222;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+  transition: background 0.08s, color 0.08s;
+  flex-shrink: 0;
+  height: 100%;
+  position: relative;
+}
+
+.tab:hover { color: #777; background: #222; }
+
+.tabActive {
+  color: #999;
+  background: #1a1a1a;
+  border-bottom: 1px solid #1a1a1a;
+  margin-bottom: -1px;
+}
+
+/* フォーカス中のペインではアクティブタブをより明るく */
+.focused .tabActive {
+  color: #e8e8e8;
+}
+
+.tabDanger { border-top: 1px solid #c74e3918; }
+.tabDanger.tabActive { border-top-color: #c74e3980; }
+.focused .tabDanger.tabActive { border-top-color: #c74e39; }
+
+.tabIcon {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.tabTitle {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dangerDot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #c74e39;
+  flex-shrink: 0;
+}
+
+.tabClose {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border: none;
+  background: none;
+  color: #555;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 50%;
+  padding: 0;
+  opacity: 0;
+  transition: opacity 0.1s;
+  margin-left: 2px;
+  flex-shrink: 0;
+}
+.tab:hover .tabClose { opacity: 1; }
+.tabClose:hover { color: #ccc; background: #333; }
+
+/* === Content === */
+.content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+  min-height: 0;
+}
+
+.contentPanel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* === Tab bar drag-over === */
+.tabBarDragOver {
+  background: rgba(88, 166, 255, 0.12);
+  border-bottom-color: #58a6ff;
+}
+
+/* === VS Code-style drop indicators (background brightening only) === */
+.dropIndicator {
+  position: absolute;
+  pointer-events: none;
+  z-index: 50;
+  background: rgba(88, 166, 255, 0.18);
+  outline: 2px solid rgba(88, 166, 255, 0.6);
+  outline-offset: -2px;
+}
+
+/* Edge drops: the corresponding half brightens */
+.dropLeft   { top: 0; left: 0; bottom: 0; width: 50%; }
+.dropRight  { top: 0; right: 0; bottom: 0; width: 50%; }
+.dropTop    { top: 0; left: 0; right: 0; height: 50%; }
+.dropBottom { bottom: 0; left: 0; right: 0; height: 50%; }
+
+/* Center drop: full pane brightens */
+.dropCenter { top: 0; left: 0; right: 0; bottom: 0; }
