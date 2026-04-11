@@ -1,0 +1,162 @@
+import type { LayoutNode, PaneGroupNode, SplitNode, SplitDirection } from "../../types";
+
+export function generateId(prefix = "pg"): string {
+  return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+export function createPaneGroup(tabIds: string[] = [], activeTabId?: string): PaneGroupNode {
+  return {
+    type: "pane-group",
+    id: generateId("pg"),
+    tabIds,
+    activeTabId: activeTabId ?? tabIds[0] ?? null,
+  };
+}
+
+// ── Helpers: reduce duplicated recursion patterns ──
+
+/** Apply a transform to the PaneGroup matching groupId, recurse through splits. */
+function mapPaneGroup(
+  root: LayoutNode,
+  groupId: string,
+  transform: (group: PaneGroupNode) => LayoutNode,
+): LayoutNode {
+  if (root.type === "pane-group") {
+    return root.id === groupId ? transform(root) : root;
+  }
+  return mapSplitChildren(root, (child) => mapPaneGroup(child, groupId, transform));
+}
+
+/** Rebuild a SplitNode with a mapper applied to both children. */
+function mapSplitChildren(
+  split: SplitNode,
+  mapper: (child: LayoutNode) => LayoutNode,
+): SplitNode {
+  return {
+    ...split,
+    children: [mapper(split.children[0]), mapper(split.children[1])],
+  };
+}
+
+// ── Finders ──
+
+export function findPaneGroup(root: LayoutNode, groupId: string): PaneGroupNode | null {
+  if (root.type === "pane-group") {
+    return root.id === groupId ? root : null;
+  }
+  return findPaneGroup(root.children[0], groupId) ?? findPaneGroup(root.children[1], groupId);
+}
+
+export function findPaneGroupContainingTab(root: LayoutNode, tabId: string): PaneGroupNode | null {
+  if (root.type === "pane-group") {
+    return root.tabIds.includes(tabId) ? root : null;
+  }
+  return findPaneGroupContainingTab(root.children[0], tabId)
+    ?? findPaneGroupContainingTab(root.children[1], tabId);
+}
+
+export function findFirstPaneGroup(root: LayoutNode): PaneGroupNode {
+  if (root.type === "pane-group") return root;
+  return findFirstPaneGroup(root.children[0]);
+}
+
+export function getAllPaneGroups(root: LayoutNode): PaneGroupNode[] {
+  if (root.type === "pane-group") return [root];
+  return [
+    ...getAllPaneGroups(root.children[0]),
+    ...getAllPaneGroups(root.children[1]),
+  ];
+}
+
+// ── Mutations (immutable) ──
+
+/** Add a tab to a pane group. Returns a new tree. */
+export function addTabToPaneGroup(root: LayoutNode, groupId: string, tabId: string): LayoutNode {
+  return mapPaneGroup(root, groupId, (group) => ({
+    ...group,
+    tabIds: [...group.tabIds, tabId],
+    activeTabId: tabId,
+  }));
+}
+
+/** Update the active tab within a pane group. */
+export function setActiveTab(root: LayoutNode, groupId: string, tabId: string): LayoutNode {
+  return mapPaneGroup(root, groupId, (group) => ({ ...group, activeTabId: tabId }));
+}
+
+/** Remove a tab from its pane group. If the group becomes empty, collapse the tree. */
+export function removeTabFromTree(root: LayoutNode, tabId: string): LayoutNode | null {
+  if (root.type === "pane-group") {
+    if (!root.tabIds.includes(tabId)) return root;
+    const newTabIds = root.tabIds.filter(id => id !== tabId);
+    if (newTabIds.length === 0) return null;
+    const newActive = root.activeTabId === tabId
+      ? newTabIds[Math.min(root.tabIds.indexOf(tabId), newTabIds.length - 1)]
+      : root.activeTabId;
+    return { ...root, tabIds: newTabIds, activeTabId: newActive ?? null };
+  }
+
+  const left = removeTabFromTree(root.children[0], tabId);
+  const right = removeTabFromTree(root.children[1], tabId);
+
+  if (!left) return right;
+  if (!right) return left;
+
+  return { ...root, children: [left, right] };
+}
+
+/** Split a pane group: insert a new SplitNode with the tab moved to a new PaneGroup. */
+export function splitPaneGroup(
+  root: LayoutNode,
+  groupId: string,
+  direction: SplitDirection,
+  tabId: string,
+  side: "before" | "after" = "after",
+): LayoutNode {
+  return mapPaneGroup(root, groupId, (group) => {
+    const originalTabIds = group.tabIds.filter(id => id !== tabId);
+    const originalActive = group.activeTabId === tabId
+      ? (originalTabIds[0] ?? null)
+      : group.activeTabId;
+    const originalGroup: PaneGroupNode = originalTabIds.length > 0
+      ? { ...group, tabIds: originalTabIds, activeTabId: originalActive }
+      : group;
+
+    const newGroup = createPaneGroup([tabId], tabId);
+    const children: [LayoutNode, LayoutNode] = side === "before"
+      ? [newGroup, originalGroup]
+      : [originalGroup, newGroup];
+
+    return { type: "split", id: generateId("sp"), direction, children, ratio: 0.5 };
+  });
+}
+
+/** Update split ratio */
+export function updateSplitRatio(root: LayoutNode, splitId: string, ratio: number): LayoutNode {
+  if (root.type === "pane-group") return root;
+  if (root.id === splitId) return { ...root, ratio };
+  return mapSplitChildren(root, (child) => updateSplitRatio(child, splitId, ratio));
+}
+
+// ── Equalize ──
+
+/** Count leaf nodes (pane groups) in a subtree */
+export function countLeaves(root: LayoutNode): number {
+  if (root.type === "pane-group") return 1;
+  return countLeaves(root.children[0]) + countLeaves(root.children[1]);
+}
+
+/** Equalize sizes: set each split ratio to leftLeaves/totalLeaves */
+export function equalizeSplits(root: LayoutNode): LayoutNode {
+  if (root.type === "pane-group") return root;
+  const leftLeaves = countLeaves(root.children[0]);
+  const totalLeaves = leftLeaves + countLeaves(root.children[1]);
+  return {
+    ...root,
+    ratio: leftLeaves / totalLeaves,
+    children: [
+      equalizeSplits(root.children[0]),
+      equalizeSplits(root.children[1]),
+    ],
+  };
+}
