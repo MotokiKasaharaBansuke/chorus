@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { sanitizeHref, escapeHtml } from "./message-bubble";
+import { sanitizeHref, escapeHtml } from "../../lib/format/html";
 
 describe("sanitizeHref", () => {
   it("blocks javascript: protocol", () => {

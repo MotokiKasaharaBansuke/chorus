@@ -1,5 +1,6 @@
-import { For, Show, createMemo, Index } from "solid-js";
+import { For, Show, createMemo, createSignal, Index } from "solid-js";
 import type { ChatMessage, ChatBlock } from "../../types";
+import { escapeHtml, sanitizeHref, highlightDiffLine } from "../../lib/format/html";
 import styles from "./chat-panel.module.css";
 
 interface MessageBubbleProps {
@@ -38,7 +39,7 @@ function renderMarkdown(text: string) {
 
 function flushTable(tableLines: string[]): string {
   const rows = tableLines
-    .map(line => line.split("|").slice(1, -1).map(c => escapeHtml(c.trim())))
+    .map(line => line.split("|").slice(1, -1).map(c => c.trim())) // already escaped
     .filter(row => !row.every(c => /^[-: ]+$/.test(c)));
   if (rows.length === 0) return "";
   const [headers, ...data] = rows;
@@ -72,7 +73,7 @@ function formatInline(text: string): string {
     // Table row
     if (line.match(/^\|/)) {
       flushList();
-      tableLines.push(rawLine); // raw (unescaped) for re-parsing
+      tableLines.push(line); // use escaped line to prevent XSS
       continue;
     }
     flushTableBlock();
@@ -133,23 +134,7 @@ function formatInline(text: string): string {
   return result.join("");
 }
 
-/** Sanitize href: block dangerous protocols */
-export function sanitizeHref(url: string): string {
-  const trimmed = url.trim().toLowerCase();
-  if (trimmed.startsWith("javascript:") || trimmed.startsWith("data:") || trimmed.startsWith("vbscript:")) {
-    return "#";
-  }
-  return url.replace(/"/g, "&quot;");
-}
-
-/** Escape HTML entities */
-export function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
+// escapeHtml, sanitizeHref, highlightDiffLine imported from lib/format/html
 
 function applyInline(text: string): string {
   return text
@@ -181,12 +166,24 @@ function parseEditInput(input: string): EditInput | null {
   } catch { return null; }
 }
 
-function EditDiffView(props: { edit: EditInput }) {
+function EditDiffView(props: { edit: EditInput; result?: { isError: boolean; output: string } }) {
   const oldLines = () => props.edit.oldStr ? props.edit.oldStr.split("\n") : [];
   const newLines = () => props.edit.newStr ? props.edit.newStr.split("\n") : [];
   const fileName = () => {
     const parts = props.edit.filePath.split("/");
     return parts[parts.length - 1] ?? props.edit.filePath;
+  };
+
+  const diffText = () => {
+    const removed = oldLines().map(l => `- ${l}`).join("\n");
+    const added = newLines().map(l => `+ ${l}`).join("\n");
+    return [removed, added].filter(Boolean).join("\n");
+  };
+
+  const statusLabel = () => {
+    if (props.result?.isError) return "Edit failed";
+    if (props.result) return "Modified";
+    return "";
   };
 
   return (
@@ -200,16 +197,35 @@ function EditDiffView(props: { edit: EditInput }) {
           <span class={styles.editBadgeRemoved}>-{oldLines().length}</span>
         </Show>
       </div>
-      <pre class={styles.editDiffPre}>
+      <Show when={statusLabel()}>
+        <div class={styles.editStatus}>{statusLabel()}</div>
+      </Show>
+      <pre
+        class={styles.editDiffPre}
+        onClick={() => openContentAsTab(`Edit ${fileName()}`, diffText())}
+      >
         <Index each={oldLines()}>
-          {(line) => <div class={styles.diffRemoved}>- {line()}</div>}
+          {(line) => <div class={styles.diffRemoved}><span class={styles.diffSign}>-</span><span innerHTML={highlightDiffLine(line())} /></div>}
         </Index>
         <Index each={newLines()}>
-          {(line) => <div class={styles.diffAdded}>+ {line()}</div>}
+          {(line) => <div class={styles.diffAdded}><span class={styles.diffSign}>+</span><span innerHTML={highlightDiffLine(line())} /></div>}
         </Index>
       </pre>
     </>
   );
+}
+
+/** Dispatch event to open content as a read-only tab (handled by App.tsx) */
+function openContentAsTab(title: string, content: string) {
+  window.dispatchEvent(new CustomEvent("mlm-open-content", {
+    detail: { title, content },
+  }));
+}
+
+
+function truncate(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return text.slice(0, maxLen) + "…";
 }
 
 function isDiff(text: string): boolean {
@@ -308,7 +324,10 @@ function ToolUseBlock(props: {
               <Show when={inputDisplay()}>
                 <div class={styles.toolBodyRow}>
                   <div class={styles.toolLabel}>IN</div>
-                  <pre class={styles.toolValue}>{inputDisplay()}</pre>
+                  <pre
+                    class={styles.toolValue}
+                    onClick={() => openContentAsTab(`${props.block.toolName} — Input`, inputDisplay() ?? "")}
+                  >{inputDisplay()}</pre>
                 </div>
               </Show>
               <Show when={props.result}>
@@ -318,7 +337,10 @@ function ToolUseBlock(props: {
                       {r().isError ? "ERR" : "OUT"}
                     </div>
                     <Show when={!r().isError && isDiff(r().output)} fallback={
-                      <pre class={styles.toolValue}>{r().output}</pre>
+                      <pre
+                        class={styles.toolValue}
+                        onClick={() => openContentAsTab(`${props.block.toolName} — Output`, r().output)}
+                      >{r().output}</pre>
                     }>
                       <DiffOutput text={r().output} />
                     </Show>
@@ -327,7 +349,7 @@ function ToolUseBlock(props: {
               </Show>
             </div>
           }>
-            {(edit) => <EditDiffView edit={edit()} />}
+            {(edit) => <EditDiffView edit={edit()} result={props.result ?? undefined} />}
           </Show>
         </div>
       </div>
