@@ -16,6 +16,7 @@ import { TopBar } from "./components/top-bar/top-bar";
 import { useBottomTerminal } from "./hooks/use-bottom-terminal";
 import { useKeyboardShortcuts } from "./hooks/use-keyboard-shortcuts";
 import { useResizeHandle } from "./hooks/use-resize-handle";
+import { effectivePtyId } from "./types";
 import type { CliConfig, CliMode, Tab } from "./types";
 import chorusIcon from "./assets/chorus-icon.png";
 import "./App.css";
@@ -170,14 +171,14 @@ function App() {
   async function handleCloseTab(id: string) {
     const tab = tabStore.getTab(id);
     if (tab?.cliConfig.cliType !== "file-viewer") {
-      try { await killPty(id); } catch { /* */ }
+      try { await killPty(tab ? effectivePtyId(tab) : id); } catch { /* */ }
     }
     tabStore.closeTab(id);
   }
 
   async function handleRestartTab(tab: Tab) {
     if (tab.cliConfig.cliType === "file-viewer") return;
-    try { await killPty(tab.id); } catch {}
+    try { await killPty(effectivePtyId(tab)); } catch {}
     tabStore.closeTab(tab.id);
     await handleNewTab(tab.cliConfig);
   }
@@ -190,6 +191,30 @@ function App() {
     const tab: Tab = { id, title: fileName, status: "completed", cliConfig: { cliType: "file-viewer", mode: "default", workingDir: "" }, filePath: path };
     tabStore.openTab(tab);
   }
+
+  // Open tool output content as a read-only tab
+  function handleContentOpen(title: string, content: string) {
+    const id = `content-${Date.now()}`;
+    const tab: Tab = {
+      id,
+      title,
+      status: "completed",
+      cliConfig: { cliType: "file-viewer", mode: "default", workingDir: "" },
+      filePath: id, // unique key
+      contentOverride: content,
+    };
+    tabStore.openTab(tab);
+  }
+
+  // Listen for content-open events from message bubbles
+  const contentOpenHandler = (e: Event) => {
+    const detail = (e as CustomEvent).detail;
+    if (detail?.title && detail?.content) {
+      handleContentOpen(detail.title, detail.content);
+    }
+  };
+  window.addEventListener("mlm-open-content", contentOpenHandler);
+  onCleanup(() => window.removeEventListener("mlm-open-content", contentOpenHandler));
 
   async function quickLaunch(cliType: "claude-code" | "codex") {
     const config: CliConfig = { cliType, mode: quickLaunchMode(), workingDir: sidebarStore.workingDir || "~" };

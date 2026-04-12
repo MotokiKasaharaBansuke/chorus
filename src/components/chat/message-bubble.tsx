@@ -1,5 +1,7 @@
-import { For, Show, createMemo, Index } from "solid-js";
+import { For, Show, createMemo, createSignal, Index } from "solid-js";
 import type { ChatMessage, ChatBlock } from "../../types";
+import { escapeHtml, sanitizeHref, highlightDiffLine } from "../../lib/format/html";
+import { formatInline } from "../../lib/format/markdown";
 import styles from "./chat-panel.module.css";
 
 interface MessageBubbleProps {
@@ -29,127 +31,16 @@ function renderMarkdown(text: string) {
               </div>
             );
           }
-          return <span innerHTML={formatInline(part)} />;
+          return <span innerHTML={formatInline(part, applyInline, styles)} />;
         }}
       </For>
     </div>
   );
 }
 
-function flushTable(tableLines: string[]): string {
-  const rows = tableLines
-    .map(line => line.split("|").slice(1, -1).map(c => escapeHtml(c.trim())))
-    .filter(row => !row.every(c => /^[-: ]+$/.test(c)));
-  if (rows.length === 0) return "";
-  const [headers, ...data] = rows;
-  const ths = (headers ?? []).map(h => `<th>${applyInline(h)}</th>`).join("");
-  const trs = data.map(row =>
-    `<tr>${row.map(cell => `<td>${applyInline(cell)}</td>`).join("")}</tr>`
-  ).join("");
-  return `<table class="${styles.mdTable}"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
-}
+// flushTable moved to lib/format/markdown.ts
 
-function formatInline(text: string): string {
-  const lines = text.split("\n");
-  const result: string[] = [];
-  let inList = false;
-  let tableLines: string[] = [];
-
-  const flushList = () => { if (inList) { result.push("</ul>"); inList = false; } };
-  const flushTableBlock = () => {
-    if (tableLines.length > 0) {
-      result.push(flushTable(tableLines));
-      tableLines = [];
-    }
-  };
-
-  for (const rawLine of lines) {
-    const line = rawLine
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-
-    // Table row
-    if (line.match(/^\|/)) {
-      flushList();
-      tableLines.push(rawLine); // raw (unescaped) for re-parsing
-      continue;
-    }
-    flushTableBlock();
-
-    // Headings
-    const h3Match = line.match(/^### (.+)/);
-    if (h3Match) {
-      flushList();
-      result.push(`<h4 class="${styles.mdH3}">${applyInline(h3Match[1])}</h4>`);
-      continue;
-    }
-    const h2Match = line.match(/^## (.+)/);
-    if (h2Match) {
-      flushList();
-      result.push(`<h3 class="${styles.mdH2}">${applyInline(h2Match[1])}</h3>`);
-      continue;
-    }
-    const h1Match = line.match(/^# (.+)/);
-    if (h1Match) {
-      flushList();
-      result.push(`<h2 class="${styles.mdH1}">${applyInline(h1Match[1])}</h2>`);
-      continue;
-    }
-
-    // Horizontal rule
-    if (line.match(/^---+$/)) {
-      flushList();
-      result.push(`<hr class="${styles.mdHr}"/>`);
-      continue;
-    }
-
-    // Unordered list
-    const liMatch = line.match(/^[-*] (.+)/);
-    if (liMatch) {
-      if (!inList) { result.push(`<ul class="${styles.mdList}">`); inList = true; }
-      result.push(`<li>${applyInline(liMatch[1])}</li>`);
-      continue;
-    }
-
-    if (inList && line.trim() === "") {
-      flushList();
-      result.push("<br/>");
-      continue;
-    }
-    if (inList) flushList();
-
-    if (line.trim() === "") {
-      result.push("<br/>");
-      continue;
-    }
-
-    result.push(applyInline(line));
-    result.push("<br/>");
-  }
-
-  flushList();
-  flushTableBlock();
-  return result.join("");
-}
-
-/** Sanitize href: block dangerous protocols */
-export function sanitizeHref(url: string): string {
-  const trimmed = url.trim().toLowerCase();
-  if (trimmed.startsWith("javascript:") || trimmed.startsWith("data:") || trimmed.startsWith("vbscript:")) {
-    return "#";
-  }
-  return url.replace(/"/g, "&quot;");
-}
-
-/** Escape HTML entities */
-export function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
+// formatInline moved to lib/format/markdown.ts
 
 function applyInline(text: string): string {
   return text
@@ -159,6 +50,93 @@ function applyInline(text: string): string {
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) =>
       `<a class="${styles.mdLink}" href="${sanitizeHref(url)}">${label}</a>`
     );
+}
+
+// --- Edit tool helpers ---
+
+const EDIT_TOOL_NAMES = new Set(["Edit", "str_replace_editor", "EditFile", "MultiEdit"]);
+
+interface EditInput { filePath: string; oldStr: string; newStr: string }
+
+function parseEditInput(input: string): EditInput | null {
+  try {
+    const obj = JSON.parse(input) as Record<string, unknown>;
+    const filePath = typeof (obj.file_path ?? obj.path) === "string"
+      ? (obj.file_path ?? obj.path) as string : "";
+    const oldStr = typeof (obj.old_string ?? obj.oldText ?? obj.old_str) === "string"
+      ? (obj.old_string ?? obj.oldText ?? obj.old_str) as string : "";
+    const newStr = typeof (obj.new_string ?? obj.newText ?? obj.new_str) === "string"
+      ? (obj.new_string ?? obj.newText ?? obj.new_str) as string : "";
+    if (!filePath) return null;
+    return { filePath, oldStr, newStr };
+  } catch { return null; }
+}
+
+function EditDiffView(props: { edit: EditInput; result?: { isError: boolean; output: string } }) {
+  const oldLines = () => props.edit.oldStr ? props.edit.oldStr.split("\n") : [];
+  const newLines = () => props.edit.newStr ? props.edit.newStr.split("\n") : [];
+  const fileName = () => {
+    const parts = props.edit.filePath.split("/");
+    return parts[parts.length - 1] ?? props.edit.filePath;
+  };
+
+  const diffText = () => {
+    const removed = oldLines().map(l => `- ${l}`).join("\n");
+    const added = newLines().map(l => `+ ${l}`).join("\n");
+    return [removed, added].filter(Boolean).join("\n");
+  };
+
+  const statusLabel = () => {
+    if (props.result?.isError) return "Edit failed";
+    if (props.result) return "Modified";
+    return "";
+  };
+
+  return (
+    <>
+      <div class={styles.editDiffHeader}>
+        <span class={styles.editFileName}>{fileName()}</span>
+        <Show when={newLines().length > 0}>
+          <span class={styles.editBadgeAdded}>+{newLines().length}</span>
+        </Show>
+        <Show when={oldLines().length > 0}>
+          <span class={styles.editBadgeRemoved}>-{oldLines().length}</span>
+        </Show>
+      </div>
+      <Show when={statusLabel()}>
+        <div class={styles.editStatus}>{statusLabel()}</div>
+      </Show>
+      <pre
+        class={styles.editDiffPre}
+        onClick={() => openContentAsTab(`Edit ${fileName()}`, diffText())}
+      >
+        <Index each={oldLines()}>
+          {(line) => <div class={styles.diffRemoved}><span class={styles.diffSign}>-</span><span innerHTML={highlightDiffLine(line())} /></div>}
+        </Index>
+        <Index each={newLines()}>
+          {(line) => <div class={styles.diffAdded}><span class={styles.diffSign}>+</span><span innerHTML={highlightDiffLine(line())} /></div>}
+        </Index>
+      </pre>
+    </>
+  );
+}
+
+/** Dispatch event to open content as a read-only tab (handled by App.tsx) */
+function openContentAsTab(title: string, content: string) {
+  window.dispatchEvent(new CustomEvent("mlm-open-content", {
+    detail: { title, content },
+  }));
+}
+
+
+/** Text short enough to show without fade mask (~3 lines) */
+function isShortText(text: string): boolean {
+  return text.length < 150 && text.split("\n").length <= 3;
+}
+
+function truncate(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return text.slice(0, maxLen) + "…";
 }
 
 function isDiff(text: string): boolean {
@@ -217,17 +195,36 @@ function ToolUseBlock(props: {
     } catch { return ""; }
   });
 
-  const inputDisplay = createMemo(() => {
+  const editInput = createMemo(() =>
+    EDIT_TOOL_NAMES.has(props.block.toolName) ? parseEditInput(props.block.input) : null
+  );
+
+  const isTodoWrite = () => props.block.toolName === "TodoWrite";
+
+  const todoItems = createMemo(() => {
+    if (!isTodoWrite()) return null;
     try {
-      const obj = JSON.parse(props.block.input);
-      if (obj.command) return obj.command;
-      if (obj.file_path) {
-        let s = obj.file_path as string;
-        if (obj.offset) s += ` (lines ${obj.offset}-${(obj.offset as number) + (obj.limit ?? 100)})`;
+      const obj = JSON.parse(props.block.input) as Record<string, unknown>;
+      if (!Array.isArray(obj.todos)) return null;
+      return (obj.todos as Array<Record<string, unknown>>).map(t => ({
+        content: typeof t.content === "string" ? t.content : "",
+        status: typeof t.status === "string" ? t.status : "pending",
+      }));
+    } catch { return null; }
+  });
+
+  const inputDisplay = createMemo(() => {
+    if (isTodoWrite()) return null; // Rendered separately as checklist
+    try {
+      const obj = JSON.parse(props.block.input) as Record<string, unknown>;
+      if (typeof obj.command === "string") return obj.command;
+      if (typeof obj.file_path === "string") {
+        let s = obj.file_path;
+        if (typeof obj.offset === "number") s += ` (lines ${obj.offset}-${obj.offset + ((obj.limit as number) ?? 100)})`;
         return s;
       }
-      if (obj.pattern) return obj.pattern;
-      if (obj.path) return obj.path;
+      if (typeof obj.pattern === "string") return obj.pattern;
+      if (typeof obj.path === "string") return obj.path;
       return props.block.input;
     } catch { return props.block.input; }
   });
@@ -237,7 +234,7 @@ function ToolUseBlock(props: {
       <div class={styles.toolContent}>
         <div class={styles.toolHeader}>
           <span class={styles.toolName}>{props.block.toolName}</span>
-          <Show when={description()}>
+          <Show when={!editInput() && description()}>
             <span class={styles.toolDesc}>{description()}</span>
           </Show>
           <Show when={props.block.isStreaming}>
@@ -248,28 +245,62 @@ function ToolUseBlock(props: {
           </Show>
         </div>
         <div class={styles.toolBlock}>
-          <div class={styles.toolBodyGrid}>
-            <Show when={inputDisplay()}>
-              <div class={styles.toolBodyRow}>
-                <div class={styles.toolLabel}>IN</div>
-                <pre class={styles.toolValue}>{inputDisplay()}</pre>
+          <Show when={todoItems()}>
+            {(items) => (
+              <div style={{ padding: "6px 10px" }}>
+                <For each={items()}>
+                  {(item) => {
+                    const done = item.status === "completed";
+                    const inProgress = item.status === "in_progress";
+                    return (
+                      <div style={{ display: "flex", "align-items": "baseline", gap: "6px", padding: "1px 0", "font-size": "11px" }}>
+                        <span style={{ color: done ? "#666" : inProgress ? "#58a6ff" : "#555", "font-size": "10px", "flex-shrink": "0" }}>
+                          {done ? "✓" : inProgress ? "●" : "○"}
+                        </span>
+                        <span style={{ color: done ? "#666" : "#aaa", "text-decoration": done ? "line-through" : "none" }}>
+                          {item.content}
+                        </span>
+                      </div>
+                    );
+                  }}
+                </For>
               </div>
-            </Show>
-            <Show when={props.result}>
-              {(r) => (
-                <div class={`${styles.toolBodyRow} ${r().isError ? styles.toolSectionError : ""}`}>
-                  <div class={`${styles.toolLabel} ${r().isError ? styles.toolLabelError : ""}`}>
-                    {r().isError ? "ERR" : "OUT"}
-                  </div>
-                  <Show when={!r().isError && isDiff(r().output)} fallback={
-                    <pre class={styles.toolValue}>{r().output}</pre>
-                  }>
-                    <DiffOutput text={r().output} />
-                  </Show>
+            )}
+          </Show>
+          <Show when={!isTodoWrite()}>
+          <Show when={editInput()} fallback={
+            <div class={styles.toolBodyGrid}>
+              <Show when={inputDisplay()}>
+                <div class={styles.toolBodyRow}>
+                  <div class={styles.toolLabel}>IN</div>
+                  <pre
+                    class={isShortText(inputDisplay() ?? "") ? styles.toolValueShort : styles.toolValue}
+                    onClick={() => openContentAsTab(`${props.block.toolName} — Input`, inputDisplay() ?? "")}
+                  >{inputDisplay()}</pre>
                 </div>
-              )}
-            </Show>
-          </div>
+              </Show>
+              <Show when={props.result}>
+                {(r) => (
+                  <div class={`${styles.toolBodyRow} ${r().isError ? styles.toolSectionError : ""}`}>
+                    <div class={`${styles.toolLabel} ${r().isError ? styles.toolLabelError : ""}`}>
+                      {r().isError ? "ERR" : "OUT"}
+                    </div>
+                    <Show when={!r().isError && isDiff(r().output)} fallback={
+                      <pre
+                        class={isShortText(r().output) ? styles.toolValueShort : styles.toolValue}
+                        onClick={() => openContentAsTab(`${props.block.toolName} — Output`, r().output)}
+                      >{r().output}</pre>
+                    }>
+                      <DiffOutput text={r().output} />
+                    </Show>
+                  </div>
+                )}
+              </Show>
+            </div>
+          }>
+            {(edit) => <EditDiffView edit={edit()} result={props.result ?? undefined} />}
+          </Show>
+          </Show>
         </div>
       </div>
     </div>
@@ -339,19 +370,22 @@ export function MessageBubble(props: MessageBubbleProps) {
             <div class={styles.meta}>
               {msg().inputTokens && `${msg().inputTokens} in`}
               {msg().outputTokens && ` → ${msg().outputTokens} out`}
-              {msg().costUsd && ` · $${msg().costUsd!.toFixed(4)}`}
-              {msg().durationMs && ` · ${(msg().durationMs! / 1000).toFixed(1)}s`}
+              {msg().costUsd && ` · $${(msg().costUsd ?? 0).toFixed(4)}`}
+              {msg().durationMs && ` · ${((msg().durationMs ?? 0) / 1000).toFixed(1)}s`}
             </div>
           </Show>
         </div>
       </Show>
 
       <Show when={msg().role === "system"}>
-        <div class={styles.systemMsg}>
-          <For each={msg().blocks}>
-            {(block) => block.kind === "text" ? <span>{block.text}</span> : null}
-          </For>
-        </div>
+        <For each={msg().blocks}>
+          {(block) => block.kind === "stderr"
+            ? <div class={styles.interrupted}>{block.text}</div>
+            : block.kind === "text"
+            ? <div class={styles.systemMsg}><span>{block.text}</span></div>
+            : null
+          }
+        </For>
       </Show>
     </div>
   );

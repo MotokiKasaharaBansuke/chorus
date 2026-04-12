@@ -153,4 +153,38 @@ describe("useTabStore", () => {
       dispose();
     });
   });
+
+  it("updatePtyId sets ptyId on existing tab", () => {
+    createRoot((dispose) => {
+      const store = useTabStore();
+      store.openTab(makeTab("t1"));
+      expect(store.getTab("t1")?.ptyId).toBeUndefined();
+      store.updatePtyId("t1", "pty-new-123");
+      expect(store.getTab("t1")?.ptyId).toBe("pty-new-123");
+      dispose();
+    });
+  });
+
+  it("updatePtyId on non-existent tab does nothing", () => {
+    createRoot((dispose) => {
+      const store = useTabStore();
+      store.updatePtyId("nonexistent", "pty-123");
+      expect(store.getTab("nonexistent")).toBeUndefined();
+      dispose();
+    });
+  });
+
+  it("updatePtyId preserves tab identity (id unchanged)", () => {
+    createRoot((dispose) => {
+      const store = useTabStore();
+      store.openTab(makeTab("t1"));
+      store.updatePtyId("t1", "pty-new");
+      const tab = store.getTab("t1");
+      expect(tab?.id).toBe("t1");
+      expect(tab?.ptyId).toBe("pty-new");
+      // Tab is still accessible by original id
+      expect(store.tabs).toHaveLength(1);
+      dispose();
+    });
+  });
 });

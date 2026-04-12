@@ -196,6 +196,11 @@ export function useTabStore() {
       updateTab(id, (tab) => { tab.cliConfig.model = model; });
     },
 
+    /** Update PTY ID for a tab (used when re-spawning PTY for restored sessions) */
+    updatePtyId(tabId: string, ptyId: string) {
+      updateTab(tabId, (tab) => { tab.ptyId = ptyId; });
+    },
+
     /** Get all pane groups (for rendering) */
     getAllGroups(): import("../types").PaneGroupNode[] {
       if (!store.layout) return [];

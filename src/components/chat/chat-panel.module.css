@@ -3,7 +3,7 @@
 /* === Messages === */
 .messages {
   flex: 1; overflow-y: auto; overflow-x: hidden;
-  display: flex; flex-direction: column; gap: 0; padding: 20px 20px 40px;
+  display: flex; flex-direction: column; gap: 0; padding: 12px 16px 32px;
   min-height: 0; /* critical for flex scroll */
 }
 
@@ -30,7 +30,7 @@
 .pastSessionDate { color: #555; font-size: 11px; flex-shrink: 0; margin-left: 8px; }
 
 /* === Roles === */
-.message { max-width: 100%; padding: 8px 0; position: relative; }
+.message { max-width: 100%; padding: 4px 0; position: relative; }
 .user { text-align: left; align-items: flex-start; }
 .assistant { display: flex; flex-direction: column; }
 .system { display: flex; justify-content: center; }
@@ -46,9 +46,9 @@
 /* ======== Timeline layout (matching Claude Code extension) ======== */
 .timelineRow {
   position: relative;
-  padding-left: 30px;
-  padding-top: 4px;
-  padding-bottom: 4px;
+  padding-left: 24px;
+  padding-top: 3px;
+  padding-bottom: 3px;
 }
 
 /* Dot */
@@ -56,8 +56,8 @@
   content: "";
   position: absolute;
   border-radius: 50%;
-  width: 7px; height: 7px;
-  top: 12px; left: 9px;
+  width: 6px; height: 6px;
+  top: 10px; left: 7px;
   z-index: 1;
   background-color: #555;
 }
@@ -67,8 +67,8 @@
   content: "";
   position: absolute;
   width: 1px;
-  top: 0; bottom: 0; left: 12px;
-  background-color: #333;
+  top: 0; bottom: 0; left: 9px;
+  background-color: #2d2d2d;
 }
 
 /* First timeline row: no line above dot */
@@ -113,28 +113,29 @@
 .markdown strong { color: #e0e0e0; font-weight: 600; }
 .markdown em { font-style: italic; color: #bbb; }
 
-.mdH1 { font-size: 1.4em; font-weight: 600; color: #e0e0e0; margin: 16px 0 8px; line-height: 1.3; }
-.mdH2 { font-size: 1.2em; font-weight: 600; color: #e0e0e0; margin: 14px 0 6px; line-height: 1.3; }
-.mdH3 { font-size: 1.05em; font-weight: 600; color: #ddd; margin: 12px 0 4px; line-height: 1.3; }
+.mdH1 { font-size: 1.3em; font-weight: 600; color: #ddd; margin: 12px 0 6px; line-height: 1.3; }
+.mdH2 { font-size: 1.1em; font-weight: 600; color: #ddd; margin: 10px 0 4px; line-height: 1.3; }
+.mdH3 { font-size: 1em; font-weight: 600; color: #ccc; margin: 8px 0 3px; line-height: 1.3; }
 
 .mdHr { border: none; border-top: 1px solid #333; margin: 12px 0; }
 
-.mdTable { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 13px; }
+.mdTable { border-collapse: collapse; width: 100%; margin: 6px 0; font-size: 11px; }
 .mdTable th {
-  background: #252525; color: #ccc; font-weight: 600;
-  padding: 6px 12px; border: 1px solid #3a3a3a; text-align: left;
+  background: #1f1f1f; color: #aaa; font-weight: 600; font-size: 10px;
+  padding: 4px 10px; border-bottom: 1px solid #333; text-align: left;
+  text-transform: uppercase; letter-spacing: 0.03em;
 }
 .mdTable td {
-  color: #bbb; padding: 5px 12px; border: 1px solid #2e2e2e;
+  color: #bbb; padding: 4px 10px; border-bottom: 1px solid #252525;
 }
-.mdTable tr:nth-child(even) td { background: #1e1e1e; }
+.mdTable tr:hover td { background: #1e1e1e; }
 
 .mdList {
-  margin: 4px 0 4px 6px; padding-left: 16px; list-style: disc;
-  color: #ccc; line-height: 1.6;
+  margin: 3px 0 3px 4px; padding-left: 14px; list-style: disc;
+  color: #bbb; line-height: 1.5;
 }
-.mdList li { margin: 2px 0; }
-.mdList li::marker { color: #555; }
+.mdList li { margin: 1px 0; }
+.mdList li::marker { color: #444; }
 
 .mdLink { color: #58a6ff; text-decoration: none; }
 .mdLink:hover { text-decoration: underline; }
@@ -144,9 +145,9 @@
 }
 
 /* === Code block === */
-.codeBlock { background: #111; border: 1px solid #262626; border-radius: 8px; margin: 6px 0; overflow: hidden; }
-.codeLang { padding: 4px 12px; font-size: 11px; color: #555; border-bottom: 1px solid #262626; font-family: var(--mono, 'SF Mono', monospace); }
-.codeContent { padding: 10px 14px; margin: 0; overflow-x: auto; font-family: var(--mono, 'SF Mono', monospace); font-size: 12px; line-height: 1.5; color: #ccc; }
+.codeBlock { background: #111; border: 1px solid #252525; border-radius: 5px; margin: 4px 0; overflow: hidden; }
+.codeLang { padding: 3px 10px; font-size: 10px; color: #555; border-bottom: 1px solid #252525; font-family: var(--mono, 'SF Mono', monospace); }
+.codeContent { padding: 6px 10px; margin: 0; overflow-x: auto; font-family: var(--mono, 'SF Mono', monospace); font-size: 11px; line-height: 1.45; color: #ccc; }
 
 /* === Thinking === */
 .thinking { width: 100%; }
@@ -169,19 +170,20 @@
 /* ======== Tool block (Cursor grid layout) ======== */
 .toolContent { width: 100%; }
 .toolHeader {
-  display: flex; align-items: center; gap: 4px; padding: 0 0 4px;
+  display: flex; align-items: center; gap: 4px; padding: 0 0 2px;
 }
 .toolName {
-  font-size: 13px; font-weight: 700; color: #ccc; margin-right: 4px;
+  font-size: 11px; font-weight: 600; color: #bbb; margin-right: 2px;
 }
 .toolDesc {
   font-family: var(--mono, 'SF Mono', monospace); color: #58a6ff;
-  word-break: break-all; overflow-wrap: anywhere; font-size: 12px;
+  word-break: break-all; overflow-wrap: anywhere; font-size: 10px;
+  opacity: 0.8;
 }
 
 .toolBlock {
-  border: 0.5px solid #333; background: #161616; border-radius: 5px;
-  margin: 0 0 2px; font-size: 13px; overflow: hidden;
+  border: 0.5px solid #2a2a2a; background: #151515; border-radius: 4px;
+  margin: 2px 0; font-size: 11px; overflow: hidden;
 }
 
 /* Grid layout for IN/OUT rows */
@@ -195,19 +197,34 @@
 .toolBodyRow:first-child { border-top: none; }
 
 .toolLabel {
-  grid-column: 1; color: #888; text-align: left; opacity: 0.5;
-  font-family: var(--mono, 'SF Mono', monospace); padding: 4px 8px 4px 4px; font-size: 0.85em;
+  grid-column: 1; color: #666; text-align: left; opacity: 0.5;
+  font-family: var(--mono, 'SF Mono', monospace); padding: 3px 6px 3px 4px; font-size: 0.8em;
 }
 .toolLabelError { color: #c74e39; opacity: 1; }
 
+/* Clipped content (extension style: fade after ~3 lines) */
 .toolValue {
   grid-column: 2; white-space: pre-wrap; word-break: break-word;
-  margin: 0; padding: 4px; font-family: var(--mono, 'SF Mono', monospace);
-  font-size: 0.85em; line-height: 1.5; color: #aaa;
-  max-height: 200px; overflow-y: auto;
+  margin: 0; padding: 3px; font-family: var(--mono, 'SF Mono', monospace);
+  font-size: 0.8em; line-height: 1.4; color: #999;
+  max-height: 60px; overflow: hidden;
+  mask-image: linear-gradient(to bottom, #fff 38px, transparent 58px);
+  -webkit-mask-image: linear-gradient(to bottom, #fff 38px, transparent 58px);
+  cursor: pointer;
 }
+.toolValue:hover { color: #bbb; }
 
-.toolSectionError .toolValue { color: #c74e39; }
+/* Short output: no fade (less than ~3 lines) */
+.toolValueShort {
+  grid-column: 2; white-space: pre-wrap; word-break: break-word;
+  margin: 0; padding: 3px; font-family: var(--mono, 'SF Mono', monospace);
+  font-size: 0.8em; line-height: 1.4; color: #999;
+  cursor: pointer;
+}
+.toolValueShort:hover { color: #bbb; }
+
+.toolSectionError .toolValue,
+.toolSectionError .toolValueExpanded { color: #c74e39; }
 
 /* === Diff output === */
 .diffPre {
@@ -215,8 +232,9 @@
   font-family: var(--mono, 'SF Mono', monospace); font-size: 12px;
   line-height: 1.5; overflow-x: auto; width: 100%;
 }
-.diffAdded  { background: rgba(70, 130, 70, 0.25); color: #8ecf7c; padding: 0 6px; display: block; white-space: pre; }
-.diffRemoved { background: rgba(160, 60, 60, 0.25); color: #e07070; padding: 0 6px; display: block; white-space: pre; }
+.diffAdded  { background: rgba(70, 130, 70, 0.15); color: #ccc; padding: 0 4px; display: block; white-space: pre; }
+.diffRemoved { background: rgba(160, 60, 60, 0.15); color: #999; padding: 0 4px; display: block; white-space: pre; }
+.diffSign { display: inline-block; width: 14px; text-align: center; opacity: 0.4; user-select: none; font-size: 10px; }
 .diffHunk   { color: #6b9bce; padding: 0 6px; display: block; white-space: pre; }
 .diffMeta   { color: #888; padding: 0 6px; display: block; white-space: pre; }
 .diffCtx    { color: #777; padding: 0 6px; display: block; white-space: pre; }
@@ -230,6 +248,30 @@
   font-size: 12px; line-height: 1.5; color: #aaa; white-space: pre-wrap; word-break: break-all;
   max-height: 200px; overflow-y: auto;
 }
+
+/* === Edit tool diff === */
+.editDiffHeader {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 8px; border-bottom: 0.5px solid #2a2a2a;
+  font-family: var(--mono, 'SF Mono', monospace); font-size: 11px;
+}
+.editFileName { color: #ccc; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editBadgeAdded   { color: #74c991; background: rgba(70,130,70,0.15); border-radius: 3px; padding: 1px 5px; font-size: 10px; flex-shrink: 0; }
+.editBadgeRemoved { color: #c74e39; background: rgba(160,60,60,0.15); border-radius: 3px; padding: 1px 5px; font-size: 10px; flex-shrink: 0; }
+.editStatus {
+  font-size: 10px; color: #666; padding: 1px 8px; font-style: italic;
+}
+
+.editDiffPre {
+  margin: 0; padding: 2px 0;
+  font-family: var(--mono, 'SF Mono', monospace); font-size: 11px;
+  line-height: 1.35; overflow-x: auto; width: 100%;
+  max-height: 72px; overflow: hidden;
+  mask-image: linear-gradient(to bottom, #fff 45px, transparent 72px);
+  -webkit-mask-image: linear-gradient(to bottom, #fff 45px, transparent 72px);
+  cursor: pointer;
+}
+.editDiffPre:hover { background: rgba(255,255,255,0.02); }
 
 /* Tool annotation badge */
 .toolAnnotation {

@@ -1,12 +1,12 @@
 import { createSignal, For, Show } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { deleteTempImage } from "../../lib/commands";
 import { SlashMenu, getFiltered } from "./slash-menu";
 import { useTabStore } from "../../stores/tab-store";
 import type { CliType, CliMode } from "../../types";
 import styles from "./chat-panel.module.css";
 
 const CLAUDE_MODES: CliMode[] = ["default", "plan", "dangerously-skip-permissions"];
+const MAX_INPUT_HISTORY = 200;
 const CODEX_MODES: CliMode[] = ["default", "dangerously-skip-permissions"];
 const MODE_LABELS: Record<CliMode, string> = {
   default: "Default",
@@ -30,6 +30,7 @@ interface ChatInputProps {
   onSubmit: (text: string) => void;
   onSlashCommand: (id: string) => void;
   onPaste: (e: ClipboardEvent) => void;
+  onInterrupt: () => void;
   inputHistory: string[];
 }
 
@@ -42,7 +43,7 @@ export function ChatInput(props: ChatInputProps) {
   const [slashIdx, setSlashIdx] = createSignal(0);
   const [previewImage, setPreviewImage] = createSignal<string | null>(null);
 
-  let compositionJustEnded = false;
+  let isCompositionJustEnded = false;
   let historyIdx = -1;
   let draftBeforeHistory = "";
   let textareaRef: HTMLTextAreaElement | undefined;
@@ -54,10 +55,17 @@ export function ChatInput(props: ChatInputProps) {
 
   const modes = () => props.cliType === "claude-code" ? CLAUDE_MODES : CODEX_MODES;
 
+  function cycleMode() {
+    const available = modes();
+    const nextMode = available[(available.indexOf(props.mode) + 1) % available.length];
+    store.updateMode(props.tabId, nextMode);
+  }
+
   function handleSubmit() {
     const text = inputText().trim();
     if (!text) return;
     props.inputHistory.unshift(text);
+    if (props.inputHistory.length > MAX_INPUT_HISTORY) props.inputHistory.length = MAX_INPUT_HISTORY;
     historyIdx = -1;
     draftBeforeHistory = "";
     props.onSubmit(text);
@@ -72,48 +80,52 @@ export function ChatInput(props: ChatInputProps) {
     props.onSlashCommand(id);
   }
 
-  function handleKeyDown(e: KeyboardEvent) {
-    if (isComposing() || compositionJustEnded) return;
+  /** Returns true if the key was handled by the slash menu. */
+  function handleSlashMenuKey(e: KeyboardEvent): boolean {
+    const items = getFiltered(slashFilter(), props.cliType);
+    if (e.key === "ArrowDown") { e.preventDefault(); setSlashIdx(Math.min(slashIdx() + 1, items.length - 1)); return true; }
+    if (e.key === "ArrowUp") { e.preventDefault(); setSlashIdx(Math.max(slashIdx() - 1, 0)); return true; }
+    if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); const item = items[slashIdx()]; if (item) selectSlashCommand(item.id); return true; }
+    if (e.key === "Escape") { e.preventDefault(); setShowSlash(false); setInputText(""); return true; }
+    return false;
+  }
 
-    if (showSlash()) {
-      const items = getFiltered(slashFilter(), props.cliType);
-      if (e.key === "ArrowDown") { e.preventDefault(); setSlashIdx(Math.min(slashIdx() + 1, items.length - 1)); return; }
-      if (e.key === "ArrowUp") { e.preventDefault(); setSlashIdx(Math.max(slashIdx() - 1, 0)); return; }
-      if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); const item = items[slashIdx()]; if (item) selectSlashCommand(item.id); return; }
-      if (e.key === "Escape") { e.preventDefault(); setShowSlash(false); setInputText(""); return; }
-    }
-
-    if (e.key === "ArrowUp" && !e.shiftKey) {
-      if (props.inputHistory.length === 0) return;
+  /** Returns true if the key was handled by input history navigation. */
+  function handleHistoryKey(e: KeyboardEvent): boolean {
+    if (e.key === "ArrowUp" && !e.shiftKey && props.inputHistory.length > 0) {
       e.preventDefault();
       if (historyIdx === -1) draftBeforeHistory = inputText();
       if (historyIdx < props.inputHistory.length - 1) { historyIdx++; setInputText(props.inputHistory[historyIdx]); }
-      return;
+      return true;
     }
-    if (e.key === "ArrowDown" && !e.shiftKey) {
-      if (historyIdx < 0) return;
+    if (e.key === "ArrowDown" && !e.shiftKey && historyIdx >= 0) {
       e.preventDefault();
       historyIdx--;
       setInputText(historyIdx >= 0 ? props.inputHistory[historyIdx] : draftBeforeHistory);
-      return;
+      return true;
     }
+    return false;
+  }
 
+  function handleKeyDown(e: KeyboardEvent) {
+    if (isComposing() || isCompositionJustEnded) return;
+    if (e.key === "Escape" && props.isStreaming) { e.preventDefault(); props.onInterrupt(); return; }
+    if (showSlash() && handleSlashMenuKey(e)) return;
+    if (handleHistoryKey(e)) return;
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSubmit(); }
-    if (e.key === "Tab" && e.shiftKey) {
-      e.preventDefault();
-      const m = modes();
-      const idx = m.indexOf(props.mode);
-      const next = m[(idx + 1) % m.length];
-      store.updateMode(props.tabId, next);
-    }
+    if (e.key === "Tab" && e.shiftKey) { e.preventDefault(); cycleMode(); }
   }
 
   return (
-    <div class={`${styles.inputWrapper} ${
-      props.mode === "dangerously-skip-permissions" ? styles.inputWrapperDanger
-      : props.mode === "plan" ? styles.inputWrapperPlan
-      : ""
-    } ${props.isStreaming ? styles.inputWrapperStreaming : ""}`} style={{ position: "relative" }}>
+    <div
+      class={styles.inputWrapper}
+      classList={{
+        [styles.inputWrapperDanger]: props.mode === "dangerously-skip-permissions",
+        [styles.inputWrapperPlan]: props.mode === "plan",
+        [styles.inputWrapperStreaming]: props.isStreaming,
+      }}
+      style={{ position: "relative" }}
+    >
       <Show when={showSlash()}>
         <SlashMenu filter={slashFilter()} selectedIdx={slashIdx()} onSelect={selectSlashCommand} cliType={props.cliType} />
       </Show>
@@ -135,7 +147,6 @@ export function ChatInput(props: ChatInputProps) {
                 <img src={convertFileSrc(img.path)} alt={img.name} class={styles.thumbnailImg} />
                 <button class={styles.thumbnailRemove} onClick={(e) => {
                   e.stopPropagation();
-                  deleteTempImage(img.path).catch(() => {});
                   props.onRemoveImage(idx());
                 }}>×</button>
               </div>
@@ -157,7 +168,7 @@ export function ChatInput(props: ChatInputProps) {
         onKeyDown={handleKeyDown}
         onPaste={props.onPaste}
         onCompositionStart={() => setIsComposing(true)}
-        onCompositionEnd={() => { setIsComposing(false); compositionJustEnded = true; setTimeout(() => { compositionJustEnded = false; }, 50); }}
+        onCompositionEnd={() => { setIsComposing(false); isCompositionJustEnded = true; setTimeout(() => { isCompositionJustEnded = false; }, 50); }}
         placeholder="Type a message…"
         rows={1}
       />
@@ -165,17 +176,13 @@ export function ChatInput(props: ChatInputProps) {
         <div class={styles.inputLeft}>
           <span class={styles.modeChevron}>»</span>
           <span
-            class={`${styles.modeBadge} ${
-              props.mode === "dangerously-skip-permissions" ? styles.modeDanger
-              : props.mode === "plan" ? styles.modePlan
-              : styles.modeDefault
-            }`}
-            onClick={() => {
-              const m = modes();
-              const idx = m.indexOf(props.mode);
-              const next = m[(idx + 1) % m.length];
-              store.updateMode(props.tabId, next);
+            class={styles.modeBadge}
+            classList={{
+              [styles.modeDanger]: props.mode === "dangerously-skip-permissions",
+              [styles.modePlan]: props.mode === "plan",
+              [styles.modeDefault]: props.mode === "default",
             }}
+            onClick={cycleMode}
             title="Shift+Tab to cycle"
           >
             {MODE_LABELS[props.mode]}
@@ -191,11 +198,11 @@ export function ChatInput(props: ChatInputProps) {
             if (!inputText().startsWith("/")) setInputText("/");
           }}>/</span>
           <button
-            class={`${styles.sendBtn} ${
-              props.mode === "dangerously-skip-permissions" ? styles.sendBtnDanger
-              : props.mode === "plan" ? styles.sendBtnPlan
-              : ""
-            }`}
+            class={styles.sendBtn}
+            classList={{
+              [styles.sendBtnDanger]: props.mode === "dangerously-skip-permissions",
+              [styles.sendBtnPlan]: props.mode === "plan",
+            }}
             onClick={handleSubmit}
             disabled={!inputText().trim()}
           >

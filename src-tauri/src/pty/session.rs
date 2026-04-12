@@ -1,5 +1,6 @@
 use portable_pty::{CommandBuilder, NativePtySystem, PtyPair, PtySize, PtySystem};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter};
 use serde::Serialize;
@@ -46,7 +47,9 @@ impl PtySession {
         let mut cmd = CommandBuilder::new(command);
         for arg in args { cmd.arg(arg); }
         cmd.cwd(working_dir);
-        for (key, value) in std::env::vars() { cmd.env(key, value); }
+        for (key, value) in std::env::vars() {
+            if !is_sensitive_env_key(&key) { cmd.env(key, value); }
+        }
         cmd.env("TERM", "xterm-256color");
 
         let child = pair.slave.spawn_command(cmd)
@@ -139,6 +142,8 @@ impl StreamSession {
                 // base_args already starts with ["exec", ...flags]
                 args.push("--json".into());
                 args.push("--skip-git-repo-check".into());
+                // "--" prevents message content from being parsed as CLI flags
+                args.push("--".into());
                 args.push(message.into());
             }
             CliType::Shell => unreachable!("Shell does not use stream sessions"),
@@ -171,16 +176,19 @@ impl StreamSession {
         cmd.stderr(Stdio::piped());
 
         // Ensure PATH includes common binary locations
-        let home = std::env::var("HOME").unwrap_or_default();
-        let extra_paths = format!(
-            "{}/.local/bin:{}/.volta/bin:{}/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin",
-            home, home, home
-        );
         let current_path = std::env::var("PATH").unwrap_or_default();
+        let extra_paths = if let Ok(home) = std::env::var("HOME") {
+            format!(
+                "{home}/.local/bin:{home}/.volta/bin:{home}/.npm-global/bin:/usr/local/bin:/opt/homebrew/bin"
+            )
+        } else {
+            tracing::warn!("HOME env var not set; skipping user-local path entries");
+            "/usr/local/bin:/opt/homebrew/bin".to_string()
+        };
         cmd.env("PATH", format!("{extra_paths}:{current_path}"));
 
         for (key, value) in std::env::vars() {
-            if key != "PATH" {
+            if key != "PATH" && !is_sensitive_env_key(&key) {
                 cmd.env(&key, &value);
             }
         }
@@ -190,48 +198,56 @@ impl StreamSession {
             CliType::Codex => "Codex",
             CliType::Shell => "Shell",
         };
+        // Log without message content to avoid storing user prompts in logs
         tracing::info!(
             command = %self.command,
-            args = ?args,
             cwd = %self.working_dir,
             "Spawning {cli_label} process",
         );
 
-        // Use temp files to capture output (avoids pipe buffering issues with macOS sandbox)
-        let stdout_path = std::env::temp_dir().join(format!("mlm-stdout-{}.jsonl", pane_id));
-        let stderr_path = std::env::temp_dir().join(format!("mlm-stderr-{}.log", pane_id));
+        // Isolate the child in its own process group so kill(-pid) targets only its group
+        cmd.process_group(0);
 
-        let stdout_file = std::fs::File::create(&stdout_path)
-            .map_err(|e| AppError::PtySpawnFailed(format!("Cannot create stdout file: {e}")))?;
-        let stderr_file = std::fs::File::create(&stderr_path)
-            .map_err(|e| AppError::PtySpawnFailed(format!("Cannot create stderr file: {e}")))?;
-
-        cmd.stdout(stdout_file);
-        cmd.stderr(stderr_file);
-
-        let child = cmd.spawn()
+        let mut child = cmd.spawn()
             .map_err(|e| {
                 tracing::error!(error = %e, "Failed to spawn process");
+                // Release the lock so future send_message calls are not permanently blocked
+                *self.is_running.lock() = false;
                 AppError::PtySpawnFailed(e.to_string())
             })?;
 
         // Store PID for kill()
         *self.child_pid.lock() = Some(child.id());
 
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => {
+                let _ = child.kill();
+                *self.is_running.lock() = false;
+                return Err(AppError::PtySpawnFailed("stdout handle unavailable".into()));
+            }
+        };
+        let stderr = match child.stderr.take() {
+            Some(s) => s,
+            None => {
+                let _ = child.kill();
+                *self.is_running.lock() = false;
+                return Err(AppError::PtySpawnFailed("stderr handle unavailable".into()));
+            }
+        };
+
         let stream_id = pane_id.to_string();
         let app_clone = app.clone();
         let is_running = self.is_running.clone();
-        let stdout_path_clone = stdout_path.clone();
-        let stderr_path_clone = stderr_path.clone();
         let cli_type = self.cli_type;
 
         std::thread::spawn(move || {
             match cli_type {
                 CliType::ClaudeCode => {
-                    Self::poll_stream_json(child, &stream_id, &app_clone, &stdout_path_clone, &stderr_path_clone, &is_running);
+                    Self::read_stream_json(child, stdout, stderr, &stream_id, &app_clone, &is_running);
                 }
                 CliType::Codex => {
-                    Self::poll_codex_jsonl(child, &stream_id, &app_clone, &stdout_path_clone, &stderr_path_clone, &is_running);
+                    Self::read_codex_jsonl(child, stdout, stderr, &stream_id, &app_clone, &is_running);
                 }
                 CliType::Shell => unreachable!(),
             }
@@ -240,178 +256,90 @@ impl StreamSession {
         Ok(())
     }
 
-    /// Poll output for Claude Code (NDJSON stream-json format — emit lines as-is)
-    fn poll_stream_json(
-        child: std::process::Child,
+    /// Stream Claude Code NDJSON output line by line from piped stdout.
+    /// Blocks until each line arrives — no polling, no temp files, no sleep.
+    fn read_stream_json(
+        mut child: std::process::Child,
+        stdout: std::process::ChildStdout,
+        stderr: std::process::ChildStderr,
         stream_id: &str,
         app: &AppHandle,
-        stdout_path: &std::path::Path,
-        stderr_path: &std::path::Path,
         is_running: &std::sync::Arc<parking_lot::Mutex<bool>>,
     ) {
-        use std::io::{Seek, SeekFrom};
+        spawn_stderr_logger(stderr, "Claude Code");
 
-        let mut child = child;
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
-        let mut stdout_reader = match std::fs::File::open(stdout_path) {
-            Ok(f) => BufReader::new(f),
-            Err(e) => {
-                tracing::error!(error = %e, "Cannot open stdout file");
-                *is_running.lock() = false;
-                return;
-            }
-        };
-
-        let mut last_pos: u64 = 0;
-
-        loop {
-            if let Ok(metadata) = std::fs::metadata(stdout_path) {
-                let current_size = metadata.len();
-                if current_size > last_pos {
-                    let _ = stdout_reader.seek(SeekFrom::Start(last_pos));
-                    for line in stdout_reader.by_ref().lines() {
-                        match line {
-                            Ok(l) if !l.is_empty() => {
-                                let _ = app.emit("stream-event", StreamEventPayload {
-                                    id: stream_id.to_string(),
-                                    data: l,
-                                });
-                            }
-                            Err(_) => break,
-                            _ => {}
-                        }
-                    }
-                    if let Ok(pos) = stdout_reader.seek(SeekFrom::Current(0)) {
-                        last_pos = pos;
-                    }
-                }
-            }
-
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                    Self::flush_remaining(&mut stdout_reader, &mut last_pos, stdout_path, stream_id, app);
-
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(l) if !l.is_empty() => {
                     let _ = app.emit("stream-event", StreamEventPayload {
                         id: stream_id.to_string(),
-                        data: serde_json::json!({
-                            "type": "turn_complete",
-                            "exit_code": status.code(),
-                        }).to_string(),
+                        data: l,
                     });
-
-                    Self::log_and_cleanup_stderr(stderr_path);
-                    let _ = std::fs::remove_file(stdout_path);
-                    *is_running.lock() = false;
-                    return;
                 }
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                Err(_) => { *is_running.lock() = false; return; }
+                Err(_) => break,
+                _ => {}
             }
         }
-    }
 
-    /// Poll JSONL output from `codex exec --json` and translate events to ChatPanel format.
-    ///
-    /// Codex JSONL events (ThreadEvent):
-    ///   thread.started → system.init
-    ///   turn.started   → (ignored, init already sent)
-    ///   item.started / item.completed → assistant message / tool_use / tool_result
-    ///   turn.completed → result + turn_complete
-    ///
-    /// Each JSONL line is parsed; known events are translated to Claude Code-compatible
-    /// stream-events. Unknown lines are forwarded as-is so the frontend can handle them.
-    fn poll_codex_jsonl(
-        child: std::process::Child,
-        stream_id: &str,
-        app: &AppHandle,
-        stdout_path: &std::path::Path,
-        stderr_path: &std::path::Path,
-        is_running: &std::sync::Arc<parking_lot::Mutex<bool>>,
-    ) {
-        use std::io::{Seek, SeekFrom};
-
-        let mut child = child;
-
-        // Emit init so ChatPanel shows the spinner immediately
+        let exit_code = child.wait().ok().and_then(|s| s.code());
         let _ = app.emit("stream-event", StreamEventPayload {
             id: stream_id.to_string(),
-            data: serde_json::json!({ "type": "system", "subtype": "init" }).to_string(),
+            data: serde_json::json!({
+                "type": "turn_complete",
+                "exit_code": exit_code,
+            }).to_string(),
         });
-
-        std::thread::sleep(std::time::Duration::from_millis(300));
-
-        let mut stdout_reader = match std::fs::File::open(stdout_path) {
-            Ok(f) => BufReader::new(f),
-            Err(e) => {
-                tracing::error!(error = %e, "Cannot open stdout file");
-                *is_running.lock() = false;
-                return;
-            }
-        };
-
-        let mut last_pos: u64 = 0;
-
-        loop {
-            if let Ok(metadata) = std::fs::metadata(stdout_path) {
-                let current_size = metadata.len();
-                if current_size > last_pos {
-                    let _ = stdout_reader.seek(SeekFrom::Start(last_pos));
-                    for line in stdout_reader.by_ref().lines() {
-                        match line {
-                            Ok(l) if !l.is_empty() => {
-                                Self::translate_codex_line(&l, stream_id, app);
-                            }
-                            Err(_) => break,
-                            _ => {}
-                        }
-                    }
-                    if let Ok(pos) = stdout_reader.seek(SeekFrom::Current(0)) {
-                        last_pos = pos;
-                    }
-                }
-            }
-
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                    // Flush remaining lines with Codex translation
-                    Self::flush_remaining_translated(&mut stdout_reader, &mut last_pos, stdout_path, stream_id, app);
-
-                    // Ensure turn_complete is emitted even if Codex didn't send one
-                    let _ = app.emit("stream-event", StreamEventPayload {
-                        id: stream_id.to_string(),
-                        data: serde_json::json!({ "type": "result" }).to_string(),
-                    });
-                    let _ = app.emit("stream-event", StreamEventPayload {
-                        id: stream_id.to_string(),
-                        data: serde_json::json!({
-                            "type": "turn_complete",
-                            "exit_code": status.code(),
-                        }).to_string(),
-                    });
-
-                    Self::log_and_cleanup_stderr(stderr_path);
-                    let _ = std::fs::remove_file(stdout_path);
-                    *is_running.lock() = false;
-                    return;
-                }
-                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                Err(_) => { *is_running.lock() = false; return; }
-            }
-        }
+        *is_running.lock() = false;
     }
 
-    /// Translate a single Codex JSONL line into a Claude Code-compatible stream-event.
+    /// Stream Codex JSONL output line by line from piped stdout, translating events.
+    /// Blocks until each line arrives — no polling, no temp files, no sleep.
     ///
-    /// Actual Codex exec --json output format (verified):
+    /// Codex exec --json output format (verified):
     ///   {"type":"thread.started","thread_id":"..."}
     ///   {"type":"turn.started"}
     ///   {"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"..."}}
     ///   {"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"..."}}
     ///   {"type":"item.completed","item":{"id":"...","type":"function_call","name":"shell",...}}
     ///   {"type":"turn.completed","usage":{"input_tokens":N,"output_tokens":N,...}}
+    fn read_codex_jsonl(
+        mut child: std::process::Child,
+        stdout: std::process::ChildStdout,
+        stderr: std::process::ChildStderr,
+        stream_id: &str,
+        app: &AppHandle,
+        is_running: &std::sync::Arc<parking_lot::Mutex<bool>>,
+    ) {
+        // Emit init so ChatPanel shows the spinner immediately (before any output arrives)
+        let _ = app.emit("stream-event", StreamEventPayload {
+            id: stream_id.to_string(),
+            data: serde_json::json!({ "type": "system", "subtype": "init" }).to_string(),
+        });
+
+        spawn_stderr_logger(stderr, "Codex");
+
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(l) if !l.is_empty() => Self::translate_codex_line(&l, stream_id, app),
+                Err(_) => break,
+                _ => {}
+            }
+        }
+
+        let _ = child.wait();
+        // Ensure result + turn_complete is emitted even if Codex didn't send turn.completed
+        let _ = app.emit("stream-event", StreamEventPayload {
+            id: stream_id.to_string(),
+            data: serde_json::json!({ "type": "result" }).to_string(),
+        });
+        let _ = app.emit("stream-event", StreamEventPayload {
+            id: stream_id.to_string(),
+            data: serde_json::json!({ "type": "turn_complete" }).to_string(),
+        });
+        *is_running.lock() = false;
+    }
+
+    /// Translate a single Codex JSONL line into a Claude Code-compatible stream-event.
     fn translate_codex_line(line: &str, stream_id: &str, app: &AppHandle) {
         let obj: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
@@ -526,82 +454,147 @@ impl StreamSession {
         });
     }
 
-    /// Flush remaining lines from stdout file (for stream-json poller)
-    fn flush_remaining(
-        reader: &mut BufReader<std::fs::File>,
-        last_pos: &mut u64,
-        stdout_path: &std::path::Path,
-        stream_id: &str,
-        app: &AppHandle,
-    ) {
-        use std::io::{Seek, SeekFrom};
-        if let Ok(metadata) = std::fs::metadata(stdout_path) {
-            if metadata.len() > *last_pos {
-                let _ = reader.seek(SeekFrom::Start(*last_pos));
-                for line in reader.by_ref().lines() {
-                    if let Ok(l) = line {
-                        if !l.is_empty() {
-                            let _ = app.emit("stream-event", StreamEventPayload {
-                                id: stream_id.to_string(),
-                                data: l,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Flush remaining lines from stdout file (for Codex JSONL poller — translates each line)
-    fn flush_remaining_translated(
-        reader: &mut BufReader<std::fs::File>,
-        last_pos: &mut u64,
-        stdout_path: &std::path::Path,
-        stream_id: &str,
-        app: &AppHandle,
-    ) {
-        use std::io::{Seek, SeekFrom};
-        if let Ok(metadata) = std::fs::metadata(stdout_path) {
-            if metadata.len() > *last_pos {
-                let _ = reader.seek(SeekFrom::Start(*last_pos));
-                for line in reader.by_ref().lines() {
-                    if let Ok(l) = line {
-                        if !l.is_empty() {
-                            Self::translate_codex_line(&l, stream_id, app);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Log stderr content and remove the file
-    fn log_and_cleanup_stderr(stderr_path: &std::path::Path) {
-        if let Ok(err_content) = std::fs::read_to_string(stderr_path) {
-            for line in err_content.lines() {
-                if !line.is_empty() {
-                    tracing::warn!(stderr = %line, "Process stderr");
-                }
-            }
-        }
-        let _ = std::fs::remove_file(stderr_path);
-    }
-
     pub fn kill(&self) {
         if let Some(pid) = self.child_pid.lock().take() {
-            // Send SIGTERM to the process group
-            unsafe {
-                libc::kill(-(pid as i32), libc::SIGTERM);
+            match i32::try_from(pid) {
+                Ok(pid_i32) if pid_i32 > 0 => {
+                    // Send SIGTERM to the process group (negative PID)
+                    unsafe { libc::kill(-pid_i32, libc::SIGTERM); }
+                    tracing::info!(pid, "Sent SIGTERM to child process group");
+                    // Escalate to SIGKILL if the process does not exit within 3 seconds.
+                    // Signal 0 checks whether the process group still exists before sending SIGKILL,
+                    // preventing a kill of an unrelated process that recycled the same PID.
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        if unsafe { libc::kill(-pid_i32, 0) } == 0 {
+                            unsafe { libc::kill(-pid_i32, libc::SIGKILL); }
+                        }
+                    });
+                }
+                _ => tracing::warn!(pid, "Cannot kill process: PID out of i32 range"),
             }
             *self.is_running.lock() = false;
-            tracing::info!(pid, "Killed child process");
         }
     }
-}
 
-// Re-export for use by is_running
-impl StreamSession {
     pub fn is_busy(&self) -> bool {
         *self.is_running.lock()
     }
+}
+
+/// Returns true for env keys that should not be forwarded to child CLI processes.
+///
+/// Uses a suffix-based blocklist. AI coding assistants need `ANTHROPIC_API_KEY`,
+/// `OPENAI_API_KEY`, `GITHUB_TOKEN`, and similar vars to function, so those are
+/// intentionally allowed through. Only block credentials unrelated to their
+/// operation (DB passwords, private keys, connection strings, etc.).
+///
+/// Note: `_SECRET_KEY` is blocked to catch compound credentials like
+/// `STRIPE_SECRET_KEY` that would slip through a plain `_SECRET` suffix check.
+fn is_sensitive_env_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    upper.ends_with("_PASSWORD")
+        || upper.ends_with("_PASSWD")
+        || upper.ends_with("_SECRET")
+        || upper.ends_with("_SECRET_KEY")
+        || upper.ends_with("_PRIVATE_KEY")
+        || upper.ends_with("_DSN")
+        || upper.ends_with("_CONNECTION_STRING")
+        || upper == "AWS_SECRET_ACCESS_KEY"
+        || upper == "AWS_SESSION_TOKEN"
+        || upper == "DATABASE_URL"
+        || upper == "POSTGRES_URL"
+        || upper == "MYSQL_URL"
+        || upper == "REDIS_URL"
+        || upper == "MONGODB_URI"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_sensitive_env_key;
+
+    #[test]
+    fn blocks_password_suffix() {
+        assert!(is_sensitive_env_key("DB_PASSWORD"));
+        assert!(is_sensitive_env_key("db_password"));
+        assert!(is_sensitive_env_key("MY_APP_PASSWD"));
+    }
+
+    #[test]
+    fn blocks_secret_suffix() {
+        assert!(is_sensitive_env_key("APP_SECRET"));
+        assert!(is_sensitive_env_key("STRIPE_SECRET"));
+    }
+
+    #[test]
+    fn blocks_secret_key_compound_suffix() {
+        // STRIPE_SECRET_KEY ends with _SECRET_KEY, not _SECRET alone
+        assert!(is_sensitive_env_key("STRIPE_SECRET_KEY"));
+        assert!(is_sensitive_env_key("JWT_SECRET_KEY"));
+    }
+
+    #[test]
+    fn blocks_private_key_suffix() {
+        assert!(is_sensitive_env_key("SSL_PRIVATE_KEY"));
+        assert!(is_sensitive_env_key("RSA_PRIVATE_KEY"));
+    }
+
+    #[test]
+    fn blocks_dsn_suffix() {
+        assert!(is_sensitive_env_key("SENTRY_DSN"));
+        assert!(is_sensitive_env_key("APP_DSN"));
+    }
+
+    #[test]
+    fn blocks_connection_string_suffix() {
+        assert!(is_sensitive_env_key("DB_CONNECTION_STRING"));
+    }
+
+    #[test]
+    fn blocks_exact_aws_credentials() {
+        assert!(is_sensitive_env_key("AWS_SECRET_ACCESS_KEY"));
+        assert!(is_sensitive_env_key("AWS_SESSION_TOKEN"));
+    }
+
+    #[test]
+    fn blocks_database_urls() {
+        assert!(is_sensitive_env_key("DATABASE_URL"));
+        assert!(is_sensitive_env_key("POSTGRES_URL"));
+        assert!(is_sensitive_env_key("MYSQL_URL"));
+        assert!(is_sensitive_env_key("REDIS_URL"));
+        assert!(is_sensitive_env_key("MONGODB_URI"));
+    }
+
+    #[test]
+    fn allows_api_keys() {
+        assert!(!is_sensitive_env_key("ANTHROPIC_API_KEY"));
+        assert!(!is_sensitive_env_key("OPENAI_API_KEY"));
+        assert!(!is_sensitive_env_key("GITHUB_TOKEN"));
+    }
+
+    #[test]
+    fn allows_common_env_vars() {
+        assert!(!is_sensitive_env_key("PATH"));
+        assert!(!is_sensitive_env_key("HOME"));
+        assert!(!is_sensitive_env_key("USER"));
+        assert!(!is_sensitive_env_key("LANG"));
+    }
+
+    #[test]
+    fn case_insensitive_matching() {
+        assert!(is_sensitive_env_key("db_password"));
+        assert!(is_sensitive_env_key("Db_Password"));
+        assert!(!is_sensitive_env_key("anthropic_api_key"));
+    }
+}
+
+/// Spawn a thread that drains `stderr` and logs each non-empty line.
+fn spawn_stderr_logger(stderr: std::process::ChildStderr, label: &'static str) {
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().flatten() {
+            if !line.is_empty() {
+                tracing::warn!(stderr = %line, "{label} stderr");
+            }
+        }
+    });
 }

@@ -2,8 +2,8 @@ import { onCleanup, onMount } from "solid-js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { writePty, resizePty } from "../../lib/commands";
+import { ptyOutputDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
 import { detectStatus } from "../../lib/parsers/pty-output-parser";
 import type { CliType, TabStatus } from "../../types";
 
@@ -17,8 +17,8 @@ export function useTerminal(options: UseTerminalOptions) {
   let terminal: Terminal | null = null;
   let fitAddon: FitAddon | null = null;
   let webglAddon: WebglAddon | null = null;
-  let unlisten: UnlistenFn | null = null;
-  let exitUnlisten: UnlistenFn | null = null;
+  let unsubscribePtyOutput: (() => void) | null = null;
+  let unsubscribePtyExit: (() => void) | null = null;
   let observer: ResizeObserver | null = null;
   let zoomHandler: ((e: Event) => void) | null = null;
   const BASE_FONT_SIZE = 13;
@@ -52,7 +52,7 @@ export function useTerminal(options: UseTerminalOptions) {
         brightCyan: "#56d4dd",
         brightWhite: "#ffffff",
       },
-      scrollback: 10000,
+      scrollback: 1000,
       allowProposedApi: true,
     });
 
@@ -89,24 +89,19 @@ export function useTerminal(options: UseTerminalOptions) {
       }
     });
 
-    // Listen for PTY output
-    listen<{ id: string; data: string }>("pty-output", (event) => {
-      if (event.payload.id === options.ptyId && terminal) {
-        terminal.write(event.payload.data);
-        const status = detectStatus(event.payload.data, options.cliType);
-        if (status) {
-          options.onStatusChange(status);
-        }
-      }
-    }).then(fn => { unlisten = fn; });
+    // Subscribe to PTY output via global dispatcher (one Tauri listener per event type)
+    unsubscribePtyOutput = ptyOutputDispatcher.subscribe(options.ptyId, (payload) => {
+      if (!terminal) return;
+      terminal.write(payload.data);
+      const status = detectStatus(payload.data, options.cliType);
+      if (status) options.onStatusChange(status);
+    });
 
-    // Listen for PTY exit
-    listen<{ id: string; code: number | null }>("pty-exit", (event) => {
-      if (event.payload.id === options.ptyId) {
-        const code = event.payload.code;
-        options.onStatusChange(code === 0 || code === null ? "completed" : "error");
-      }
-    }).then(fn => { exitUnlisten = fn; });
+    // Subscribe to PTY exit via global dispatcher
+    unsubscribePtyExit = ptyExitDispatcher.subscribe(options.ptyId, (payload) => {
+      const code = payload.code;
+      options.onStatusChange(code === 0 || code === null ? "completed" : "error");
+    });
 
     // Observe container resize
     observer = new ResizeObserver(() => {
@@ -134,10 +129,10 @@ export function useTerminal(options: UseTerminalOptions) {
     }
     observer?.disconnect();
     observer = null;
-    unlisten?.();
-    unlisten = null;
-    exitUnlisten?.();
-    exitUnlisten = null;
+    unsubscribePtyOutput?.();
+    unsubscribePtyOutput = null;
+    unsubscribePtyExit?.();
+    unsubscribePtyExit = null;
     webglAddon?.dispose();
     webglAddon = null;
     fitAddon?.dispose();

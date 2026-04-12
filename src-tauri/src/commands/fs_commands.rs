@@ -19,7 +19,7 @@ fn validate_path_scope(path: &str) -> Result<std::path::PathBuf, AppError> {
     }
 
     // Block sensitive directories within home
-    let sensitive = [".ssh", ".gnupg", ".aws", ".config/gcloud"];
+    let sensitive = [".ssh", ".gnupg", ".aws", ".config/gcloud", ".kube", ".docker", ".npmrc", ".netrc", ".env"];
     for dir in &sensitive {
         if canonical.starts_with(canonical_home.join(dir)) {
             return Err(AppError::FileSystemError("Access denied: sensitive directory".into()));
@@ -180,11 +180,20 @@ pub fn read_session(working_dir: String, session_id: String) -> Result<Vec<Strin
         return Err(AppError::FileSystemError("Access denied: path outside allowed directory".into()));
     }
 
-    let content = std::fs::read_to_string(&canonical_path)
+    // Only return user/assistant lines to reduce IPC transfer size
+    // (Claude Code sessions can be 10-50MB with tool output, thinking, etc.)
+    let file = std::fs::File::open(&canonical_path)
         .map_err(|e| AppError::FileSystemError(format!("Cannot read session: {e}")))?;
+    let reader = BufReader::new(file);
 
-    Ok(content.lines()
-        .filter(|l| !l.is_empty())
+    Ok(reader.lines()
+        .flatten()
+        .filter(|l| {
+            if l.is_empty() { return false; }
+            // Quick check: only parse lines that look like user/assistant messages
+            l.contains("\"type\":\"user\"") || l.contains("\"type\":\"assistant\"")
+              || l.contains("\"type\":\"human\"")
+        })
         .map(|l| l.to_string())
         .collect())
 }
@@ -285,11 +294,14 @@ pub fn read_codex_session(session_path: String) -> Result<Vec<String>, AppError>
         return Err(AppError::FileSystemError("Access denied: path outside allowed directory".into()));
     }
 
-    let content = std::fs::read_to_string(&canonical_path)
+    // Only return event_msg lines (user_message / agent_message)
+    let file = std::fs::File::open(&canonical_path)
         .map_err(|e| AppError::FileSystemError(format!("Cannot read codex session: {e}")))?;
+    let reader = BufReader::new(file);
 
-    Ok(content.lines()
-        .filter(|l| !l.is_empty())
+    Ok(reader.lines()
+        .flatten()
+        .filter(|l| !l.is_empty() && l.contains("\"event_msg\""))
         .map(|l| l.to_string())
         .collect())
 }
