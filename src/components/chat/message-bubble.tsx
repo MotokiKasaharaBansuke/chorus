@@ -105,6 +105,17 @@ function formatInline(text: string): string {
       continue;
     }
 
+    // Checkbox list (- [x] done, - [ ] pending)
+    const cbMatch = line.match(/^[-*] \[([ xX✓✅])\] (.+)/);
+    if (cbMatch) {
+      if (!inList) { result.push(`<ul class="${styles.mdList}" style="list-style:none;padding-left:4px;">`); inList = true; }
+      const checked = cbMatch[1] !== " ";
+      const icon = checked ? "✅" : "☐";
+      const textStyle = checked ? 'style="text-decoration:line-through;opacity:0.6"' : "";
+      result.push(`<li><span style="margin-right:4px">${icon}</span><span ${textStyle}>${applyInline(cbMatch[2])}</span></li>`);
+      continue;
+    }
+
     // Unordered list
     const liMatch = line.match(/^[-*] (.+)/);
     if (liMatch) {
@@ -223,6 +234,11 @@ function openContentAsTab(title: string, content: string) {
 }
 
 
+/** Text short enough to show without fade mask (~3 lines) */
+function isShortText(text: string): boolean {
+  return text.length < 150 && text.split("\n").length <= 3;
+}
+
 function truncate(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
   return text.slice(0, maxLen) + "…";
@@ -325,7 +341,7 @@ function ToolUseBlock(props: {
                 <div class={styles.toolBodyRow}>
                   <div class={styles.toolLabel}>IN</div>
                   <pre
-                    class={styles.toolValue}
+                    class={isShortText(inputDisplay() ?? "") ? styles.toolValueShort : styles.toolValue}
                     onClick={() => openContentAsTab(`${props.block.toolName} — Input`, inputDisplay() ?? "")}
                   >{inputDisplay()}</pre>
                 </div>
@@ -338,7 +354,7 @@ function ToolUseBlock(props: {
                     </div>
                     <Show when={!r().isError && isDiff(r().output)} fallback={
                       <pre
-                        class={styles.toolValue}
+                        class={isShortText(r().output) ? styles.toolValueShort : styles.toolValue}
                         onClick={() => openContentAsTab(`${props.block.toolName} — Output`, r().output)}
                       >{r().output}</pre>
                     }>
