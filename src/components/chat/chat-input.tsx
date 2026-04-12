@@ -62,6 +62,7 @@ export function ChatInput(props: ChatInputProps) {
   }
 
   function handleSubmit() {
+    if (props.isStreaming) return;
     const text = inputText().trim();
     if (!text) return;
     props.inputHistory.unshift(text);
@@ -204,7 +205,7 @@ export function ChatInput(props: ChatInputProps) {
               [styles.sendBtnPlan]: props.mode === "plan",
             }}
             onClick={handleSubmit}
-            disabled={!inputText().trim()}
+            disabled={!inputText().trim() || props.isStreaming}
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
               <path d="M3 14l11-6L3 2v5l6 1-6 1v5z" fill="currentColor"/>
