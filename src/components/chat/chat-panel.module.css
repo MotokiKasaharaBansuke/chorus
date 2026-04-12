@@ -137,11 +137,11 @@
 .mdList li { margin: 1px 0; }
 .mdList li::marker { color: #444; }
 
-.mdLink { color: #58a6ff; text-decoration: none; }
+.mdLink { color: #58a6ff; text-decoration: none; word-break: break-all; cursor: pointer; }
 .mdLink:hover { text-decoration: underline; }
 .inlineCode {
-  background: #2a2a2a; padding: 1px 5px; border-radius: 3px;
-  font-family: var(--mono, 'SF Mono', 'Menlo', monospace); font-size: 12px; color: #e6b450;
+  background: #2a2a2a; padding: 1px 4px; border-radius: 3px;
+  font-family: var(--mono, 'SF Mono', 'Menlo', monospace); font-size: 0.9em; color: #e6b450;
 }
 
 /* === Code block === */
@@ -189,6 +189,8 @@
 /* Grid layout for IN/OUT rows */
 .toolBodyGrid {
   display: grid; grid-template-columns: max-content 1fr;
+  font-size: 10px;
+  font-family: var(--mono, 'SF Mono', monospace);
 }
 .toolBodyRow {
   grid-column: 1 / -1; display: grid; grid-template-columns: subgrid;
@@ -205,8 +207,9 @@
 /* Clipped content (extension style: fade after ~3 lines) */
 .toolValue {
   grid-column: 2; white-space: pre-wrap; word-break: break-word;
-  margin: 0; padding: 3px; font-family: var(--mono, 'SF Mono', monospace);
-  font-size: 0.8em; line-height: 1.4; color: #999;
+  margin: 0; padding: 3px;
+  font-family: var(--mono, 'SF Mono', monospace) !important;
+  font-size: 10px !important; line-height: 1.4; color: #999;
   max-height: 60px; overflow: hidden;
   mask-image: linear-gradient(to bottom, #fff 38px, transparent 58px);
   -webkit-mask-image: linear-gradient(to bottom, #fff 38px, transparent 58px);
@@ -217,8 +220,9 @@
 /* Short output: no fade (less than ~3 lines) */
 .toolValueShort {
   grid-column: 2; white-space: pre-wrap; word-break: break-word;
-  margin: 0; padding: 3px; font-family: var(--mono, 'SF Mono', monospace);
-  font-size: 0.8em; line-height: 1.4; color: #999;
+  margin: 0; padding: 3px;
+  font-family: var(--mono, 'SF Mono', monospace) !important;
+  font-size: 10px !important; line-height: 1.4; color: #999;
   cursor: pointer;
 }
 .toolValueShort:hover { color: #bbb; }
@@ -229,8 +233,8 @@
 /* === Diff output === */
 .diffPre {
   grid-column: 2; margin: 0; padding: 2px 0;
-  font-family: var(--mono, 'SF Mono', monospace); font-size: 12px;
-  line-height: 1.5; overflow-x: auto; width: 100%;
+  font-family: var(--mono, 'SF Mono', monospace); font-size: 10px;
+  line-height: 1.4; overflow-x: auto; width: 100%;
 }
 .diffAdded  { background: rgba(70, 130, 70, 0.15); color: #ccc; padding: 0 4px; display: block; white-space: pre; }
 .diffRemoved { background: rgba(160, 60, 60, 0.15); color: #999; padding: 0 4px; display: block; white-space: pre; }

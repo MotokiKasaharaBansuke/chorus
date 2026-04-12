@@ -1,11 +1,12 @@
 /** Sanitize href: block dangerous protocols and control characters */
 export function sanitizeHref(url: string): string {
-  // Strip control characters (U+0000-U+001F, U+007F) and zero-width chars before checking
-  const cleaned = url.replace(/[\x00-\x1f\x7f\u200b\u200c\u200d\ufeff]/g, "").trim().toLowerCase();
-  if (/^(javascript|data|vbscript):/i.test(cleaned)) {
+  // Strip control characters and zero-width chars
+  const stripped = url.replace(/[\x00-\x1f\x7f\u200b\u200c\u200d\ufeff]/g, "").trim();
+  if (/^(javascript|data|vbscript):/i.test(stripped.toLowerCase())) {
     return "#";
   }
-  return url.replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // Return stripped (control-char-free) value with HTML entity escaping
+  return stripped.replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 /** Escape HTML entities */
