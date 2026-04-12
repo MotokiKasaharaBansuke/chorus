@@ -38,18 +38,32 @@ function renderMarkdown(text: string) {
   );
 }
 
-// flushTable moved to lib/format/markdown.ts
 
-// formatInline moved to lib/format/markdown.ts
-
+/** Convert inline Markdown to HTML. Input must be HTML-escaped. */
 function applyInline(text: string): string {
-  return text
+  // Step 1: Replace Markdown links with placeholders to prevent auto-link from matching inside href
+  const placeholders: string[] = [];
+  let result = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) => {
+    const idx = placeholders.length;
+    placeholders.push(`<a class="${styles.mdLink}" href="${sanitizeHref(url)}" data-external-link="true">${label}</a>`);
+    return `\x00LINK${idx}\x00`;
+  });
+
+  // Step 2: Inline formatting
+  result = result
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/\*(.+?)\*/g, "<em>$1</em>")
-    .replace(/`([^`]+)`/g, `<code class="${styles.inlineCode}">$1</code>`)
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) =>
-      `<a class="${styles.mdLink}" href="${sanitizeHref(url)}">${label}</a>`
-    );
+    .replace(/`([^`]+)`/g, `<code class="${styles.inlineCode}">$1</code>`);
+
+  // Step 3: Auto-link bare URLs (safe — Markdown links already replaced with placeholders)
+  result = result.replace(/(https?:\/\/[^\s<>\x00]+)/g, (url) =>
+    `<a class="${styles.mdLink}" href="${sanitizeHref(url)}" data-external-link="true">${url}</a>`
+  );
+
+  // Step 4: Restore placeholders
+  result = result.replace(/\x00LINK(\d+)\x00/g, (_, idx) => placeholders[parseInt(idx, 10)] ?? "");
+
+  return result;
 }
 
 // --- Edit tool helpers ---
@@ -220,7 +234,7 @@ function ToolUseBlock(props: {
       if (typeof obj.command === "string") return obj.command;
       if (typeof obj.file_path === "string") {
         let s = obj.file_path;
-        if (typeof obj.offset === "number") s += ` (lines ${obj.offset}-${obj.offset + ((obj.limit as number) ?? 100)})`;
+        if (typeof obj.offset === "number") s += ` (lines ${obj.offset}-${obj.offset + (typeof obj.limit === "number" ? obj.limit : 100)})`;
         return s;
       }
       if (typeof obj.pattern === "string") return obj.pattern;

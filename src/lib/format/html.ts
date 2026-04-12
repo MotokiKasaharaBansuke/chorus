@@ -1,7 +1,8 @@
-/** Sanitize href: block dangerous protocols */
+/** Sanitize href: block dangerous protocols and control characters */
 export function sanitizeHref(url: string): string {
-  const trimmed = url.trim().toLowerCase();
-  if (trimmed.startsWith("javascript:") || trimmed.startsWith("data:") || trimmed.startsWith("vbscript:")) {
+  // Strip control characters (U+0000-U+001F, U+007F) and zero-width chars before checking
+  const cleaned = url.replace(/[\x00-\x1f\x7f\u200b\u200c\u200d\ufeff]/g, "").trim().toLowerCase();
+  if (/^(javascript|data|vbscript):/i.test(cleaned)) {
     return "#";
   }
   return url.replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
