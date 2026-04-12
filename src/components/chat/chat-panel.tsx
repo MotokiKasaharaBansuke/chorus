@@ -1,6 +1,6 @@
-import { createSignal, For, Show, onMount, onCleanup } from "solid-js";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { createSignal, createEffect, For, Show, onMount, onCleanup } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
 import { sendMessage as sendMessageCmd, killPty, spawnPty, saveTempImage, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, type SessionInfo } from "../../lib/commands";
 import { StreamParser } from "../../lib/stream-parser";
 import { MessageBubble } from "./message-bubble";
@@ -10,6 +10,7 @@ import { ChatInput } from "./chat-input";
 import { SessionPicker } from "./session-picker";
 import { ClawdIcon, CodexIcon } from "../icons";
 import type { Tab, ChatMessage } from "../../types";
+import { effectivePtyId } from "../../types";
 import { useTabStore } from "../../stores/tab-store";
 import styles from "./chat-panel.module.css";
 
@@ -21,7 +22,7 @@ interface ChatPanelProps {
 export function ChatPanel(props: ChatPanelProps) {
   const store = useTabStore();
   /** Effective PTY ID (differs from tab.id after PTY respawn) */
-  const ptyId = () => props.tab.ptyId ?? props.tab.id;
+  const ptyId = () => effectivePtyId(props.tab);
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = createSignal(false);
   const [attachedImages, setAttachedImages] = createSignal<Array<{ name: string; path: string }>>([]);
@@ -32,52 +33,45 @@ export function ChatPanel(props: ChatPanelProps) {
   const inputHistory: string[] = [];
   let scrollRef: HTMLDivElement | undefined;
   let containerRef: HTMLDivElement | undefined;
-  let unlisten: UnlistenFn | null = null;
-  let exitUnlisten: UnlistenFn | null = null;
   let imageDropHandler: ((e: Event) => void) | null = null;
   let dragStateHandler: ((e: Event) => void) | null = null;
   // On macOS, pasting a file triggers BOTH a Tauri drop event AND a DOM paste event.
   // The Tauri drop event fires FIRST, so we record when a drop was handled,
-  // then suppress the subsequent DOM paste if it arrives within 500ms.
+  // then suppress the subsequent DOM paste if it arrives within the dedup window.
+  const DROP_DEDUP_WINDOW_MS = 500;
   let dropHandledAt = 0;
 
   const parser = new StreamParser();
   parser.onUpdate((msgs) => {
     setMessages([...msgs]);
-    // Auto-scroll
     requestAnimationFrame(() => {
-      if (scrollRef) {
-        scrollRef.scrollTop = scrollRef.scrollHeight;
-      }
+      if (scrollRef) scrollRef.scrollTop = scrollRef.scrollHeight;
     });
-    // Status is managed by stream-event listener, not here
-    // (matches extension behavior: busy from init until result)
+  });
+  // Status transitions delegated to StreamParser (avoids re-parsing the same JSON line)
+  parser.onStatusChange((status) => {
+    setIsStreaming(status === "streaming");
+    store.updateStatus(props.tab.id, status === "streaming" ? "running" : "waiting");
+  });
+
+  // Reactive subscriptions — re-subscribe automatically when ptyId changes (e.g. after respawn)
+  createEffect(() => {
+    const id = ptyId();
+    const unsub = streamEventDispatcher.subscribe(id, (payload) => {
+      parser.processLine(payload.data);
+    });
+    onCleanup(unsub);
+  });
+
+  createEffect(() => {
+    const id = ptyId();
+    const unsub = ptyExitDispatcher.subscribe(id, (payload) => {
+      store.updateStatus(props.tab.id, payload.code === 0 ? "completed" : "error");
+    });
+    onCleanup(unsub);
   });
 
   onMount(async () => {
-    unlisten = await listen<{ id: string; data: string }>("stream-event", (event) => {
-      if (event.payload.id === ptyId()) {
-        parser.processLine(event.payload.data);
-        // Match extension: busy until "result" event
-        try {
-          const d = JSON.parse(event.payload.data);
-          if (d.type === "system" && d.subtype === "init") {
-            setIsStreaming(true);
-            store.updateStatus(props.tab.id, "running");
-          } else if (d.type === "result" || d.type === "turn_complete") {
-            setIsStreaming(false);
-            store.updateStatus(props.tab.id, "waiting");
-          }
-        } catch { /* ignore */ }
-      }
-    });
-
-    exitUnlisten = await listen<{ id: string; code: number | null }>("pty-exit", (event) => {
-      if (event.payload.id === ptyId()) {
-        store.updateStatus(props.tab.id, event.payload.code === 0 ? "completed" : "error");
-      }
-    });
-
     // Load past sessions
     try {
       if (props.tab.cliConfig.cliType === "claude-code") {
@@ -122,8 +116,6 @@ export function ChatPanel(props: ChatPanelProps) {
   });
 
   onCleanup(() => {
-    unlisten?.();
-    exitUnlisten?.();
     if (imageDropHandler) window.removeEventListener("mlm-image-drop", imageDropHandler);
     if (dragStateHandler) window.removeEventListener("mlm-drag-state", dragStateHandler);
   });
@@ -160,8 +152,8 @@ export function ChatPanel(props: ChatPanelProps) {
       } catch (retryError) {
         setIsStreaming(false);
         store.updateStatus(props.tab.id, "error");
-        const msg = retryError instanceof Error ? retryError.message : String(retryError);
-        parser.addUserMessage(`[Error: Failed to send message. ${msg}]`);
+        const errorMessage = retryError instanceof Error ? retryError.message : String(retryError);
+        parser.addUserMessage(`[Error: Failed to send message. ${errorMessage}]`);
         return false;
       }
     }
@@ -187,16 +179,47 @@ export function ChatPanel(props: ChatPanelProps) {
   }
 
   async function handleImageFile(file: File) {
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const base64 = typeof reader.result === "string" ? (reader.result.split(",")[1] ?? "") : "";
-      const ext = file.type.split("/")[1] ?? "png";
-      try {
-        const path = await saveTempImage(base64, ext);
-        setAttachedImages(prev => [...prev, { name: file.name, path }]);
-      } catch { /* ignore */ }
-    };
-    reader.readAsDataURL(file);
+    const WEB_SAFE = new Set(["png", "jpeg", "jpg", "gif", "webp"]);
+    const ext = (file.type.split("/")[1] ?? "png").toLowerCase();
+    const isWebSafe = WEB_SAFE.has(ext);
+
+    try {
+      let base64: string;
+      let saveExt: string;
+
+      if (isWebSafe) {
+        base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(
+            typeof reader.result === "string" ? (reader.result.split(",")[1] ?? "") : ""
+          );
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        saveExt = ext === "jpg" ? "jpeg" : ext;
+      } else {
+        // Convert TIFF / BMP / other non-web formats to PNG via canvas
+        base64 = await new Promise<string>((resolve, reject) => {
+          const url = URL.createObjectURL(file);
+          const img = new Image();
+          img.onload = () => {
+            URL.revokeObjectURL(url);
+            const canvas = document.createElement("canvas");
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            canvas.getContext("2d")?.drawImage(img, 0, 0);
+            resolve(canvas.toDataURL("image/png").split(",")[1] ?? "");
+          };
+          img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("load failed")); };
+          img.src = url;
+        });
+        saveExt = "png";
+      }
+
+      const path = await saveTempImage(base64, saveExt);
+      const name = file.name || `screenshot.${saveExt}`;
+      setAttachedImages(prev => [...prev, { name, path }]);
+    } catch { /* ignore */ }
   }
 
   function handlePaste(e: ClipboardEvent) {
@@ -209,82 +232,34 @@ export function ChatPanel(props: ChatPanelProps) {
     if (preferred) {
       e.preventDefault();
       // On macOS, pasting a file fires the Tauri drop event FIRST, then this paste event.
-      // If a drop was handled within the last 500ms, skip to avoid duplicating the image.
-      if (Date.now() - dropHandledAt < 500) return;
+      // If a drop was handled within the dedup window, skip to avoid duplicating the image.
+      if (Date.now() - dropHandledAt < DROP_DEDUP_WINDOW_MS) return;
       const file = preferred.getAsFile();
       if (file) handleImageFile(file);
     }
   }
 
+  const UI_COMMANDS: Record<string, () => void> = {
+    "clear-conversation": () => { setMessages([]); parser.loadSession([]); },
+    "attach-file": () => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/*";
+      input.multiple = true;
+      input.onchange = () => { if (input.files) Array.from(input.files).forEach(handleImageFile); };
+      input.click();
+    },
+    "resume-conversation": () => {
+      if (scrollRef) scrollRef.scrollTop = 0;
+      if (messages().length > 0) { setMessages([]); parser.loadSession([]); }
+    },
+    "model": () => setShowModelPicker(true),
+  };
+
   function selectSlashCommand(id: string) {
-
-    switch (id) {
-      // --- UI actions ---
-      case "clear-conversation":
-        setMessages([]);
-        parser.loadSession([]);
-        return;
-
-      case "attach-file": {
-        const input = document.createElement("input");
-        input.type = "file";
-        input.accept = "image/*";
-        input.multiple = true;
-        input.onchange = () => {
-          if (input.files) {
-            for (const file of Array.from(input.files)) {
-              handleImageFile(file);
-            }
-          }
-        };
-        input.click();
-        return;
-      }
-
-      case "mention-file":
-        // Handled by ChatInput or sent as slash command
-        sendAsSlashCommand("mention-file");
-        return;
-
-      case "resume-conversation":
-        // Scroll to welcome screen where past sessions are displayed
-        if (scrollRef) scrollRef.scrollTop = 0;
-        // If no messages, past sessions are already visible
-        if (messages().length > 0) {
-          setMessages([]);
-          parser.loadSession([]);
-        }
-        return;
-
-      case "model":
-        setShowModelPicker(true);
-        return;
-
-      // --- CLI pass-through (send as slash command text) ---
-      case "compact":
-      case "init":
-      case "review":
-      case "add-feature":
-      case "fix-bug":
-      case "refactor":
-      case "debug":
-      case "security-review":
-      case "simplify":
-      case "cost":
-      case "context":
-      case "effort":
-      case "thinking":
-      case "account":
-      case "toggle-fast":
-      case "mcp-config":
-      case "config":
-        sendAsSlashCommand(id);
-        return;
-
-      default:
-        sendAsSlashCommand(id);
-        return;
-    }
+    const handler = UI_COMMANDS[id];
+    if (handler) { handler(); return; }
+    sendAsSlashCommand(id);
   }
 
   /** Send a slash command directly to the CLI */
