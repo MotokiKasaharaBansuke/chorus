@@ -38,7 +38,7 @@ function renderMarkdown(text: string) {
 
 function flushTable(tableLines: string[]): string {
   const rows = tableLines
-    .map(line => line.split("|").slice(1, -1).map(c => c.trim()))
+    .map(line => line.split("|").slice(1, -1).map(c => escapeHtml(c.trim())))
     .filter(row => !row.every(c => /^[-: ]+$/.test(c)));
   if (rows.length === 0) return "";
   const [headers, ...data] = rows;
@@ -133,12 +133,32 @@ function formatInline(text: string): string {
   return result.join("");
 }
 
+/** Sanitize href: block dangerous protocols */
+function sanitizeHref(url: string): string {
+  const trimmed = url.trim().toLowerCase();
+  if (trimmed.startsWith("javascript:") || trimmed.startsWith("data:") || trimmed.startsWith("vbscript:")) {
+    return "#";
+  }
+  return url.replace(/"/g, "&quot;");
+}
+
+/** Escape HTML entities */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function applyInline(text: string): string {
   return text
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/\*(.+?)\*/g, "<em>$1</em>")
     .replace(/`([^`]+)`/g, `<code class="${styles.inlineCode}">$1</code>`)
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, `<a class="${styles.mdLink}" href="$2">$1</a>`);
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) =>
+      `<a class="${styles.mdLink}" href="${sanitizeHref(url)}">${label}</a>`
+    );
 }
 
 function isDiff(text: string): boolean {

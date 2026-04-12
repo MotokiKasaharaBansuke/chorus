@@ -3,13 +3,41 @@ use serde::Serialize;
 use crate::error::AppError;
 use crate::fs::tree::{self, FileNode};
 
+/// Validate that `path` is within the user's home directory.
+/// Blocks access to system directories like /etc, /var, etc.
+fn validate_path_scope(path: &str) -> Result<std::path::PathBuf, AppError> {
+    let requested = std::path::Path::new(path);
+    let canonical = requested.canonicalize()
+        .map_err(|e| AppError::FileSystemError(format!("Cannot resolve path: {e}")))?;
+
+    let home = home_dir()?;
+    let canonical_home = home.canonicalize()
+        .map_err(|e| AppError::FileSystemError(e.to_string()))?;
+
+    if !canonical.starts_with(&canonical_home) {
+        return Err(AppError::FileSystemError("Access denied: path outside home directory".into()));
+    }
+
+    // Block sensitive directories within home
+    let sensitive = [".ssh", ".gnupg", ".aws", ".config/gcloud"];
+    for dir in &sensitive {
+        if canonical.starts_with(canonical_home.join(dir)) {
+            return Err(AppError::FileSystemError("Access denied: sensitive directory".into()));
+        }
+    }
+
+    Ok(canonical)
+}
+
 #[tauri::command]
 pub fn list_directory(path: String, depth: Option<usize>) -> Result<Vec<FileNode>, AppError> {
+    validate_path_scope(&path)?;
     tree::list_directory(&path, depth.unwrap_or(1))
 }
 
 #[tauri::command]
 pub fn read_file(path: String) -> Result<String, AppError> {
+    validate_path_scope(&path)?;
     tree::read_file_content(&path)
 }
 
