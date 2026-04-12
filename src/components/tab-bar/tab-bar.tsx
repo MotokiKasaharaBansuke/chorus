@@ -1,6 +1,7 @@
 import { For } from "solid-js";
 import { useTabStore } from "../../stores/tab-store";
 import { killPty } from "../../lib/commands";
+import { effectivePtyId } from "../../types";
 import { TabItem } from "./tab-item";
 import styles from "./tab-bar.module.css";
 
@@ -14,7 +15,7 @@ export function TabBar(props: TabBarProps) {
   async function handleClose(id: string) {
     const tab = store.getTab(id);
     try {
-      await killPty(tab?.ptyId ?? id);
+      await killPty(tab ? effectivePtyId(tab) : id);
     } catch {
       // PTY might already be dead
     }

@@ -5,7 +5,9 @@ export async function saveTempImage(base64Data: string, extension?: string): Pro
 }
 
 export async function deleteTempImage(path: string): Promise<void> {
-  return invoke("delete_temp_image", { path });
+  // Extract filename only; Rust constructs the full path to prevent path traversal.
+  const filename = path.split("/").pop() ?? "";
+  return invoke("delete_temp_image", { filename });
 }
 
 export async function cleanupTempImages(): Promise<void> {

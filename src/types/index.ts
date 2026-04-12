@@ -6,6 +6,7 @@ export type {
   Tab,
   TabStoreState,
 } from "./tab";
+export { effectivePtyId } from "./tab";
 
 export type { FileNode } from "./file-tree";
 export type { ChatBlock, ChatMessage } from "./chat";

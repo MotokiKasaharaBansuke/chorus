@@ -5,6 +5,7 @@ import styles from "./file-viewer.module.css";
 interface FileViewerProps {
   path: string;
   onClose: () => void;
+  contentOverride?: string;
 }
 
 const KEYWORD_COLORS: Record<string, string> = {
@@ -32,6 +33,11 @@ export function FileViewer(props: FileViewerProps) {
   const accentColor = () => KEYWORD_COLORS[ext()] ?? "#6e7681";
 
   createEffect(() => {
+    if (props.contentOverride !== undefined) {
+      setContent(props.contentOverride);
+      setIsLoading(false);
+      return;
+    }
     const path = props.path;
     setContent("");
     setError("");

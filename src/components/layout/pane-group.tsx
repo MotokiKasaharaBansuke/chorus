@@ -125,7 +125,7 @@ export function PaneGroup(props: PaneGroupProps) {
 
   function renderContent(tab: Tab) {
     if (tab.cliConfig.cliType === "file-viewer" && tab.filePath) {
-      return <FileViewer path={tab.filePath} onClose={() => props.onCloseTab(tab.id)} />;
+      return <FileViewer path={tab.filePath} onClose={() => props.onCloseTab(tab.id)} contentOverride={tab.contentOverride} />;
     }
     if (tab.cliConfig.cliType === "claude-code" || tab.cliConfig.cliType === "codex") {
       return <ChatPanel tab={tab} />;
