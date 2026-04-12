@@ -1,4 +1,4 @@
-import { createSignal, For, Show, onMount, onCleanup, createMemo } from "solid-js";
+import { createSignal, For, Show, onMount, onCleanup } from "solid-js";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { sendMessage as sendMessageCmd, saveTempImage, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, type SessionInfo } from "../../lib/commands";
@@ -7,6 +7,7 @@ import { MessageBubble } from "./message-bubble";
 import { BusySpinner } from "./busy-spinner";
 import { ModelPicker } from "./model-picker";
 import { ChatInput } from "./chat-input";
+import { SessionPicker } from "./session-picker";
 import { ClawdIcon, CodexIcon } from "../icons";
 import type { Tab, ChatMessage } from "../../types";
 import { useTabStore } from "../../stores/tab-store";
@@ -25,7 +26,6 @@ export function ChatPanel(props: ChatPanelProps) {
   const [isDragOver, setIsDragOver] = createSignal(false);
   const [pastSessions, setPastSessions] = createSignal<SessionInfo[]>([]);
   const [showSessionPicker, setShowSessionPicker] = createSignal(false);
-  const [sessionSearch, setSessionSearch] = createSignal("");
   const [showModelPicker, setShowModelPicker] = createSignal(false);
   const inputHistory: string[] = [];
   let scrollRef: HTMLDivElement | undefined;
@@ -274,46 +274,11 @@ export function ChatPanel(props: ChatPanelProps) {
       : readSession(tab.cliConfig.workingDir, sessionId);
   }
 
-  // --- Session picker helpers ---
-  const filteredSessions = createMemo(() => {
-    const query = sessionSearch().toLowerCase();
-    if (!query) return pastSessions();
-    return pastSessions().filter(s =>
-      s.firstLine.toLowerCase().includes(query) || s.sessionId.toLowerCase().includes(query)
-    );
-  });
-
-  const SECONDS_PER_DAY = 86400;
-  const SESSION_BUCKETS: Array<{ label: string; maxDays: number }> = [
-    { label: "Today",     maxDays: 1 },
-    { label: "Yesterday", maxDays: 2 },
-    { label: "Past week", maxDays: 7 },
-    { label: "Older",     maxDays: Infinity },
-  ];
-
-  function groupSessions(sessions: SessionInfo[]): Array<{ label: string; sessions: SessionInfo[] }> {
-    const nowSec = Date.now() / 1000;
-    const elapsedDays = (s: SessionInfo) => (nowSec - s.lastModified) / SECONDS_PER_DAY;
-    return SESSION_BUCKETS.flatMap(({ label, maxDays }, i) => {
-      const minDays = i === 0 ? 0 : SESSION_BUCKETS[i - 1].maxDays;
-      const bucket = sessions.filter(s => elapsedDays(s) >= minDays && elapsedDays(s) < maxDays);
-      return bucket.length > 0 ? [{ label, sessions: bucket }] : [];
-    });
-  }
-
-  function formatRelativeTime(unixSec: number) {
-    const diff = Math.max(0, Math.floor(Date.now() / 1000 - unixSec));
-    if (diff < 3600) return `${Math.floor(diff / 60)}m`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
-    return `${Math.floor(diff / 86400)}d`;
-  }
-
   async function loadSessionFromPicker(session: SessionInfo) {
     try {
       parser.loadSession(await fetchSessionLines(props.tab, session.sessionId));
       store.updateLastSessionId(props.tab.id, session.sessionId);
       setShowSessionPicker(false);
-      setSessionSearch("");
     } catch {
       store.updateStatus(props.tab.id, "error");
     }
@@ -328,47 +293,11 @@ export function ChatPanel(props: ChatPanelProps) {
   return (
     <div class={styles.container} ref={containerRef}>
       <Show when={showSessionPicker()}>
-        <div class={styles.sessionPickerOverlay} onClick={() => { setShowSessionPicker(false); setSessionSearch(""); }}>
-          <div class={styles.sessionPickerModal} onClick={e => e.stopPropagation()}>
-            <div class={styles.sessionPickerHeader}>
-              <span>Past Conversations</span>
-              <button class={styles.sessionPickerClose} onClick={() => { setShowSessionPicker(false); setSessionSearch(""); }}>×</button>
-            </div>
-            <div class={styles.sessionPickerSearch}>
-              <input
-                class={styles.sessionPickerSearchInput}
-                placeholder="Search sessions..."
-                value={sessionSearch()}
-                onInput={e => setSessionSearch(e.currentTarget.value)}
-                autofocus
-              />
-            </div>
-            <div class={styles.sessionPickerList}>
-              <Show when={filteredSessions().length === 0}>
-                <div class={styles.sessionPickerEmpty}>No sessions found</div>
-              </Show>
-              <For each={groupSessions(filteredSessions())}>
-                {(group) => (
-                  <>
-                    <div class={styles.sessionPickerGroup}>{group.label}</div>
-                    <For each={group.sessions}>
-                      {(session) => (
-                        <div class={styles.sessionPickerItem} onClick={() => loadSessionFromPicker(session)}>
-                          <span class={styles.sessionPickerItemText}>
-                            {session.firstLine || session.sessionId.slice(0, 8)}
-                          </span>
-                          <span class={styles.sessionPickerItemDate}>
-                            {formatRelativeTime(session.lastModified)}
-                          </span>
-                        </div>
-                      )}
-                    </For>
-                  </>
-                )}
-              </For>
-            </div>
-          </div>
-        </div>
+        <SessionPicker
+          sessions={pastSessions()}
+          onSelect={loadSessionFromPicker}
+          onClose={() => setShowSessionPicker(false)}
+        />
       </Show>
       <Show when={showModelPicker()}>
         <ModelPicker

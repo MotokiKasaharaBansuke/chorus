@@ -2,10 +2,7 @@ import { createSignal } from "solid-js";
 
 const [isSidebarOpen, setIsSidebarOpen] = createSignal(true);
 const [sidebarWidth, setSidebarWidth] = createSignal(200);
-const [workingDir, setWorkingDir] = createSignal(
-  // Default to home directory
-  typeof window !== "undefined" ? "" : ""
-);
+const [workingDir, setWorkingDir] = createSignal("");
 
 export function useSidebarStore() {
   return {

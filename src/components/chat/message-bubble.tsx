@@ -134,7 +134,7 @@ function formatInline(text: string): string {
 }
 
 /** Sanitize href: block dangerous protocols */
-function sanitizeHref(url: string): string {
+export function sanitizeHref(url: string): string {
   const trimmed = url.trim().toLowerCase();
   if (trimmed.startsWith("javascript:") || trimmed.startsWith("data:") || trimmed.startsWith("vbscript:")) {
     return "#";
@@ -143,7 +143,7 @@ function sanitizeHref(url: string): string {
 }
 
 /** Escape HTML entities */
-function escapeHtml(text: string): string {
+export function escapeHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
