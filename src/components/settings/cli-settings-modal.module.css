@@ -80,6 +80,36 @@
   color: #ffa198 !important;
 }
 
+.dirRow {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.dirRow .input {
+  flex: 1;
+}
+
+.browseBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  background: #2d2d2d;
+  border: 1px solid #3d3d3d;
+  border-radius: 6px;
+  color: #888;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.browseBtn:hover {
+  background: #383838;
+  color: #ccc;
+}
+
 .input {
   width: 100%;
   padding: 7px 10px;

@@ -10,7 +10,7 @@
   flex-shrink: 0;
 }
 
-.left, .right {
+.right {
   display: flex;
   align-items: center;
   gap: 4px;

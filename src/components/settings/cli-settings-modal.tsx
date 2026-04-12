@@ -1,4 +1,5 @@
 import { createSignal, Show } from "solid-js";
+import { open } from "@tauri-apps/plugin-dialog";
 import type { CliConfig, CliMode, CliType } from "../../types";
 import styles from "./cli-settings-modal.module.css";
 
@@ -89,13 +90,28 @@ export function CliSettingsModal(props: CliSettingsModalProps) {
 
             <div class={styles.field}>
               <label>Working Directory</label>
-              <input
-                type="text"
-                value={workingDir()}
-                onInput={(e) => setWorkingDir(e.currentTarget.value)}
-                placeholder={props.defaultWorkingDir || "/path/to/project"}
-                class={styles.input}
-              />
+              <div class={styles.dirRow}>
+                <input
+                  type="text"
+                  value={workingDir()}
+                  onInput={(e) => setWorkingDir(e.currentTarget.value)}
+                  placeholder={props.defaultWorkingDir || "/path/to/project"}
+                  class={styles.input}
+                />
+                <button
+                  type="button"
+                  class={styles.browseBtn}
+                  title="Choose directory"
+                  onClick={async () => {
+                    const selected = await open({ directory: true, multiple: false });
+                    if (typeof selected === "string") setWorkingDir(selected);
+                  }}
+                >
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                    <path d="M1 3.5A1.5 1.5 0 012.5 2h3l1.5 2H13.5A1.5 1.5 0 0115 5.5v7A1.5 1.5 0 0113.5 14h-11A1.5 1.5 0 011 12.5V3.5z" fill="currentColor"/>
+                  </svg>
+                </button>
+              </div>
             </div>
 
             <div class={styles.actions}>

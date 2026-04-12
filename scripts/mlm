@@ -1,30 +1,86 @@
 #!/bin/bash
-# Chorus CLI launcher
-# Usage: chorus [path]
-#   chorus .          → open current directory
-#   chorus /some/path → open specified directory
-#   chorus            → open without directory
+# mlm - multi-llm CLI helper
+#
+# Usage:
+#   mlm [dir]              Open [dir] as a new split pane in the running app (default: cwd)
+#   mlm --codex [dir]      Open with Codex instead of Claude Code
+#   mlm --new [dir]        Launch a new app instance
+#   mlm --new --codex [dir]  New instance with Codex
+#
+# Options:
+#   -c, --claude   Use Claude Code (default)
+#   -x, --codex    Use Codex
+#   -n, --new      Force a new app instance
+#   -h, --help     Show this help
+#
+# Setup (add to ~/.zshrc):
+#   export PATH="$PATH:$(pwd)/scripts"   # from repo root
+#   # or: sudo cp scripts/mlm /usr/local/bin/mlm
 
-APP_NAME="chorus"
-APP_PATH="/Applications/Chorus.app"
-DEV_APP_PATH="$HOME/Develop/hobby/chorus/src-tauri/target/release/bundle/macos/${APP_NAME}.app"
+SOCKET="/tmp/multi-llm.sock"
+APP_BUNDLE="/Applications/multi-llm.app"
+DEV_BUNDLE="$HOME/Develop/hobby/multi-llm/src-tauri/target/release/bundle/macos/multi-llm.app"
+DEV_BINARY="$HOME/Develop/hobby/multi-llm/src-tauri/target/debug/chorus"
 
-# Resolve target directory
-if [ -n "$1" ]; then
-  TARGET_DIR="$(cd "$1" 2>/dev/null && pwd || echo "$1")"
+# ── parse args ────────────────────────────────────────────────────────────────
+CLI_TYPE="claude-code"
+NEW_INSTANCE=false
+DIR=""
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      sed -n '2,16p' "$0" | sed 's/^# //'
+      exit 0 ;;
+    -n|--new)   NEW_INSTANCE=true; shift ;;
+    -c|--claude) CLI_TYPE="claude-code"; shift ;;
+    -x|--codex)  CLI_TYPE="codex";       shift ;;
+    -*) echo "mlm: unknown option: $1" >&2; exit 1 ;;
+    *)  DIR="$1"; shift ;;
+  esac
+done
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+resolve_dir() {
+  local d="${1:-$(pwd)}"
+  cd "$d" 2>/dev/null && pwd || { echo "mlm: directory not found: $d" >&2; exit 1; }
+}
+
+find_app() {
+  if   [ -d "$APP_BUNDLE" ]; then echo "$APP_BUNDLE"
+  elif [ -d "$DEV_BUNDLE" ]; then echo "$DEV_BUNDLE"
+  else echo ""; fi
+}
+
+launch_new() {
+  local dir="$1"
+  local app
+  app="$(find_app)"
+  if [ -n "$app" ]; then
+    open -n -a "$app" --args --directory "$dir"
+  elif [ -x "$DEV_BINARY" ]; then
+    "$DEV_BINARY" --directory "$dir" &
+  else
+    echo "mlm: app not found. Build with: pnpm tauri build" >&2; exit 1
+  fi
+}
+
+send_ipc() {
+  local dir="$1" cli_type="$2"
+  python3 -c "import json,sys; print(json.dumps({'action':'open','dir':sys.argv[1],'cliType':sys.argv[2]}))" \
+    "$dir" "$cli_type" \
+    | nc -U "$SOCKET" -w 2 2>/dev/null
+}
+
+# ── main ──────────────────────────────────────────────────────────────────────
+DIR="$(resolve_dir "$DIR")"
+
+if $NEW_INSTANCE; then
+  launch_new "$DIR"
+  echo "mlm: launching new instance → $DIR (${CLI_TYPE})"
+elif [ -S "$SOCKET" ] && send_ipc "$DIR" "$CLI_TYPE"; then
+  echo "mlm: opened $DIR in running app (${CLI_TYPE})"
 else
-  TARGET_DIR="$(pwd)"
+  echo "mlm: no running instance — launching new app"
+  launch_new "$DIR"
 fi
-
-# Find the app
-if [ -d "$APP_PATH" ]; then
-  LAUNCH="$APP_PATH"
-elif [ -d "$DEV_APP_PATH" ]; then
-  LAUNCH="$DEV_APP_PATH"
-else
-  echo "Chorus.app not found. Install to /Applications or build with: pnpm tauri build"
-  exit 1
-fi
-
-# Launch with directory as argument
-open -a "$LAUNCH" --args --directory "$TARGET_DIR"

@@ -4,7 +4,6 @@ import type { ChatMessage, ChatBlock } from "../types";
 export class StreamParser {
   private messages: ChatMessage[] = [];
   private listeners: Array<(messages: ChatMessage[]) => void> = [];
-  private initialized = false;
 
   onUpdate(fn: (messages: ChatMessage[]) => void) {
     this.listeners.push(fn);
@@ -25,42 +24,61 @@ export class StreamParser {
     return [...this.messages];
   }
 
-  /** Load past session from JSONL lines */
+  /** Load past session from JSONL lines (supports Claude Code and Codex formats) */
   loadSession(lines: string[]) {
     this.messages = [];
     for (const line of lines) {
       try {
-        const data = JSON.parse(line);
-        const type = data.type as string;
+        const data = JSON.parse(line) as Record<string, unknown>;
+        const type = typeof data.type === "string" ? data.type : null;
+        if (!type) continue;
+
+        // --- Claude Code format ---
         if (type === "user") {
-          const msg = data.message as Record<string, unknown> | undefined;
+          const rawMsg = data.message;
+          const msg = typeof rawMsg === "object" && rawMsg !== null
+            ? rawMsg as Record<string, unknown>
+            : undefined;
           if (msg?.role === "user") {
             const content = msg.content;
             if (typeof content === "string") {
-              this.messages.push({
-                role: "user",
-                blocks: [{ kind: "text", text: content }],
-                isStreaming: false,
-              });
+              this.messages.push({ role: "user", blocks: [{ kind: "text", text: content }], isStreaming: false });
             } else if (Array.isArray(content)) {
               const texts: string[] = [];
               for (const b of content) {
-                if ((b as Record<string, unknown>).type === "text") {
-                  const t = (b as Record<string, unknown>).text as string;
+                const block = typeof b === "object" && b !== null ? b as Record<string, unknown> : undefined;
+                if (block?.type === "text") {
+                  const t = typeof block.text === "string" ? block.text : "";
                   if (t && !t.startsWith("<")) texts.push(t);
                 }
               }
               if (texts.length > 0) {
-                this.messages.push({
-                  role: "user",
-                  blocks: [{ kind: "text", text: texts.join("\n") }],
-                  isStreaming: false,
-                });
+                this.messages.push({ role: "user", blocks: [{ kind: "text", text: texts.join("\n") }], isStreaming: false });
               }
             }
           }
         } else if (type === "assistant") {
           this.handleAssistant(data);
+
+        // --- Codex format ---
+        } else if (type === "event_msg") {
+          const rawPayload = data.payload;
+          const payload = typeof rawPayload === "object" && rawPayload !== null
+            ? rawPayload as Record<string, unknown>
+            : undefined;
+          if (!payload) continue;
+          const ptype = typeof payload.type === "string" ? payload.type : null;
+          if (ptype === "user_message") {
+            const text = typeof payload.message === "string" ? payload.message.trim() : "";
+            if (text && !text.startsWith("/model")) {
+              this.messages.push({ role: "user", blocks: [{ kind: "text", text }], isStreaming: false });
+            }
+          } else if (ptype === "agent_message") {
+            const text = typeof payload.message === "string" ? payload.message.trim() : "";
+            if (text) {
+              this.messages.push({ role: "assistant", blocks: [{ kind: "text", text }], isStreaming: false });
+            }
+          }
         }
       } catch { /* skip bad lines */ }
     }
@@ -80,16 +98,17 @@ export class StreamParser {
   processLine(raw: string) {
     let data: Record<string, unknown>;
     try {
-      data = JSON.parse(raw);
+      data = JSON.parse(raw) as Record<string, unknown>;
     } catch {
       return;
     }
 
-    const type = data.type as string;
+    const type = typeof data.type === "string" ? data.type : null;
+    if (!type) return;
 
     switch (type) {
       case "system":
-        this.handleSystem(data);
+        // no-op: system events carry no display-relevant data
         break;
       case "assistant":
         this.handleAssistant(data);
@@ -112,36 +131,39 @@ export class StreamParser {
     }
   }
 
-  private handleSystem(_data: Record<string, unknown>) {
-    if (!this.initialized) {
-      this.initialized = true;
+  private findLastAssistantIdx(): number {
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      if (this.messages[i].role === "assistant") return i;
     }
+    return -1;
   }
 
   private handleAssistant(data: Record<string, unknown>) {
-    const message = data.message as Record<string, unknown> | undefined;
+    const rawMessage = data.message;
+    const message = typeof rawMessage === "object" && rawMessage !== null
+      ? rawMessage as Record<string, unknown>
+      : undefined;
     if (!message) return;
 
-    const content = message.content as Array<Record<string, unknown>> | undefined;
+    const rawContent = message.content;
+    const content = Array.isArray(rawContent)
+      ? rawContent as Array<Record<string, unknown>>
+      : undefined;
     if (!content) return;
 
     const blocks: ChatBlock[] = [];
-    const model = message.model as string | undefined;
+    const model = typeof message.model === "string" ? message.model : undefined;
 
     for (const block of content) {
       switch (block.type) {
         case "text": {
-          const text = block.text as string;
-          if (text) {
-            blocks.push({ kind: "text", text });
-          }
+          const text = typeof block.text === "string" ? block.text : "";
+          if (text) blocks.push({ kind: "text", text });
           break;
         }
         case "thinking": {
-          const thinking = block.thinking as string;
-          if (thinking) {
-            blocks.push({ kind: "thinking", text: thinking, isStreaming: false });
-          }
+          const thinking = typeof block.thinking === "string" ? block.thinking : "";
+          if (thinking) blocks.push({ kind: "thinking", text: thinking, isStreaming: false });
           break;
         }
         case "tool_use": {
@@ -150,8 +172,8 @@ export class StreamParser {
             : JSON.stringify(block.input, null, 2);
           blocks.push({
             kind: "tool_use",
-            toolName: block.name as string,
-            toolId: block.id as string,
+            toolName: typeof block.name === "string" ? block.name : "",
+            toolId: typeof block.id === "string" ? block.id : "",
             input,
             isStreaming: false,
           });
@@ -163,9 +185,9 @@ export class StreamParser {
             : JSON.stringify(block.content, null, 2);
           blocks.push({
             kind: "tool_result",
-            toolId: (block.tool_use_id as string) ?? "",
+            toolId: typeof block.tool_use_id === "string" ? block.tool_use_id : "",
             output,
-            isError: (block.is_error as boolean) ?? false,
+            isError: block.is_error === true,
           });
           break;
         }
@@ -173,88 +195,88 @@ export class StreamParser {
     }
 
     if (blocks.length > 0) {
-      this.messages.push({
-        role: "assistant",
-        blocks,
-        isStreaming: false,
-        model,
-      });
+      this.messages.push({ role: "assistant", blocks, isStreaming: false, model });
       this.notify();
     }
   }
 
   private handleResult(data: Record<string, unknown>) {
-    // Update last assistant message with cost/token info
-    const lastMsg = [...this.messages].reverse().find(m => m.role === "assistant");
-    if (lastMsg) {
-      lastMsg.costUsd = data.total_cost_usd as number | undefined;
-      lastMsg.durationMs = data.duration_ms as number | undefined;
-      const usage = data.usage as Record<string, number> | undefined;
-      if (usage) {
-        lastMsg.inputTokens = usage.input_tokens;
-        lastMsg.outputTokens = usage.output_tokens;
-      }
-    }
+    const idx = this.findLastAssistantIdx();
+    if (idx === -1) { this.notify(); return; }
+
+    const rawUsage = data.usage;
+    const usageObj = typeof rawUsage === "object" && rawUsage !== null
+      ? rawUsage as Record<string, unknown>
+      : undefined;
+
+    this.messages[idx] = {
+      ...this.messages[idx],
+      costUsd: typeof data.total_cost_usd === "number" ? data.total_cost_usd : undefined,
+      durationMs: typeof data.duration_ms === "number" ? data.duration_ms : undefined,
+      inputTokens: typeof usageObj?.input_tokens === "number" ? usageObj.input_tokens : undefined,
+      outputTokens: typeof usageObj?.output_tokens === "number" ? usageObj.output_tokens : undefined,
+    };
     this.notify();
   }
 
   private handleTurnComplete(_data: Record<string, unknown>) {
-    // Mark last assistant message as complete
-    const lastMsg = [...this.messages].reverse().find(m => m.role === "assistant");
-    if (lastMsg) {
-      lastMsg.isStreaming = false;
-    }
+    const idx = this.findLastAssistantIdx();
+    if (idx === -1) { this.notify(); return; }
+    this.messages[idx] = { ...this.messages[idx], isStreaming: false };
     this.notify();
   }
 
   private handleUserToolResult(data: Record<string, unknown>) {
-    // Tool execution result comes as a "user" message with tool_result content
-    const message = data.message as Record<string, unknown> | undefined;
-    const toolResult = data.tool_use_result as Record<string, unknown> | undefined;
-    const content = message?.content as Array<Record<string, unknown>> | undefined;
+    const rawMessage = data.message;
+    const message = typeof rawMessage === "object" && rawMessage !== null
+      ? rawMessage as Record<string, unknown>
+      : undefined;
+    const rawToolResult = data.tool_use_result;
+    const toolResult = typeof rawToolResult === "object" && rawToolResult !== null
+      ? rawToolResult as Record<string, unknown>
+      : undefined;
+    const rawContent = message?.content;
+    const content = Array.isArray(rawContent)
+      ? rawContent as Array<Record<string, unknown>>
+      : undefined;
 
     if (!content) return;
 
-    // Find the last assistant message to attach tool results
-    const lastAssistant = [...this.messages].reverse().find(m => m.role === "assistant");
-    if (!lastAssistant) return;
+    const idx = this.findLastAssistantIdx();
+    if (idx === -1) return;
 
     const newBlocks: ChatBlock[] = [];
     for (const block of content) {
       if (block.type === "tool_result") {
-        const toolId = block.tool_use_id as string;
+        const toolId = typeof block.tool_use_id === "string" ? block.tool_use_id : "";
         let output = "";
 
         // Prefer tool_use_result.stdout for cleaner output
-        if (toolResult?.stdout) {
-          output = toolResult.stdout as string;
+        if (typeof toolResult?.stdout === "string") {
+          output = toolResult.stdout;
         } else if (typeof block.content === "string") {
           output = block.content;
         } else {
           output = JSON.stringify(block.content, null, 2);
         }
 
-        newBlocks.push({
-          kind: "tool_result",
-          toolId,
-          output,
-          isError: (block.is_error as boolean) ?? false,
-        });
+        newBlocks.push({ kind: "tool_result", toolId, output, isError: block.is_error === true });
       }
     }
 
     if (newBlocks.length > 0) {
-      // Create new blocks array for reactivity
-      lastAssistant.blocks = [...lastAssistant.blocks, ...newBlocks];
+      this.messages[idx] = {
+        ...this.messages[idx],
+        blocks: [...this.messages[idx].blocks, ...newBlocks],
+      };
       this.notify();
     }
   }
 
   private handleStderr(data: Record<string, unknown>) {
-    const text = data.text as string;
+    const text = typeof data.text === "string" ? data.text : "";
     if (!text) return;
 
-    // Show stderr as a system message
     this.messages.push({
       role: "system",
       blocks: [{ kind: "stderr", text }],

@@ -188,6 +188,10 @@ export function useTabStore() {
       updateTab(id, (tab) => { tab.cliConfig.mode = mode; });
     },
 
+    updateLastSessionId(id: string, sessionId: string) {
+      updateTab(id, (tab) => { tab.lastSessionId = sessionId; });
+    },
+
     updateModel(id: string, model: string | undefined) {
       updateTab(id, (tab) => { tab.cliConfig.model = model; });
     },
@@ -207,6 +211,11 @@ export function useTabStore() {
         setStore("layout", null as unknown as LayoutNode);
         setStore("layout", equalized);
       });
+    },
+
+    /** Restore workspace state (used by session restore) */
+    restore(tabMap: Record<string, Tab>, layout: LayoutNode, focusedGroupId: string) {
+      setStore(reconcile({ tabMap, layout, focusedGroupId }));
     },
 
     /** Reset store to initial state (for testing) */

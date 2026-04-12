@@ -441,8 +441,9 @@
 
 .textarea {
   width: 100%; background: transparent; border: none; color: #ccc;
-  font-size: var(--chat-font-size, 13px); font-family: inherit; padding: 8px 10px 4px;
+  font-size: 12px; font-family: inherit; padding: 8px 10px 4px;
   resize: none; min-height: 22px; max-height: 200px; line-height: 1.5; outline: none; display: block;
+  overflow-y: hidden;
 }
 .textarea::placeholder { color: #555; }
 
@@ -520,6 +521,85 @@
 .pickerItemSelected.pickerItemFocused { background: #3a3a3a; }
 .pickerItemLabel { font-size: 14px; font-weight: 600; color: #ccc; margin-bottom: 2px; }
 .pickerItemDesc { font-size: 12px; color: #666; }
+
+/* ======== Session Picker ======== */
+.sessionPickerBtn {
+  position: absolute; top: 8px; right: 8px; z-index: 10;
+  background: transparent; border: none; color: #444; cursor: pointer;
+  padding: 4px; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center;
+  transition: color 0.1s, background 0.1s;
+}
+.sessionPickerBtn:hover { color: #aaa; background: #2a2a2a; }
+
+.sessionPickerOverlay {
+  position: absolute; inset: 0; z-index: 50;
+  background: rgba(0,0,0,0.5);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding-top: 32px;
+  animation: fadeIn 0.1s ease-out;
+}
+
+.sessionPickerModal {
+  background: #1e1e1e; border: 1px solid #333; border-radius: 10px;
+  width: 360px; max-width: 90%; max-height: calc(100% - 64px);
+  display: flex; flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  overflow: hidden;
+}
+
+.sessionPickerHeader {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; font-size: 13px; color: #888; font-weight: 500;
+  border-bottom: 1px solid #2a2a2a; flex-shrink: 0;
+}
+
+.sessionPickerClose {
+  background: transparent; border: none; color: #555; cursor: pointer;
+  font-size: 18px; padding: 0; line-height: 1; display: flex; align-items: center;
+  transition: color 0.1s;
+}
+.sessionPickerClose:hover { color: #aaa; }
+
+.sessionPickerSearch {
+  padding: 8px 12px; border-bottom: 1px solid #2a2a2a; flex-shrink: 0;
+}
+
+.sessionPickerSearchInput {
+  width: 100%; background: #2a2a2a; border: 1px solid #333; border-radius: 6px;
+  color: #ccc; font-size: 13px; padding: 6px 10px; outline: none; box-sizing: border-box;
+  transition: border-color 0.1s;
+}
+.sessionPickerSearchInput::placeholder { color: #555; }
+.sessionPickerSearchInput:focus { border-color: #555; }
+
+.sessionPickerList {
+  overflow-y: auto; padding: 4px 0 8px;
+}
+
+.sessionPickerGroup {
+  font-size: 11px; color: #555; padding: 10px 16px 4px;
+  font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+}
+
+.sessionPickerItem {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 7px 16px; cursor: pointer; transition: background 0.06s;
+}
+.sessionPickerItem:hover { background: #2a2a2a; }
+
+.sessionPickerItemText {
+  color: #bbb; font-size: 13px; flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.sessionPickerItemDate {
+  color: #555; font-size: 11px; flex-shrink: 0; margin-left: 10px;
+}
+
+.sessionPickerEmpty {
+  padding: 24px 16px; color: #555; font-size: 13px; text-align: center;
+}
 
 /* === Animations === */
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }

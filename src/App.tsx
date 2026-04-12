@@ -2,10 +2,12 @@ import { createSignal, createEffect, For, Show, onMount, onCleanup } from "solid
 import { LogicalSize } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTabStore } from "./stores/tab-store";
 import { useSidebarStore } from "./stores/sidebar-store";
 import { spawnPty, killPty } from "./lib/commands";
+import { buildSavedSession, persistSession, restoreSession, tryLoadSession } from "./lib/session";
 import { TerminalPanel } from "./components/terminal/terminal-panel";
 import { Sidebar } from "./components/sidebar/sidebar";
 import { LayoutRenderer } from "./components/layout/layout-renderer";
@@ -15,6 +17,7 @@ import { useBottomTerminal } from "./hooks/use-bottom-terminal";
 import { useKeyboardShortcuts } from "./hooks/use-keyboard-shortcuts";
 import { useResizeHandle } from "./hooks/use-resize-handle";
 import type { CliConfig, CliMode, Tab } from "./types";
+import chorusIcon from "./assets/chorus-icon.png";
 import "./App.css";
 
 function App() {
@@ -43,16 +46,93 @@ function App() {
     max: 600,
   });
 
+  // Sidebar follows the active tab's working directory
+  createEffect(() => {
+    const dir = tabStore.activeTab?.cliConfig.workingDir;
+    if (dir) sidebarStore.setWorkingDir(dir);
+  });
+
+  // Auto-save session on state changes (debounced)
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  createEffect(() => {
+    // Track reactive dependencies
+    const layout = tabStore.layout;
+    const tabs = tabStore.tabs;
+    if (!layout || tabs.length === 0) return;
+
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      const tabMap = Object.fromEntries(tabs.map(t => [t.id, t]));
+      const session = buildSavedSession(
+        tabMap,
+        layout,
+        tabStore.focusedGroupId,
+        sidebarStore.isOpen,
+        sidebarStore.width,
+        sidebarStore.workingDir,
+        quickLaunchMode()
+      );
+      if (session) persistSession(session).catch(() => {});
+    }, 500);
+  });
+
+  // --- IPC: open directory in existing instance (from mlm CLI) ---
+  let ipcUnlistenRef: (() => void) | null = null;
+
   // --- Image drag-drop ---
   let dropUnlistenRef: (() => void) | null = null;
   let lastDropKey = "";
   let lastDropTime = 0;
 
   onMount(async () => {
+    // Restore previous session
+    const savedSession = await tryLoadSession();
+    if (savedSession) {
+      const workspace = await restoreSession(JSON.stringify(savedSession));
+      if (workspace) {
+        tabStore.restore(workspace.tabMap, workspace.layout, workspace.focusedGroupId);
+        sidebarStore.setWorkingDir(workspace.workingDir);
+        if (workspace.sidebarOpen !== sidebarStore.isOpen) sidebarStore.toggle();
+        sidebarStore.setWidth(workspace.sidebarWidth);
+        setQuickLaunchMode(workspace.quickLaunchMode);
+      }
+    }
+
     try {
       const dir = await invoke<string | null>("get_initial_directory");
       if (dir) sidebarStore.setWorkingDir(dir);
     } catch { /* ignore */ }
+
+    // Listen for IPC "open directory" events sent by the `mlm` CLI.
+    // Always adds a new split pane (not a tab in the current pane), then equalizes.
+    ipcUnlistenRef = await listen<string>("mlm-open-dir", async (event) => {
+      let dir: string;
+      let cliType: "claude-code" | "codex" = "claude-code";
+      try {
+        const payload = JSON.parse(event.payload) as { dir: string; cliType?: string };
+        dir = payload.dir;
+        if (payload.cliType === "codex") cliType = "codex";
+      } catch {
+        dir = event.payload; // fallback: plain string
+      }
+      if (!dir) return;
+
+      const config: CliConfig = { cliType, mode: quickLaunchMode(), workingDir: dir };
+      try {
+        const id = await spawnPty(config);
+        const label = cliType === "claude-code" ? "Claude" : "Codex";
+        const tab: Tab = { id, title: `${label} ${tabStore.tabs.length + 1}`, status: "running", cliConfig: config };
+        const focusedGroup = tabStore.focusedGroupId;
+        if (focusedGroup && tabStore.layout) {
+          tabStore.openTab(tab);
+          tabStore.splitGroup(focusedGroup, "horizontal", id, "after");
+        } else {
+          tabStore.openTab(tab);
+        }
+        sidebarStore.setWorkingDir(dir);
+        tabStore.equalize();
+      } catch (e) { console.error("IPC: failed to spawn:", e); }
+    });
 
     const imgExts = ["png","jpg","jpeg","gif","webp","svg","bmp"];
     const webview = getCurrentWebviewWindow();
@@ -87,7 +167,7 @@ function App() {
     });
   });
 
-  onCleanup(() => { dropUnlistenRef?.(); });
+  onCleanup(() => { dropUnlistenRef?.(); ipcUnlistenRef?.(); });
 
   // --- Tab lifecycle ---
   async function handleNewTab(config?: CliConfig) {
@@ -217,9 +297,15 @@ function App() {
             <div class="layout-area">
               <Show when={tabStore.layout} fallback={
                 <div class="empty-state">
-                  <div class="empty-icon">●</div>
+                  <img src={chorusIcon} alt="" class="empty-logo" />
                   <h2>Chorus</h2>
-                  <p>Press ⌘T to open a new pane</p>
+                  <p class="empty-sub">Run AI coding assistants side by side</p>
+                  <div class="empty-shortcuts">
+                    <div class="shortcut-row"><kbd>⌘1</kbd><span>Claude Code</span></div>
+                    <div class="shortcut-row"><kbd>⌘2</kbd><span>Codex</span></div>
+                    <div class="shortcut-row"><kbd>⌘T</kbd><span>New pane</span></div>
+                    <div class="shortcut-row"><kbd>⌘B</kbd><span>Toggle sidebar</span></div>
+                  </div>
                 </div>
               }>
                 <LayoutRenderer onCloseTab={handleCloseTab} onRestartTab={handleRestartTab} />

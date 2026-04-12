@@ -1,6 +1,7 @@
 import { createSignal, Show } from "solid-js";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTabStore } from "../../stores/tab-store";
+import { HelpModal } from "../help/help-modal";
 import { SidebarIcon, TerminalIcon } from "../icons";
 import type { CliMode } from "../../types";
 import styles from "./top-bar.module.css";
@@ -21,20 +22,18 @@ interface TopBarProps {
 export function TopBar(props: TopBarProps) {
   const tabStore = useTabStore();
   const [showSettings, setShowSettings] = createSignal(false);
+  const [showHelp, setShowHelp] = createSignal(false);
 
   return (
     <div class={styles.topBar}>
-      <div class={styles.left}>
-        <button class={styles.btn} onClick={props.onToggleSidebar} title="Toggle Sidebar (⌘B)">
-          <SidebarIcon isOpen={props.isSidebarOpen} size={14} />
-        </button>
-      </div>
-
       <div class={styles.center} data-tauri-drag-region onMouseDown={() => getCurrentWindow().startDragging()}>
         {props.paneCount > 0 ? `${props.paneCount} tab${props.paneCount > 1 ? "s" : ""}` : "Chorus"}
       </div>
 
       <div class={styles.right}>
+        <button class={styles.btn} onClick={props.onToggleSidebar} title="Toggle Sidebar (⌘B)">
+          <SidebarIcon isOpen={props.isSidebarOpen} size={14} />
+        </button>
         <button class={styles.btn} onClick={props.onToggleTerminal} title="Toggle Terminal (⌘`)">
           <TerminalIcon size={14} />
         </button>
@@ -79,7 +78,14 @@ export function TopBar(props: TopBarProps) {
             <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           </svg>
         </button>
+        <button class={styles.btn} onClick={() => setShowHelp(true)} title="Keyboard shortcuts & CLI commands">
+          ?
+        </button>
       </div>
+
+      <Show when={showHelp()}>
+        <HelpModal onClose={() => setShowHelp(false)} />
+      </Show>
     </div>
   );
 }

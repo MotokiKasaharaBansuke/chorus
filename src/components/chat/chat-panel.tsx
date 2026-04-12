@@ -1,7 +1,7 @@
-import { createSignal, For, Show, onMount, onCleanup } from "solid-js";
+import { createSignal, For, Show, onMount, onCleanup, createMemo } from "solid-js";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { sendMessage as sendMessageCmd, saveTempImage, deleteTempImage, listSessions, readSession, type SessionInfo } from "../../lib/commands";
+import { sendMessage as sendMessageCmd, saveTempImage, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, type SessionInfo } from "../../lib/commands";
 import { StreamParser } from "../../lib/stream-parser";
 import { MessageBubble } from "./message-bubble";
 import { BusySpinner } from "./busy-spinner";
@@ -24,6 +24,8 @@ export function ChatPanel(props: ChatPanelProps) {
   const [attachedImages, setAttachedImages] = createSignal<Array<{ name: string; path: string }>>([]);
   const [isDragOver, setIsDragOver] = createSignal(false);
   const [pastSessions, setPastSessions] = createSignal<SessionInfo[]>([]);
+  const [showSessionPicker, setShowSessionPicker] = createSignal(false);
+  const [sessionSearch, setSessionSearch] = createSignal("");
   const [showModelPicker, setShowModelPicker] = createSignal(false);
   const inputHistory: string[] = [];
   let scrollRef: HTMLDivElement | undefined;
@@ -74,37 +76,45 @@ export function ChatPanel(props: ChatPanelProps) {
       }
     });
 
-    // Load past sessions (Claude Code only — stored in ~/.claude/projects/)
-    if (props.tab.cliConfig.cliType === "claude-code") try {
-      const sessions = await listSessions(props.tab.cliConfig.workingDir);
-      setPastSessions(sessions);
+    // Load past sessions
+    try {
+      if (props.tab.cliConfig.cliType === "claude-code") {
+        setPastSessions(await listSessions(props.tab.cliConfig.workingDir));
+      } else if (props.tab.cliConfig.cliType === "codex") {
+        setPastSessions(await listCodexSessions(props.tab.cliConfig.workingDir));
+      }
     } catch { /* ignore */ }
+
+    // Auto-restore last session content on mount (e.g. after app restart)
+    const lastId = props.tab.lastSessionId;
+    if (lastId) {
+      try {
+        parser.loadSession(await fetchSessionLines(props.tab, lastId));
+      } catch { /* session may have been deleted */ }
+    }
 
     // Listen for image drop events dispatched from App.tsx
     imageDropHandler = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      if (detail?.tabId === props.tab.id && detail?.paths) {
-        dropHandledAt = Date.now(); // Record so handlePaste can skip if it fires next
-        for (const p of detail.paths as string[]) {
-          // Skip if this path is already attached (guards against duplicate events)
-          setAttachedImages(prev => {
-            if (prev.some(img => img.path === p)) return prev;
-            return [...prev, { name: p.split("/").pop() ?? "image", path: p }];
-          });
-        }
+      if (!(e instanceof CustomEvent)) return;
+      const { tabId, paths } = e.detail ?? {};
+      if (tabId !== props.tab.id || !Array.isArray(paths)) return;
+      dropHandledAt = Date.now(); // Record so handlePaste can skip if it fires next
+      for (const p of paths) {
+        if (typeof p !== "string") continue;
+        // Skip if this path is already attached (guards against duplicate events)
+        setAttachedImages(prev =>
+          prev.some(img => img.path === p)
+            ? prev
+            : [...prev, { name: p.split("/").pop() ?? "image", path: p }]
+        );
       }
     };
     window.addEventListener("mlm-image-drop", imageDropHandler);
 
     dragStateHandler = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      if (detail?.tabId === null) {
-        setIsDragOver(false);
-      } else if (detail?.tabId === props.tab.id) {
-        setIsDragOver(detail.over);
-      } else {
-        setIsDragOver(false);
-      }
+      if (!(e instanceof CustomEvent)) return;
+      const { tabId, over } = e.detail ?? {};
+      setIsDragOver(tabId === props.tab.id && over === true);
     };
     window.addEventListener("mlm-drag-state", dragStateHandler);
   });
@@ -134,6 +144,7 @@ export function ChatPanel(props: ChatPanelProps) {
       store.updateStatus(props.tab.id, "running");
     } catch {
       setIsStreaming(false);
+      store.updateStatus(props.tab.id, "error");
     }
     for (const img of images) {
       deleteTempImage(img.path).catch(() => {});
@@ -143,7 +154,7 @@ export function ChatPanel(props: ChatPanelProps) {
   async function handleImageFile(file: File) {
     const reader = new FileReader();
     reader.onload = async () => {
-      const base64 = (reader.result as string).split(",")[1];
+      const base64 = typeof reader.result === "string" ? (reader.result.split(",")[1] ?? "") : "";
       const ext = file.type.split("/")[1] ?? "png";
       try {
         const path = await saveTempImage(base64, ext);
@@ -251,9 +262,62 @@ export function ChatPanel(props: ChatPanelProps) {
       store.updateStatus(props.tab.id, "running");
     } catch {
       setIsStreaming(false);
+      store.updateStatus(props.tab.id, "error");
     }
   }
 
+
+  // --- Session reading (shared between picker and auto-restore) ---
+  async function fetchSessionLines(tab: typeof props.tab, sessionId: string): Promise<string[]> {
+    return tab.cliConfig.cliType === "codex"
+      ? readCodexSession(sessionId)
+      : readSession(tab.cliConfig.workingDir, sessionId);
+  }
+
+  // --- Session picker helpers ---
+  const filteredSessions = createMemo(() => {
+    const query = sessionSearch().toLowerCase();
+    if (!query) return pastSessions();
+    return pastSessions().filter(s =>
+      s.firstLine.toLowerCase().includes(query) || s.sessionId.toLowerCase().includes(query)
+    );
+  });
+
+  const SECONDS_PER_DAY = 86400;
+  const SESSION_BUCKETS: Array<{ label: string; maxDays: number }> = [
+    { label: "Today",     maxDays: 1 },
+    { label: "Yesterday", maxDays: 2 },
+    { label: "Past week", maxDays: 7 },
+    { label: "Older",     maxDays: Infinity },
+  ];
+
+  function groupSessions(sessions: SessionInfo[]): Array<{ label: string; sessions: SessionInfo[] }> {
+    const nowSec = Date.now() / 1000;
+    const elapsedDays = (s: SessionInfo) => (nowSec - s.lastModified) / SECONDS_PER_DAY;
+    return SESSION_BUCKETS.flatMap(({ label, maxDays }, i) => {
+      const minDays = i === 0 ? 0 : SESSION_BUCKETS[i - 1].maxDays;
+      const bucket = sessions.filter(s => elapsedDays(s) >= minDays && elapsedDays(s) < maxDays);
+      return bucket.length > 0 ? [{ label, sessions: bucket }] : [];
+    });
+  }
+
+  function formatRelativeTime(unixSec: number) {
+    const diff = Math.max(0, Math.floor(Date.now() / 1000 - unixSec));
+    if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+    return `${Math.floor(diff / 86400)}d`;
+  }
+
+  async function loadSessionFromPicker(session: SessionInfo) {
+    try {
+      parser.loadSession(await fetchSessionLines(props.tab, session.sessionId));
+      store.updateLastSessionId(props.tab.id, session.sessionId);
+      setShowSessionPicker(false);
+      setSessionSearch("");
+    } catch {
+      store.updateStatus(props.tab.id, "error");
+    }
+  }
 
   function handleModelSelect(modelId: string) {
     store.updateModel(props.tab.id, modelId || undefined);
@@ -263,6 +327,49 @@ export function ChatPanel(props: ChatPanelProps) {
 
   return (
     <div class={styles.container} ref={containerRef}>
+      <Show when={showSessionPicker()}>
+        <div class={styles.sessionPickerOverlay} onClick={() => { setShowSessionPicker(false); setSessionSearch(""); }}>
+          <div class={styles.sessionPickerModal} onClick={e => e.stopPropagation()}>
+            <div class={styles.sessionPickerHeader}>
+              <span>Past Conversations</span>
+              <button class={styles.sessionPickerClose} onClick={() => { setShowSessionPicker(false); setSessionSearch(""); }}>×</button>
+            </div>
+            <div class={styles.sessionPickerSearch}>
+              <input
+                class={styles.sessionPickerSearchInput}
+                placeholder="Search sessions..."
+                value={sessionSearch()}
+                onInput={e => setSessionSearch(e.currentTarget.value)}
+                autofocus
+              />
+            </div>
+            <div class={styles.sessionPickerList}>
+              <Show when={filteredSessions().length === 0}>
+                <div class={styles.sessionPickerEmpty}>No sessions found</div>
+              </Show>
+              <For each={groupSessions(filteredSessions())}>
+                {(group) => (
+                  <>
+                    <div class={styles.sessionPickerGroup}>{group.label}</div>
+                    <For each={group.sessions}>
+                      {(session) => (
+                        <div class={styles.sessionPickerItem} onClick={() => loadSessionFromPicker(session)}>
+                          <span class={styles.sessionPickerItemText}>
+                            {session.firstLine || session.sessionId.slice(0, 8)}
+                          </span>
+                          <span class={styles.sessionPickerItemDate}>
+                            {formatRelativeTime(session.lastModified)}
+                          </span>
+                        </div>
+                      )}
+                    </For>
+                  </>
+                )}
+              </For>
+            </div>
+          </div>
+        </div>
+      </Show>
       <Show when={showModelPicker()}>
         <ModelPicker
           cliType={props.tab.cliConfig.cliType}
@@ -276,6 +383,18 @@ export function ChatPanel(props: ChatPanelProps) {
         <div class={styles.dropOverlay}>
           <span>Drop files here</span>
         </div>
+      </Show>
+      <Show when={pastSessions().length > 0}>
+        <button
+          class={styles.sessionPickerBtn}
+          onClick={() => setShowSessionPicker(true)}
+          title="Past Conversations"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <polyline points="12 6 12 12 16 14"/>
+          </svg>
+        </button>
       </Show>
       <div ref={scrollRef} class={styles.messages}>
         <Show when={messages().length === 0}>
@@ -299,12 +418,7 @@ export function ChatPanel(props: ChatPanelProps) {
                 <div class={styles.pastSessionsTitle}>Past Conversations</div>
                 <For each={pastSessions().slice(0, 8)}>
                   {(session) => (
-                    <div class={styles.pastSessionItem} onClick={async () => {
-                      try {
-                        const lines = await readSession(props.tab.cliConfig.workingDir, session.sessionId);
-                        parser.loadSession(lines);
-                      } catch { /* session load failed */ }
-                    }}>
+                    <div class={styles.pastSessionItem} onClick={() => loadSessionFromPicker(session)}>
                       <span class={styles.pastSessionText}>
                         {session.firstLine || session.sessionId.slice(0, 8)}
                       </span>

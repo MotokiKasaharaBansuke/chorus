@@ -45,6 +45,12 @@ export function ChatInput(props: ChatInputProps) {
   let compositionJustEnded = false;
   let historyIdx = -1;
   let draftBeforeHistory = "";
+  let textareaRef: HTMLTextAreaElement | undefined;
+
+  function autoResize(el: HTMLTextAreaElement) {
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }
 
   const modes = () => props.cliType === "claude-code" ? CLAUDE_MODES : CODEX_MODES;
 
@@ -56,6 +62,7 @@ export function ChatInput(props: ChatInputProps) {
     draftBeforeHistory = "";
     props.onSubmit(text);
     setInputText("");
+    if (textareaRef) { textareaRef.style.height = "auto"; }
   }
 
   function selectSlashCommand(id: string) {
@@ -137,11 +144,13 @@ export function ChatInput(props: ChatInputProps) {
         </div>
       </Show>
       <textarea
+        ref={textareaRef}
         class={styles.textarea}
         value={inputText()}
         onInput={(e) => {
           const val = e.currentTarget.value;
           setInputText(val);
+          autoResize(e.currentTarget);
           if (val.startsWith("/")) { setShowSlash(true); setSlashFilter(val.slice(1)); setSlashIdx(0); }
           else { setShowSlash(false); }
         }}

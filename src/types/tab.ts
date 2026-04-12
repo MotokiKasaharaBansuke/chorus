@@ -17,6 +17,7 @@ export interface Tab {
   status: TabStatus;
   cliConfig: CliConfig;
   filePath?: string;
+  lastSessionId?: string; // last loaded past session (for restore)
 }
 
 export interface TabStoreState {

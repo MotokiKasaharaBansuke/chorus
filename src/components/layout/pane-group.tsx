@@ -45,12 +45,16 @@ function startPointerDrag(tabId: string, sourceGroupId: string, startX: number, 
     }
   };
 
-  const onUp = (e: PointerEvent) => {
+  const cleanup = () => {
     document.removeEventListener("pointermove", onMove);
     document.removeEventListener("pointerup", onUp);
+    document.removeEventListener("pointercancel", onCancel);
     document.body.style.userSelect = "";
     document.body.style.cursor = "";
+  };
 
+  const onUp = (e: PointerEvent) => {
+    cleanup();
     if (started) {
       wasRecentDrag = true;
       // Clear flag after click event has had a chance to fire
@@ -64,8 +68,18 @@ function startPointerDrag(tabId: string, sourceGroupId: string, startX: number, 
     }
   };
 
+  const onCancel = () => {
+    cleanup();
+    if (started) {
+      setIsDragging(false);
+      setDragX(0);
+      setDragY(0);
+    }
+  };
+
   document.addEventListener("pointermove", onMove, { passive: false });
   document.addEventListener("pointerup", onUp);
+  document.addEventListener("pointercancel", onCancel);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -222,7 +236,7 @@ export function PaneGroup(props: PaneGroupProps) {
         ref={tabBarRef}
         class={`${styles.tabBar} ${tabBarDragOver() ? styles.tabBarDragOver : ""}`}
       >
-        <div class={styles.tabList}>
+        <div class={styles.tabList}>{/* tabs */}
           <For each={props.node.tabIds}>
             {(tabId) => {
               const tab = () => store.getTab(tabId);
@@ -267,6 +281,29 @@ export function PaneGroup(props: PaneGroupProps) {
             }}
           </For>
         </div>
+
+        {/* Active tab's directory — shown right of tabs for quick identification */}
+        {(() => {
+          const activeTab = () => store.getTab(props.node.activeTabId ?? "");
+          const dir = () => {
+            const wd = activeTab()?.cliConfig.workingDir;
+            if (!wd) return null;
+            return wd.split("/").filter(Boolean).pop() ?? wd;
+          };
+          const fullPath = () => activeTab()?.cliConfig.workingDir ?? "";
+          return (
+            <Show when={dir()}>
+              {(d) => (
+                <div class={styles.dirBadge} title={fullPath()}>
+                  <svg width="9" height="9" viewBox="0 0 12 12" fill="none" style={{ "flex-shrink": 0 }}>
+                    <path d="M1 3.5A1.5 1.5 0 012.5 2h2l1 1.5H9.5A1.5 1.5 0 0111 5v4A1.5 1.5 0 019.5 10.5h-7A1.5 1.5 0 011 9V3.5z" fill="currentColor" opacity=".7"/>
+                  </svg>
+                  {d()}
+                </div>
+              )}
+            </Show>
+          );
+        })()}
       </div>
 
       {/* Content area with VS Code-style drop indicators */}
