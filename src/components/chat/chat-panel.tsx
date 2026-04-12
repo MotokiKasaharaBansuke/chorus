@@ -12,6 +12,7 @@ import { ClawdIcon, CodexIcon } from "../icons";
 import type { Tab, ChatMessage } from "../../types";
 import { effectivePtyId } from "../../types";
 import { useTabStore } from "../../stores/tab-store";
+import { classifyStreamError } from "../../lib/classify-error";
 import styles from "./chat-panel.module.css";
 
 
@@ -135,8 +136,24 @@ export function ChatPanel(props: ChatPanelProps) {
       await sendMessageCmd(ptyId(), message);
       store.updateStatus(props.tab.id, "running");
       return true;
-    } catch {
-      // PTY session may not exist (e.g. after app restart with restored tabs)
+    } catch (error: unknown) {
+      const kind = classifyStreamError(error);
+
+      // Session is busy — do NOT respawn, just notify the user
+      if (kind === "busy") {
+        setIsStreaming(false);
+        parser.addUserMessage("[Waiting for current response to complete...]");
+        return false;
+      }
+
+      // Session not found — respawn (e.g. after app restart with restored tabs)
+      if (kind !== "not_found") {
+        setIsStreaming(false);
+        store.updateStatus(props.tab.id, "error");
+        parser.addUserMessage("[Error: Failed to send message.]");
+        return false;
+      }
+
       const now = Date.now();
       if (now - lastRespawnAt < 5_000) {
         setIsStreaming(false);
@@ -146,6 +163,8 @@ export function ChatPanel(props: ChatPanelProps) {
       }
       try {
         lastRespawnAt = now;
+        // Kill old session first to prevent orphaned sessions leaking in PtyManager
+        await killPty(ptyId()).catch(() => {});
         const newId = await spawnPty(props.tab.cliConfig);
         if (!store.getTab(props.tab.id)) {
           await killPty(newId).catch(() => {});
@@ -155,7 +174,7 @@ export function ChatPanel(props: ChatPanelProps) {
         await sendMessageCmd(newId, message);
         store.updateStatus(props.tab.id, "running");
         return true;
-      } catch (retryError) {
+      } catch (retryError: unknown) {
         setIsStreaming(false);
         store.updateStatus(props.tab.id, "error");
         const errorMessage = retryError instanceof Error ? retryError.message : String(retryError);
@@ -166,6 +185,7 @@ export function ChatPanel(props: ChatPanelProps) {
   }
 
   async function handleSubmitFromInput(text: string) {
+    if (isStreaming()) return;
     let fullMessage = text;
     const images = attachedImages();
     if (images.length > 0) {
@@ -275,6 +295,7 @@ export function ChatPanel(props: ChatPanelProps) {
 
   /** Send a slash command directly to the CLI */
   async function sendAsSlashCommand(id: string) {
+    if (isStreaming()) return;
     const command = `/${id}`;
     parser.addUserMessage(command);
     setIsStreaming(true);
@@ -350,7 +371,16 @@ export function ChatPanel(props: ChatPanelProps) {
           </svg>
         </button>
       </Show>
-      <div ref={scrollRef} class={styles.messages}>
+      <div ref={scrollRef} class={styles.messages} onClick={(e) => {
+        const link = (e.target as HTMLElement).closest("a[data-external-link]") as HTMLAnchorElement | null;
+        if (link) {
+          e.preventDefault();
+          const url = link.getAttribute("href");
+          if (url && url !== "#") {
+            import("@tauri-apps/plugin-opener").then(m => m.openUrl(url)).catch(() => {});
+          }
+        }
+      }}>
         <Show when={messages().length === 0}>
           <div class={styles.welcome}>
             <div class={styles.welcomeIcon}>

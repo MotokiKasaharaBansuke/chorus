@@ -102,7 +102,9 @@ pub struct StreamSession {
     pub base_args: Vec<String>,
     pub working_dir: String,
     pub session_id: String,
-    pub is_running: std::sync::Arc<parking_lot::Mutex<bool>>,
+    /// Tracks when the current message started processing. None = idle.
+    /// Used to detect stale locks (e.g. process crash without cleanup).
+    pub running_since: std::sync::Arc<parking_lot::Mutex<Option<std::time::Instant>>>,
     /// PID of the last spawned child process (for kill)
     child_pid: std::sync::Arc<parking_lot::Mutex<Option<u32>>>,
 }
@@ -121,7 +123,7 @@ impl StreamSession {
             base_args,
             working_dir,
             session_id: uuid::Uuid::new_v4().to_string(),
-            is_running: std::sync::Arc::new(parking_lot::Mutex::new(false)),
+            running_since: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -152,6 +154,9 @@ impl StreamSession {
     }
 
     /// Send a user message and stream the response back via events
+    /// Maximum time a single message can run before the lock is considered stale
+    const STALE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600); // 10 minutes
+
     pub fn send_message(
         &self,
         pane_id: &str,
@@ -159,23 +164,77 @@ impl StreamSession {
         app: AppHandle,
     ) -> Result<(), AppError> {
         {
-            let mut running = self.is_running.lock();
-            if *running {
-                return Err(AppError::PtyWriteFailed("Already processing a message".into()));
+            let mut running = self.running_since.lock();
+            if let Some(started) = *running {
+                if started.elapsed() < Self::STALE_LOCK_TIMEOUT {
+                    return Err(AppError::StreamSessionBusy("Already processing a message".into()));
+                }
+                // Stale lock: previous process likely crashed. Force reset.
+                tracing::warn!(elapsed_secs = started.elapsed().as_secs(), "Resetting stale is_running lock");
+                // Kill the stale process if PID is still set
+                self.kill();
             }
-            *running = true;
+            *running = Some(std::time::Instant::now());
         }
 
+        // Guard created immediately after setting running_since.
+        // If anything below panics or returns Err, Drop clears running_since automatically.
+        let guard = super::running_guard::MessageRunGuard::new(self.running_since.clone());
+
+        let (child, stdout, stderr) = self.spawn_cli_process(message)?;
+        self.start_reader_thread(pane_id, child, stdout, stderr, app, guard);
+        Ok(())
+    }
+
+    /// Build and spawn the CLI process, returning the child and its stdio handles.
+    fn spawn_cli_process(
+        &self,
+        message: &str,
+    ) -> Result<(std::process::Child, std::process::ChildStdout, std::process::ChildStderr), AppError> {
         let args = self.build_args(message);
-
         let mut cmd = Command::new(&self.command);
-        cmd.args(&args);
-        cmd.current_dir(&self.working_dir);
-        cmd.stdin(Stdio::null());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
+        cmd.args(&args)
+            .current_dir(&self.working_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
-        // Ensure PATH includes common binary locations
+        Self::configure_env(&mut cmd);
+
+        let cli_label = match self.cli_type {
+            CliType::ClaudeCode => "Claude Code",
+            CliType::Codex => "Codex",
+            CliType::Shell => "Shell",
+        };
+        tracing::info!(command = %self.command, cwd = %self.working_dir, "Spawning {cli_label} process");
+
+        // Isolate the child in its own process group so kill(-pid) targets only its group
+        cmd.process_group(0);
+
+        let mut child = cmd.spawn()
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to spawn process");
+                AppError::PtySpawnFailed(e.to_string())
+            })?;
+
+        *self.child_pid.lock() = Some(child.id());
+
+        let stdout = child.stdout.take()
+            .ok_or_else(|| {
+                let _ = child.kill();
+                AppError::PtySpawnFailed("stdout handle unavailable".into())
+            })?;
+        let stderr = child.stderr.take()
+            .ok_or_else(|| {
+                let _ = child.kill();
+                AppError::PtySpawnFailed("stderr handle unavailable".into())
+            })?;
+
+        Ok((child, stdout, stderr))
+    }
+
+    /// Configure PATH and environment variables for the CLI process.
+    fn configure_env(cmd: &mut Command) {
         let current_path = std::env::var("PATH").unwrap_or_default();
         let extra_paths = if let Ok(home) = std::env::var("HOME") {
             format!(
@@ -192,68 +251,42 @@ impl StreamSession {
                 cmd.env(&key, &value);
             }
         }
+    }
 
-        let cli_label = match self.cli_type {
-            CliType::ClaudeCode => "Claude Code",
-            CliType::Codex => "Codex",
-            CliType::Shell => "Shell",
-        };
-        // Log without message content to avoid storing user prompts in logs
-        tracing::info!(
-            command = %self.command,
-            cwd = %self.working_dir,
-            "Spawning {cli_label} process",
-        );
-
-        // Isolate the child in its own process group so kill(-pid) targets only its group
-        cmd.process_group(0);
-
-        let mut child = cmd.spawn()
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to spawn process");
-                // Release the lock so future send_message calls are not permanently blocked
-                *self.is_running.lock() = false;
-                AppError::PtySpawnFailed(e.to_string())
-            })?;
-
-        // Store PID for kill()
-        *self.child_pid.lock() = Some(child.id());
-
-        let stdout = match child.stdout.take() {
-            Some(s) => s,
-            None => {
-                let _ = child.kill();
-                *self.is_running.lock() = false;
-                return Err(AppError::PtySpawnFailed("stdout handle unavailable".into()));
-            }
-        };
-        let stderr = match child.stderr.take() {
-            Some(s) => s,
-            None => {
-                let _ = child.kill();
-                *self.is_running.lock() = false;
-                return Err(AppError::PtySpawnFailed("stderr handle unavailable".into()));
-            }
-        };
-
+    /// Spawn the reader thread that consumes the child process output.
+    fn start_reader_thread(
+        &self,
+        pane_id: &str,
+        child: std::process::Child,
+        stdout: std::process::ChildStdout,
+        stderr: std::process::ChildStderr,
+        app: AppHandle,
+        guard: super::running_guard::MessageRunGuard,
+    ) {
         let stream_id = pane_id.to_string();
-        let app_clone = app.clone();
-        let is_running = self.is_running.clone();
         let cli_type = self.cli_type;
 
         std::thread::spawn(move || {
-            match cli_type {
-                CliType::ClaudeCode => {
-                    Self::read_stream_json(child, stdout, stderr, &stream_id, &app_clone, &is_running);
+            let _guard = guard; // Dropped on normal exit or panic — clears running_since
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match cli_type {
+                    CliType::ClaudeCode => {
+                        Self::read_stream_json(child, stdout, stderr, &stream_id, &app);
+                    }
+                    CliType::Codex => {
+                        Self::read_codex_jsonl(child, stdout, stderr, &stream_id, &app);
+                    }
+                    CliType::Shell => unreachable!(),
                 }
-                CliType::Codex => {
-                    Self::read_codex_jsonl(child, stdout, stderr, &stream_id, &app_clone, &is_running);
-                }
-                CliType::Shell => unreachable!(),
+            }));
+            if let Err(e) = result {
+                let msg = e.downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| e.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown");
+                tracing::error!(panic = msg, "Reader thread panicked");
             }
         });
-
-        Ok(())
     }
 
     /// Stream Claude Code NDJSON output line by line from piped stdout.
@@ -264,7 +297,6 @@ impl StreamSession {
         stderr: std::process::ChildStderr,
         stream_id: &str,
         app: &AppHandle,
-        is_running: &std::sync::Arc<parking_lot::Mutex<bool>>,
     ) {
         spawn_stderr_logger(stderr, "Claude Code");
 
@@ -289,7 +321,7 @@ impl StreamSession {
                 "exit_code": exit_code,
             }).to_string(),
         });
-        *is_running.lock() = false;
+        // running_since is cleared by MessageRunGuard (RAII)
     }
 
     /// Stream Codex JSONL output line by line from piped stdout, translating events.
@@ -308,7 +340,6 @@ impl StreamSession {
         stderr: std::process::ChildStderr,
         stream_id: &str,
         app: &AppHandle,
-        is_running: &std::sync::Arc<parking_lot::Mutex<bool>>,
     ) {
         // Emit init so ChatPanel shows the spinner immediately (before any output arrives)
         let _ = app.emit("stream-event", StreamEventPayload {
@@ -336,7 +367,7 @@ impl StreamSession {
             id: stream_id.to_string(),
             data: serde_json::json!({ "type": "turn_complete" }).to_string(),
         });
-        *is_running.lock() = false;
+        // running_since is cleared by MessageRunGuard (RAII)
     }
 
     /// Translate a single Codex JSONL line into a Claude Code-compatible stream-event.
@@ -473,12 +504,15 @@ impl StreamSession {
                 }
                 _ => tracing::warn!(pid, "Cannot kill process: PID out of i32 range"),
             }
-            *self.is_running.lock() = false;
+            // Fallback clear: the reader thread's MessageRunGuard may already have
+            // been dropped, or the thread may still be blocked on I/O. Explicitly
+            // clearing here ensures kill() always leaves the session idle.
+            *self.running_since.lock() = None;
         }
     }
 
     pub fn is_busy(&self) -> bool {
-        *self.is_running.lock()
+        self.running_since.lock().is_some()
     }
 }
 
