@@ -53,15 +53,13 @@ function App() {
   });
 
   // Auto-save session on state changes (debounced)
-  let saveTimer: ReturnType<typeof setTimeout> | null = null;
   createEffect(() => {
     // Track reactive dependencies
     const layout = tabStore.layout;
     const tabs = tabStore.tabs;
     if (!layout || tabs.length === 0) return;
 
-    if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
+    const timer = setTimeout(() => {
       const tabMap = Object.fromEntries(tabs.map(t => [t.id, t]));
       const session = buildSavedSession(
         tabMap,
@@ -74,6 +72,8 @@ function App() {
       );
       if (session) persistSession(session).catch(() => {});
     }, 500);
+    // Cleanup runs both on effect re-execution and component unmount
+    return () => clearTimeout(timer);
   });
 
   // --- IPC: open directory in existing instance (from mlm CLI) ---
@@ -107,25 +107,24 @@ function App() {
     // Always adds a new split pane (not a tab in the current pane), then equalizes.
     ipcUnlistenRef = await listen<{ dir: string; cliType?: string }>("mlm-open-dir", async (event) => {
       const { dir, cliType: rawCliType } = event.payload;
-      if (!dir) return;
+      if (!dir || !dir.startsWith("/")) return;
       const cliType: "claude-code" | "codex" = rawCliType === "codex" ? "codex" : "claude-code";
       const config: CliConfig = { cliType, mode: quickLaunchMode(), workingDir: dir };
       try {
         await spawnAndOpenTab(config, { splitIntoNewPane: true });
         tabStore.equalize();
-      } catch { /* IPC spawn failed */ }
+      } catch (e) { console.error("IPC: failed to spawn pane:", e); }
     });
 
-    const imgExts = ["png","jpg","jpeg","gif","webp","svg","bmp"];
+    const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"]);
+    const isImagePath = (p: string) => IMAGE_EXTENSIONS.has(p.split(".").pop()?.toLowerCase() ?? "");
+
     const webview = getCurrentWebviewWindow();
     dropUnlistenRef = await webview.onDragDropEvent((event) => {
       if (event.payload.type === "drop") {
         const targetId = tabStore.activeTabId;
         if (!targetId) return;
-        const imagePaths = event.payload.paths.filter(p => {
-          const ext = p.split(".").pop()?.toLowerCase() ?? "";
-          return imgExts.includes(ext);
-        });
+        const imagePaths = event.payload.paths.filter(isImagePath);
         if (imagePaths.length > 0) {
           const dropKey = imagePaths.join("|");
           const now = Date.now();
@@ -136,10 +135,7 @@ function App() {
         }
         window.dispatchEvent(new CustomEvent("mlm-drag-state", { detail: { tabId: null, over: false } }));
       } else if (event.payload.type === "over") {
-        const hasImageFiles = (event.payload.paths ?? []).some(p => {
-          const ext = p.split(".").pop()?.toLowerCase() ?? "";
-          return imgExts.includes(ext);
-        });
+        const hasImageFiles = (event.payload.paths ?? []).some(isImagePath);
         if (hasImageFiles) {
           window.dispatchEvent(new CustomEvent("mlm-drag-state", { detail: { tabId: tabStore.activeTabId, over: true } }));
         }
@@ -152,7 +148,7 @@ function App() {
   onCleanup(() => { dropUnlistenRef?.(); ipcUnlistenRef?.(); });
 
   // --- Tab lifecycle ---
-  const CLI_LABELS: Record<string, string> = { "claude-code": "Claude", "codex": "Codex", "shell": "Shell" };
+  const CLI_LABELS: Record<"claude-code" | "codex" | "shell", string> = { "claude-code": "Claude", "codex": "Codex", "shell": "Shell" };
 
   async function spawnAndOpenTab(config: CliConfig, options?: { splitIntoNewPane?: boolean }) {
     const id = await spawnPty(config);
@@ -168,7 +164,7 @@ function App() {
 
   async function handleNewTab(config?: CliConfig) {
     if (!config) { setIsModalOpen(true); return; }
-    try { await spawnAndOpenTab(config); } catch { /* spawn failed */ }
+    try { await spawnAndOpenTab(config); } catch (e) { console.error("Failed to open pane:", e); }
   }
 
   async function handleCloseTab(id: string) {
@@ -183,7 +179,7 @@ function App() {
     if (tab.cliConfig.cliType === "file-viewer") return;
     try { await killPty(tab.id); } catch {}
     tabStore.closeTab(tab.id);
-    handleNewTab(tab.cliConfig);
+    await handleNewTab(tab.cliConfig);
   }
 
   function handleFileOpen(path: string) {
@@ -197,7 +193,7 @@ function App() {
 
   async function quickLaunch(cliType: "claude-code" | "codex") {
     const config: CliConfig = { cliType, mode: quickLaunchMode(), workingDir: sidebarStore.workingDir || "~" };
-    try { await spawnAndOpenTab(config, { splitIntoNewPane: true }); } catch { /* spawn failed */ }
+    try { await spawnAndOpenTab(config, { splitIntoNewPane: true }); } catch (e) { console.error("Failed to quick-launch pane:", e); }
   }
 
   // --- Zoom & font size ---

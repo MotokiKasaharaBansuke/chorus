@@ -34,13 +34,11 @@ const TAB_DRAG = [
 ];
 
 export function HelpModal(props: HelpModalProps) {
-  onMount(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") props.onClose();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    onCleanup(() => document.removeEventListener("keydown", onKeyDown));
-  });
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key === "Escape") props.onClose();
+  };
+  onMount(() => document.addEventListener("keydown", onKeyDown));
+  onCleanup(() => document.removeEventListener("keydown", onKeyDown));
 
   return (
     <div class={styles.overlay} onClick={props.onClose}>
