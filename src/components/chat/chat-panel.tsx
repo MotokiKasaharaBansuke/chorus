@@ -19,6 +19,14 @@ interface ChatPanelProps {
   tab: Tab;
 }
 
+/** True only for paths that Chorus wrote into the temp image directory (no traversal). */
+function isValidTempImagePath(p: string): boolean {
+  return p.startsWith("/tmp/chorus-images/")
+    && !p.includes("..")
+    && !p.includes("\n")
+    && !p.includes("\r");
+}
+
 export function ChatPanel(props: ChatPanelProps) {
   const store = useTabStore();
   /** Effective PTY ID (differs from tab.id after PTY respawn) */
@@ -33,8 +41,6 @@ export function ChatPanel(props: ChatPanelProps) {
   const inputHistory: string[] = [];
   let scrollRef: HTMLDivElement | undefined;
   let containerRef: HTMLDivElement | undefined;
-  let imageDropHandler: ((e: Event) => void) | null = null;
-  let dragStateHandler: ((e: Event) => void) | null = null;
   // On macOS, pasting a file triggers BOTH a Tauri drop event AND a DOM paste event.
   // The Tauri drop event fires FIRST, so we record when a drop was handled,
   // then suppress the subsequent DOM paste if it arrives within the dedup window.
@@ -88,36 +94,36 @@ export function ChatPanel(props: ChatPanelProps) {
         parser.loadSession(await fetchSessionLines(props.tab, lastId));
       } catch { /* session may have been deleted */ }
     }
+  });
 
-    // Listen for image drop events dispatched from App.tsx
-    imageDropHandler = (e: Event) => {
+  // Image drop events dispatched from App.tsx — co-located with cleanup via createEffect
+  createEffect(() => {
+    function handleImageDrop(e: Event) {
       if (!(e instanceof CustomEvent)) return;
       const { tabId, paths } = e.detail ?? {};
       if (tabId !== props.tab.id || !Array.isArray(paths)) return;
-      dropHandledAt = Date.now(); // Record so handlePaste can skip if it fires next
+      dropHandledAt = Date.now();
       for (const p of paths) {
-        if (typeof p !== "string") continue;
-        // Skip if this path is already attached (guards against duplicate events)
+        if (typeof p !== "string" || !isValidTempImagePath(p)) continue;
         setAttachedImages(prev =>
           prev.some(img => img.path === p)
             ? prev
             : [...prev, { name: p.split("/").pop() ?? "image", path: p }]
         );
       }
-    };
-    window.addEventListener("mlm-image-drop", imageDropHandler);
+    }
+    window.addEventListener("mlm-image-drop", handleImageDrop);
+    onCleanup(() => window.removeEventListener("mlm-image-drop", handleImageDrop));
+  });
 
-    dragStateHandler = (e: Event) => {
+  createEffect(() => {
+    function handleDragState(e: Event) {
       if (!(e instanceof CustomEvent)) return;
       const { tabId, over } = e.detail ?? {};
       setIsDragOver(tabId === props.tab.id && over === true);
-    };
-    window.addEventListener("mlm-drag-state", dragStateHandler);
-  });
-
-  onCleanup(() => {
-    if (imageDropHandler) window.removeEventListener("mlm-image-drop", imageDropHandler);
-    if (dragStateHandler) window.removeEventListener("mlm-drag-state", dragStateHandler);
+    }
+    window.addEventListener("mlm-drag-state", handleDragState);
+    onCleanup(() => window.removeEventListener("mlm-drag-state", handleDragState));
   });
 
   // Throttle PTY respawns: at most once per 5 seconds
@@ -163,16 +169,21 @@ export function ChatPanel(props: ChatPanelProps) {
     let fullMessage = text;
     const images = attachedImages();
     if (images.length > 0) {
-      for (const img of images) {
-        fullMessage = `/image ${img.path}\n${fullMessage}`;
-      }
+      const imagePrefixes = images
+        .map(img => img.path)
+        .filter(isValidTempImagePath)
+        .map(p => `/image ${p}`)
+        .join("\n");
+      if (imagePrefixes) fullMessage = `${imagePrefixes}\n${fullMessage}`;
     }
 
     parser.addUserMessage(text + (images.length > 0 ? ` [${images.length} image(s)]` : ""));
     setAttachedImages([]);
     setIsStreaming(true);
 
-    await sendWithRespawn(fullMessage);
+    const sent = await sendWithRespawn(fullMessage);
+    // Ensure isStreaming is reset on any failure path that sendWithRespawn may not cover
+    if (!sent) setIsStreaming(false);
     for (const img of images) {
       deleteTempImage(img.path).catch(() => {});
     }
@@ -240,7 +251,7 @@ export function ChatPanel(props: ChatPanelProps) {
   }
 
   const UI_COMMANDS: Record<string, () => void> = {
-    "clear-conversation": () => { setMessages([]); parser.loadSession([]); },
+    "clear-conversation": () => { parser.loadSession([]); },
     "attach-file": () => {
       const input = document.createElement("input");
       input.type = "file";
@@ -267,7 +278,8 @@ export function ChatPanel(props: ChatPanelProps) {
     const command = `/${id}`;
     parser.addUserMessage(command);
     setIsStreaming(true);
-    await sendWithRespawn(command);
+    const sent = await sendWithRespawn(command);
+    if (!sent) setIsStreaming(false);
   }
 
 
