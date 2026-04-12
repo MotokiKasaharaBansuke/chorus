@@ -1,23 +1,63 @@
 import type { ChatMessage, ChatBlock } from "../types";
 
+type StreamingStatus = "streaming" | "idle";
+
 /** Manages streaming state for a single chat session (Claude Code or Codex) */
 export class StreamParser {
   private messages: ChatMessage[] = [];
   private listeners: Array<(messages: ChatMessage[]) => void> = [];
+  private statusListeners: Array<(status: StreamingStatus) => void> = [];
+  private isRafScheduled = false;
 
-  onUpdate(fn: (messages: ChatMessage[]) => void) {
+  onUpdate(fn: (messages: ChatMessage[]) => void): () => void {
     this.listeners.push(fn);
+    return () => { this.listeners = this.listeners.filter(l => l !== fn); };
   }
 
+  /** Register a callback for streaming status changes.
+   *  Fires "streaming" on init, "idle" on result/turn_complete.
+   *  Returns an unsubscribe function. */
+  onStatusChange(fn: (status: StreamingStatus) => void): () => void {
+    this.statusListeners.push(fn);
+    return () => { this.statusListeners = this.statusListeners.filter(l => l !== fn); };
+  }
+
+  private buildSnapshot(): ChatMessage[] {
+    return this.messages.map(m => ({ ...m, blocks: [...m.blocks] }));
+  }
+
+  /** Immediate notify — used for user-initiated actions (send message, load session, etc.) */
   private notify() {
-    // Deep copy messages with new block arrays for SolidJS reactivity
-    const snapshot = this.messages.map(m => ({
-      ...m,
-      blocks: [...m.blocks],
-    }));
-    for (const fn of this.listeners) {
-      fn(snapshot);
+    const snapshot = this.buildSnapshot();
+    for (const fn of this.listeners) fn(snapshot);
+  }
+
+  /** rAF-batched notify — used during streaming so multiple events per frame produce one DOM update.
+   *  Falls back to immediate notify in environments without requestAnimationFrame (e.g. tests). */
+  private notifyBatched() {
+    if (typeof requestAnimationFrame === "undefined") {
+      this.notify();
+      return;
     }
+    if (this.isRafScheduled) return;
+    this.isRafScheduled = true;
+    requestAnimationFrame(() => {
+      this.isRafScheduled = false;
+      const snapshot = this.buildSnapshot();
+      for (const fn of this.listeners) fn(snapshot);
+    });
+  }
+
+  private notifyStatus(status: StreamingStatus) {
+    for (const fn of this.statusListeners) fn(status);
+  }
+
+  /** Narrows `unknown` to a plain object record, or returns undefined.
+   *  The `as` cast is safe: we verify `typeof === "object" && non-null` before casting. */
+  private toRecord(value: unknown): Record<string, unknown> | undefined {
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : undefined;
   }
 
   getMessages(): ChatMessage[] {
@@ -29,24 +69,24 @@ export class StreamParser {
     this.messages = [];
     for (const line of lines) {
       try {
-        const data = JSON.parse(line) as Record<string, unknown>;
+        const parsed: unknown = JSON.parse(line);
+        const data = this.toRecord(parsed);
+        if (!data) continue;
         const type = typeof data.type === "string" ? data.type : null;
         if (!type) continue;
 
         // --- Claude Code format ---
         if (type === "user") {
-          const rawMsg = data.message;
-          const msg = typeof rawMsg === "object" && rawMsg !== null
-            ? rawMsg as Record<string, unknown>
-            : undefined;
+          const msg = this.toRecord(data.message);
           if (msg?.role === "user") {
             const content = msg.content;
             if (typeof content === "string") {
               this.messages.push({ role: "user", blocks: [{ kind: "text", text: content }], isStreaming: false });
             } else if (Array.isArray(content)) {
+              // Extract user text (skip XML context blocks)
               const texts: string[] = [];
               for (const b of content) {
-                const block = typeof b === "object" && b !== null ? b as Record<string, unknown> : undefined;
+                const block = this.toRecord(b);
                 if (block?.type === "text") {
                   const t = typeof block.text === "string" ? block.text : "";
                   if (t && !t.startsWith("<")) texts.push(t);
@@ -55,6 +95,39 @@ export class StreamParser {
               if (texts.length > 0) {
                 this.messages.push({ role: "user", blocks: [{ kind: "text", text: texts.join("\n") }], isStreaming: false });
               }
+
+              // Extract tool_results and attach to the last assistant message
+              const lastAssistantIdx = this.findLastAssistantIdx();
+              if (lastAssistantIdx !== -1) {
+                const resultBlocks: ChatBlock[] = [];
+                for (const b of content) {
+                  const block = this.toRecord(b);
+                  if (block?.type === "tool_result") {
+                    const toolId = typeof block.tool_use_id === "string" ? block.tool_use_id : "";
+                    let output = "";
+                    if (typeof block.content === "string") {
+                      output = block.content;
+                    } else if (Array.isArray(block.content)) {
+                      const textParts = (block.content as unknown[])
+                        .map(c => this.toRecord(c))
+                        .filter((c): c is Record<string, unknown> => c?.type === "text")
+                        .map(c => typeof c.text === "string" ? c.text : "");
+                      output = textParts.join("\n");
+                    } else {
+                      try { output = JSON.stringify(block.content, null, 2); } catch { output = ""; }
+                    }
+                    if (output) {
+                      resultBlocks.push({ kind: "tool_result", toolId, output, isError: block.is_error === true });
+                    }
+                  }
+                }
+                if (resultBlocks.length > 0) {
+                  this.messages[lastAssistantIdx] = {
+                    ...this.messages[lastAssistantIdx],
+                    blocks: [...this.messages[lastAssistantIdx].blocks, ...resultBlocks],
+                  };
+                }
+              }
             }
           }
         } else if (type === "assistant") {
@@ -62,10 +135,7 @@ export class StreamParser {
 
         // --- Codex format ---
         } else if (type === "event_msg") {
-          const rawPayload = data.payload;
-          const payload = typeof rawPayload === "object" && rawPayload !== null
-            ? rawPayload as Record<string, unknown>
-            : undefined;
+          const payload = this.toRecord(data.payload);
           if (!payload) continue;
           const ptype = typeof payload.type === "string" ? payload.type : null;
           if (ptype === "user_message") {
@@ -107,7 +177,10 @@ export class StreamParser {
   processLine(raw: string) {
     let data: Record<string, unknown>;
     try {
-      data = JSON.parse(raw) as Record<string, unknown>;
+      const parsed: unknown = JSON.parse(raw);
+      const obj = this.toRecord(parsed);
+      if (!obj) return;
+      data = obj;
     } catch {
       return;
     }
@@ -117,19 +190,21 @@ export class StreamParser {
 
     switch (type) {
       case "system":
-        // no-op: system events carry no display-relevant data
+        if (data.subtype === "init") this.notifyStatus("streaming");
         break;
       case "assistant":
         this.handleAssistant(data);
         break;
       case "result":
         this.handleResult(data);
+        this.notifyStatus("idle");
         break;
       case "user":
         this.handleUserToolResult(data);
         break;
       case "turn_complete":
         this.handleTurnComplete(data);
+        this.notifyStatus("idle");
         break;
       case "stderr":
         this.handleStderr(data);
@@ -148,17 +223,14 @@ export class StreamParser {
   }
 
   private handleAssistant(data: Record<string, unknown>) {
-    const rawMessage = data.message;
-    const message = typeof rawMessage === "object" && rawMessage !== null
-      ? rawMessage as Record<string, unknown>
-      : undefined;
+    const message = this.toRecord(data.message);
     if (!message) return;
 
     const rawContent = message.content;
-    const content = Array.isArray(rawContent)
-      ? rawContent as Array<Record<string, unknown>>
-      : undefined;
-    if (!content) return;
+    if (!Array.isArray(rawContent)) return;
+    const content = rawContent
+      .map(b => this.toRecord(b))
+      .filter((b): b is Record<string, unknown> => b !== undefined);
 
     const blocks: ChatBlock[] = [];
     const model = typeof message.model === "string" ? message.model : undefined;
@@ -176,9 +248,12 @@ export class StreamParser {
           break;
         }
         case "tool_use": {
-          const input = typeof block.input === "string"
-            ? block.input
-            : JSON.stringify(block.input, null, 2);
+          let input: string;
+          if (typeof block.input === "string") {
+            input = block.input;
+          } else {
+            try { input = JSON.stringify(block.input, null, 2); } catch { input = "[unparseable]"; }
+          }
           blocks.push({
             kind: "tool_use",
             toolName: typeof block.name === "string" ? block.name : "",
@@ -189,9 +264,12 @@ export class StreamParser {
           break;
         }
         case "tool_result": {
-          const output = typeof block.content === "string"
-            ? block.content
-            : JSON.stringify(block.content, null, 2);
+          let output: string;
+          if (typeof block.content === "string") {
+            output = block.content;
+          } else {
+            try { output = JSON.stringify(block.content, null, 2); } catch { output = "[unparseable]"; }
+          }
           blocks.push({
             kind: "tool_result",
             toolId: typeof block.tool_use_id === "string" ? block.tool_use_id : "",
@@ -205,19 +283,15 @@ export class StreamParser {
 
     if (blocks.length > 0) {
       this.messages.push({ role: "assistant", blocks, isStreaming: false, model });
-      this.notify();
+      this.notifyBatched();
     }
   }
 
   private handleResult(data: Record<string, unknown>) {
     const idx = this.findLastAssistantIdx();
-    if (idx === -1) { this.notify(); return; }
+    if (idx === -1) { this.notifyBatched(); return; }
 
-    const rawUsage = data.usage;
-    const usageObj = typeof rawUsage === "object" && rawUsage !== null
-      ? rawUsage as Record<string, unknown>
-      : undefined;
-
+    const usageObj = this.toRecord(data.usage);
     this.messages[idx] = {
       ...this.messages[idx],
       costUsd: typeof data.total_cost_usd === "number" ? data.total_cost_usd : undefined,
@@ -225,31 +299,24 @@ export class StreamParser {
       inputTokens: typeof usageObj?.input_tokens === "number" ? usageObj.input_tokens : undefined,
       outputTokens: typeof usageObj?.output_tokens === "number" ? usageObj.output_tokens : undefined,
     };
-    this.notify();
+    this.notifyBatched();
   }
 
   private handleTurnComplete(_data: Record<string, unknown>) {
     const idx = this.findLastAssistantIdx();
-    if (idx === -1) { this.notify(); return; }
+    if (idx === -1) { this.notifyBatched(); return; }
     this.messages[idx] = { ...this.messages[idx], isStreaming: false };
-    this.notify();
+    this.notifyBatched();
   }
 
   private handleUserToolResult(data: Record<string, unknown>) {
-    const rawMessage = data.message;
-    const message = typeof rawMessage === "object" && rawMessage !== null
-      ? rawMessage as Record<string, unknown>
-      : undefined;
-    const rawToolResult = data.tool_use_result;
-    const toolResult = typeof rawToolResult === "object" && rawToolResult !== null
-      ? rawToolResult as Record<string, unknown>
-      : undefined;
+    const message = this.toRecord(data.message);
+    const toolResult = this.toRecord(data.tool_use_result);
     const rawContent = message?.content;
-    const content = Array.isArray(rawContent)
-      ? rawContent as Array<Record<string, unknown>>
-      : undefined;
-
-    if (!content) return;
+    if (!Array.isArray(rawContent)) return;
+    const content = rawContent
+      .map(b => this.toRecord(b))
+      .filter((b): b is Record<string, unknown> => b !== undefined);
 
     const idx = this.findLastAssistantIdx();
     if (idx === -1) return;
@@ -266,7 +333,7 @@ export class StreamParser {
         } else if (typeof block.content === "string") {
           output = block.content;
         } else {
-          output = JSON.stringify(block.content, null, 2);
+          try { output = JSON.stringify(block.content, null, 2); } catch { output = "[unparseable]"; }
         }
 
         newBlocks.push({ kind: "tool_result", toolId, output, isError: block.is_error === true });
@@ -278,7 +345,7 @@ export class StreamParser {
         ...this.messages[idx],
         blocks: [...this.messages[idx].blocks, ...newBlocks],
       };
-      this.notify();
+      this.notifyBatched();
     }
   }
 
@@ -291,6 +358,6 @@ export class StreamParser {
       blocks: [{ kind: "stderr", text }],
       isStreaming: false,
     });
-    this.notify();
+    this.notifyBatched();
   }
 }
