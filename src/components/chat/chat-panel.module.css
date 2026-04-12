@@ -37,11 +37,11 @@
 
 /* === User === */
 .userBubble {
-  color: #ccc; font-size: var(--chat-font-size, 13px); line-height: 1.5; white-space: pre-wrap;
+  color: #ccc; font-size: var(--chat-font-size, 11px); line-height: 1.5; white-space: pre-wrap;
 }
 
 /* === Assistant === */
-.assistantContent { font-size: var(--chat-font-size, 13px); line-height: 1.5; color: #ccc; width: 100%; }
+.assistantContent { font-size: var(--chat-font-size, 11px); line-height: 1.5; color: #ccc; width: 100%; }
 
 /* ======== Timeline layout (matching Claude Code extension) ======== */
 .timelineRow {
