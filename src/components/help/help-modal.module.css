@@ -93,6 +93,11 @@
   width: 1%;
 }
 
+.actionCell {
+  font-family: inherit;
+  font-size: 11px;
+}
+
 .desc {
   padding: 5px 0;
   font-size: 12px;

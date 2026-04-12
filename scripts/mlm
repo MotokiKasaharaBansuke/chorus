@@ -67,9 +67,13 @@ launch_new() {
 
 send_ipc() {
   local dir="$1" cli_type="$2"
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "mlm: python3 not found — required for safe JSON encoding" >&2
+    exit 1
+  fi
   python3 -c "import json,sys; print(json.dumps({'action':'open','dir':sys.argv[1],'cliType':sys.argv[2]}))" \
     "$dir" "$cli_type" \
-    | nc -U "$SOCKET" -w 2 2>/dev/null
+    | nc -U "$SOCKET" -w 1 2>/dev/null
 }
 
 # ── main ──────────────────────────────────────────────────────────────────────

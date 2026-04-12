@@ -1,4 +1,4 @@
-import { For } from "solid-js";
+import { For, onMount, onCleanup } from "solid-js";
 import styles from "./help-modal.module.css";
 
 interface HelpModalProps {
@@ -34,6 +34,14 @@ const TAB_DRAG = [
 ];
 
 export function HelpModal(props: HelpModalProps) {
+  onMount(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") props.onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    onCleanup(() => document.removeEventListener("keydown", onKeyDown));
+  });
+
   return (
     <div class={styles.overlay} onClick={props.onClose}>
       <div class={styles.modal} onClick={(e) => e.stopPropagation()}>
@@ -43,7 +51,7 @@ export function HelpModal(props: HelpModalProps) {
         </div>
 
         <div class={styles.body}>
-          <section class={styles.section}>
+          <section>
             <h3 class={styles.sectionTitle}>Keyboard Shortcuts</h3>
             <table class={styles.table}>
               <For each={SHORTCUTS}>
@@ -57,13 +65,13 @@ export function HelpModal(props: HelpModalProps) {
             </table>
           </section>
 
-          <section class={styles.section}>
+          <section>
             <h3 class={styles.sectionTitle}>Tab Drag & Drop</h3>
             <table class={styles.table}>
               <For each={TAB_DRAG}>
                 {(row) => (
                   <tr>
-                    <td class={styles.key} style={{ "font-family": "inherit", "font-size": "11px" }}>{row.action}</td>
+                    <td class={`${styles.key} ${styles.actionCell}`}>{row.action}</td>
                     <td class={styles.desc}>{row.desc}</td>
                   </tr>
                 )}
@@ -71,7 +79,7 @@ export function HelpModal(props: HelpModalProps) {
             </table>
           </section>
 
-          <section class={styles.section}>
+          <section>
             <h3 class={styles.sectionTitle}>
               CLI — <code class={styles.code}>mlm</code>
               <span class={styles.setupHint}>Add <code class={styles.code}>scripts/</code> to PATH to use</span>

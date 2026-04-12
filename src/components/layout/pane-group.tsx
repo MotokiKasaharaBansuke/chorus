@@ -28,18 +28,26 @@ const [dragY, setDragY] = createSignal(0);
 let wasRecentDrag = false;
 
 function startPointerDrag(tabId: string, sourceGroupId: string, startX: number, startY: number) {
+  // Guard against multiple simultaneous drags (e.g. two-finger tap)
+  if (isDragging()) return;
+
   let started = false;
+
+  const resetDragState = () => {
+    setIsDragging(false);
+    setDragX(0);
+    setDragY(0);
+  };
 
   const onMove = (e: PointerEvent) => {
     if (!started && Math.hypot(e.clientX - startX, e.clientY - startY) > 4) {
       started = true;
-      // Suppress text selection and set drag cursor for the entire document
       document.body.style.userSelect = "none";
       document.body.style.cursor = "grabbing";
       setIsDragging(true);
     }
     if (started) {
-      e.preventDefault(); // prevent any default text selection behavior
+      e.preventDefault();
       setDragX(e.clientX);
       setDragY(e.clientY);
     }
@@ -57,24 +65,17 @@ function startPointerDrag(tabId: string, sourceGroupId: string, startX: number, 
     cleanup();
     if (started) {
       wasRecentDrag = true;
-      // Clear flag after click event has had a chance to fire
       setTimeout(() => { wasRecentDrag = false; }, 100);
       window.dispatchEvent(new CustomEvent("mlm-tab-drop", {
         detail: { x: e.clientX, y: e.clientY, tabId, sourceGroupId },
       }));
-      setIsDragging(false);
-      setDragX(0);
-      setDragY(0);
+      resetDragState();
     }
   };
 
   const onCancel = () => {
     cleanup();
-    if (started) {
-      setIsDragging(false);
-      setDragX(0);
-      setDragY(0);
-    }
+    if (started) resetDragState();
   };
 
   document.addEventListener("pointermove", onMove, { passive: false });
