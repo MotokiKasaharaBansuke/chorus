@@ -1,6 +1,7 @@
 import { For, Show, createMemo, createSignal, Index } from "solid-js";
 import type { ChatMessage, ChatBlock } from "../../types";
 import { escapeHtml, sanitizeHref, highlightDiffLine } from "../../lib/format/html";
+import { formatInline } from "../../lib/format/markdown";
 import styles from "./chat-panel.module.css";
 
 interface MessageBubbleProps {
@@ -30,122 +31,16 @@ function renderMarkdown(text: string) {
               </div>
             );
           }
-          return <span innerHTML={formatInline(part)} />;
+          return <span innerHTML={formatInline(part, applyInline, styles)} />;
         }}
       </For>
     </div>
   );
 }
 
-function flushTable(tableLines: string[]): string {
-  const rows = tableLines
-    .map(line => line.split("|").slice(1, -1).map(c => c.trim())) // already escaped
-    .filter(row => !row.every(c => /^[-: ]+$/.test(c)));
-  if (rows.length === 0) return "";
-  const [headers, ...data] = rows;
-  const ths = (headers ?? []).map(h => `<th>${applyInline(h)}</th>`).join("");
-  const trs = data.map(row =>
-    `<tr>${row.map(cell => `<td>${applyInline(cell)}</td>`).join("")}</tr>`
-  ).join("");
-  return `<table class="${styles.mdTable}"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
-}
+// flushTable moved to lib/format/markdown.ts
 
-function formatInline(text: string): string {
-  const lines = text.split("\n");
-  const result: string[] = [];
-  let inList = false;
-  let tableLines: string[] = [];
-
-  const flushList = () => { if (inList) { result.push("</ul>"); inList = false; } };
-  const flushTableBlock = () => {
-    if (tableLines.length > 0) {
-      result.push(flushTable(tableLines));
-      tableLines = [];
-    }
-  };
-
-  for (const rawLine of lines) {
-    const line = rawLine
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-
-    // Table row
-    if (line.match(/^\|/)) {
-      flushList();
-      tableLines.push(line); // use escaped line to prevent XSS
-      continue;
-    }
-    flushTableBlock();
-
-    // Headings
-    const h3Match = line.match(/^### (.+)/);
-    if (h3Match) {
-      flushList();
-      result.push(`<h4 class="${styles.mdH3}">${applyInline(h3Match[1])}</h4>`);
-      continue;
-    }
-    const h2Match = line.match(/^## (.+)/);
-    if (h2Match) {
-      flushList();
-      result.push(`<h3 class="${styles.mdH2}">${applyInline(h2Match[1])}</h3>`);
-      continue;
-    }
-    const h1Match = line.match(/^# (.+)/);
-    if (h1Match) {
-      flushList();
-      result.push(`<h2 class="${styles.mdH1}">${applyInline(h1Match[1])}</h2>`);
-      continue;
-    }
-
-    // Horizontal rule
-    if (line.match(/^---+$/)) {
-      flushList();
-      result.push(`<hr class="${styles.mdHr}"/>`);
-      continue;
-    }
-
-    // Checkbox list (- [x] done, - [ ] pending)
-    const cbMatch = line.match(/^[-*] \[([ xX✓✅])\] (.+)/);
-    if (cbMatch) {
-      if (!inList) { result.push(`<ul class="${styles.mdList}" style="list-style:none;padding-left:4px;">`); inList = true; }
-      const checked = cbMatch[1] !== " ";
-      const icon = checked ? "✅" : "☐";
-      const textStyle = checked ? 'style="text-decoration:line-through;opacity:0.6"' : "";
-      result.push(`<li><span style="margin-right:4px">${icon}</span><span ${textStyle}>${applyInline(cbMatch[2])}</span></li>`);
-      continue;
-    }
-
-    // Unordered list
-    const liMatch = line.match(/^[-*] (.+)/);
-    if (liMatch) {
-      if (!inList) { result.push(`<ul class="${styles.mdList}">`); inList = true; }
-      result.push(`<li>${applyInline(liMatch[1])}</li>`);
-      continue;
-    }
-
-    if (inList && line.trim() === "") {
-      flushList();
-      result.push("<br/>");
-      continue;
-    }
-    if (inList) flushList();
-
-    if (line.trim() === "") {
-      result.push("<br/>");
-      continue;
-    }
-
-    result.push(applyInline(line));
-    result.push("<br/>");
-  }
-
-  flushList();
-  flushTableBlock();
-  return result.join("");
-}
-
-// escapeHtml, sanitizeHref, highlightDiffLine imported from lib/format/html
+// formatInline moved to lib/format/markdown.ts
 
 function applyInline(text: string): string {
   return text
@@ -304,7 +199,22 @@ function ToolUseBlock(props: {
     EDIT_TOOL_NAMES.has(props.block.toolName) ? parseEditInput(props.block.input) : null
   );
 
+  const isTodoWrite = () => props.block.toolName === "TodoWrite";
+
+  const todoItems = createMemo(() => {
+    if (!isTodoWrite()) return null;
+    try {
+      const obj = JSON.parse(props.block.input) as Record<string, unknown>;
+      if (!Array.isArray(obj.todos)) return null;
+      return (obj.todos as Array<Record<string, unknown>>).map(t => ({
+        content: typeof t.content === "string" ? t.content : "",
+        status: typeof t.status === "string" ? t.status : "pending",
+      }));
+    } catch { return null; }
+  });
+
   const inputDisplay = createMemo(() => {
+    if (isTodoWrite()) return null; // Rendered separately as checklist
     try {
       const obj = JSON.parse(props.block.input) as Record<string, unknown>;
       if (typeof obj.command === "string") return obj.command;
@@ -335,6 +245,29 @@ function ToolUseBlock(props: {
           </Show>
         </div>
         <div class={styles.toolBlock}>
+          <Show when={todoItems()}>
+            {(items) => (
+              <div style={{ padding: "6px 10px" }}>
+                <For each={items()}>
+                  {(item) => {
+                    const done = item.status === "completed";
+                    const inProgress = item.status === "in_progress";
+                    return (
+                      <div style={{ display: "flex", "align-items": "baseline", gap: "6px", padding: "1px 0", "font-size": "11px" }}>
+                        <span style={{ color: done ? "#666" : inProgress ? "#58a6ff" : "#555", "font-size": "10px", "flex-shrink": "0" }}>
+                          {done ? "✓" : inProgress ? "●" : "○"}
+                        </span>
+                        <span style={{ color: done ? "#666" : "#aaa", "text-decoration": done ? "line-through" : "none" }}>
+                          {item.content}
+                        </span>
+                      </div>
+                    );
+                  }}
+                </For>
+              </div>
+            )}
+          </Show>
+          <Show when={!isTodoWrite()}>
           <Show when={editInput()} fallback={
             <div class={styles.toolBodyGrid}>
               <Show when={inputDisplay()}>
@@ -366,6 +299,7 @@ function ToolUseBlock(props: {
             </div>
           }>
             {(edit) => <EditDiffView edit={edit()} result={props.result ?? undefined} />}
+          </Show>
           </Show>
         </div>
       </div>
@@ -436,8 +370,8 @@ export function MessageBubble(props: MessageBubbleProps) {
             <div class={styles.meta}>
               {msg().inputTokens && `${msg().inputTokens} in`}
               {msg().outputTokens && ` → ${msg().outputTokens} out`}
-              {msg().costUsd && ` · $${msg().costUsd!.toFixed(4)}`}
-              {msg().durationMs && ` · ${(msg().durationMs! / 1000).toFixed(1)}s`}
+              {msg().costUsd && ` · $${(msg().costUsd ?? 0).toFixed(4)}`}
+              {msg().durationMs && ` · ${((msg().durationMs ?? 0) / 1000).toFixed(1)}s`}
             </div>
           </Show>
         </div>

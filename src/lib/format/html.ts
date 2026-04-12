@@ -18,8 +18,8 @@ export function escapeHtml(text: string): string {
 
 /** Simple syntax highlighting for diff lines (VS Code Dark+ palette) */
 export function highlightDiffLine(line: string): string {
-  // Input MUST be already HTML-escaped
-  let html = line;
+  // Always escape first to prevent XSS via innerHTML
+  let html = escapeHtml(line);
   // Strings
   html = html.replace(/(["'`])(?:(?!\1|\\).|\\.)*\1/g, '<span style="color:#ce9178">$&</span>');
   // Comments
