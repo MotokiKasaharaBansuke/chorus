@@ -157,3 +157,28 @@
 .sendBtn:hover {
   background: #3fb950;
 }
+
+.saveError {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: #3a1a1a;
+  border: 1px solid #7a2020;
+  border-radius: 6px;
+  color: #f08080;
+  font-size: 11px;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+}
+
+.saveErrorDismiss {
+  background: none;
+  border: none;
+  color: #f08080;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+  line-height: 1;
+  flex-shrink: 0;
+}

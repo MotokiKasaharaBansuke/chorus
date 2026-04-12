@@ -8,6 +8,7 @@ pub enum AppError {
     FileSystemError(String),
     CliNotFound(String),
     ImageSaveFailed(String),
+    ImageOperationFailed(String),
 }
 
 impl std::fmt::Display for AppError {
@@ -19,6 +20,7 @@ impl std::fmt::Display for AppError {
             Self::FileSystemError(msg) => write!(f, "File system error: {msg}"),
             Self::CliNotFound(msg) => write!(f, "CLI not found: {msg}"),
             Self::ImageSaveFailed(msg) => write!(f, "Image save failed: {msg}"),
+            Self::ImageOperationFailed(msg) => write!(f, "Image operation failed: {msg}"),
         }
     }
 }
