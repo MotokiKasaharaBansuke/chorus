@@ -170,14 +170,14 @@ function App() {
   async function handleCloseTab(id: string) {
     const tab = tabStore.getTab(id);
     if (tab?.cliConfig.cliType !== "file-viewer") {
-      try { await killPty(id); } catch { /* */ }
+      try { await killPty(tab?.ptyId ?? id); } catch { /* */ }
     }
     tabStore.closeTab(id);
   }
 
   async function handleRestartTab(tab: Tab) {
     if (tab.cliConfig.cliType === "file-viewer") return;
-    try { await killPty(tab.id); } catch {}
+    try { await killPty(tab.ptyId ?? tab.id); } catch {}
     tabStore.closeTab(tab.id);
     await handleNewTab(tab.cliConfig);
   }

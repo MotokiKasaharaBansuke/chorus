@@ -12,8 +12,9 @@ export function TabBar(props: TabBarProps) {
   const store = useTabStore();
 
   async function handleClose(id: string) {
+    const tab = store.getTab(id);
     try {
-      await killPty(id);
+      await killPty(tab?.ptyId ?? id);
     } catch {
       // PTY might already be dead
     }

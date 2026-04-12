@@ -30,6 +30,7 @@ interface ChatInputProps {
   onSubmit: (text: string) => void;
   onSlashCommand: (id: string) => void;
   onPaste: (e: ClipboardEvent) => void;
+  onInterrupt: () => void;
   inputHistory: string[];
 }
 
@@ -74,6 +75,12 @@ export function ChatInput(props: ChatInputProps) {
 
   function handleKeyDown(e: KeyboardEvent) {
     if (isComposing() || compositionJustEnded) return;
+
+    if (e.key === "Escape" && props.isStreaming) {
+      e.preventDefault();
+      props.onInterrupt();
+      return;
+    }
 
     if (showSlash()) {
       const items = getFiltered(slashFilter(), props.cliType);

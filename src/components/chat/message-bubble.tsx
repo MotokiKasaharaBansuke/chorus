@@ -161,6 +161,57 @@ function applyInline(text: string): string {
     );
 }
 
+// --- Edit tool helpers ---
+
+const EDIT_TOOL_NAMES = new Set(["Edit", "str_replace_editor", "EditFile", "MultiEdit"]);
+
+interface EditInput { filePath: string; oldStr: string; newStr: string }
+
+function parseEditInput(input: string): EditInput | null {
+  try {
+    const obj = JSON.parse(input) as Record<string, unknown>;
+    const filePath = typeof (obj.file_path ?? obj.path) === "string"
+      ? (obj.file_path ?? obj.path) as string : "";
+    const oldStr = typeof (obj.old_string ?? obj.oldText ?? obj.old_str) === "string"
+      ? (obj.old_string ?? obj.oldText ?? obj.old_str) as string : "";
+    const newStr = typeof (obj.new_string ?? obj.newText ?? obj.new_str) === "string"
+      ? (obj.new_string ?? obj.newText ?? obj.new_str) as string : "";
+    if (!filePath) return null;
+    return { filePath, oldStr, newStr };
+  } catch { return null; }
+}
+
+function EditDiffView(props: { edit: EditInput }) {
+  const oldLines = () => props.edit.oldStr ? props.edit.oldStr.split("\n") : [];
+  const newLines = () => props.edit.newStr ? props.edit.newStr.split("\n") : [];
+  const fileName = () => {
+    const parts = props.edit.filePath.split("/");
+    return parts[parts.length - 1] ?? props.edit.filePath;
+  };
+
+  return (
+    <>
+      <div class={styles.editDiffHeader}>
+        <span class={styles.editFileName}>{fileName()}</span>
+        <Show when={newLines().length > 0}>
+          <span class={styles.editBadgeAdded}>+{newLines().length}</span>
+        </Show>
+        <Show when={oldLines().length > 0}>
+          <span class={styles.editBadgeRemoved}>-{oldLines().length}</span>
+        </Show>
+      </div>
+      <pre class={styles.editDiffPre}>
+        <Index each={oldLines()}>
+          {(line) => <div class={styles.diffRemoved}>- {line()}</div>}
+        </Index>
+        <Index each={newLines()}>
+          {(line) => <div class={styles.diffAdded}>+ {line()}</div>}
+        </Index>
+      </pre>
+    </>
+  );
+}
+
 function isDiff(text: string): boolean {
   const lines = text.split("\n").slice(0, 10);
   return lines.some(l => l.startsWith("+") || l.startsWith("-")) &&
@@ -217,17 +268,21 @@ function ToolUseBlock(props: {
     } catch { return ""; }
   });
 
+  const editInput = createMemo(() =>
+    EDIT_TOOL_NAMES.has(props.block.toolName) ? parseEditInput(props.block.input) : null
+  );
+
   const inputDisplay = createMemo(() => {
     try {
-      const obj = JSON.parse(props.block.input);
-      if (obj.command) return obj.command;
-      if (obj.file_path) {
-        let s = obj.file_path as string;
-        if (obj.offset) s += ` (lines ${obj.offset}-${(obj.offset as number) + (obj.limit ?? 100)})`;
+      const obj = JSON.parse(props.block.input) as Record<string, unknown>;
+      if (typeof obj.command === "string") return obj.command;
+      if (typeof obj.file_path === "string") {
+        let s = obj.file_path;
+        if (typeof obj.offset === "number") s += ` (lines ${obj.offset}-${obj.offset + ((obj.limit as number) ?? 100)})`;
         return s;
       }
-      if (obj.pattern) return obj.pattern;
-      if (obj.path) return obj.path;
+      if (typeof obj.pattern === "string") return obj.pattern;
+      if (typeof obj.path === "string") return obj.path;
       return props.block.input;
     } catch { return props.block.input; }
   });
@@ -237,7 +292,7 @@ function ToolUseBlock(props: {
       <div class={styles.toolContent}>
         <div class={styles.toolHeader}>
           <span class={styles.toolName}>{props.block.toolName}</span>
-          <Show when={description()}>
+          <Show when={!editInput() && description()}>
             <span class={styles.toolDesc}>{description()}</span>
           </Show>
           <Show when={props.block.isStreaming}>
@@ -248,28 +303,32 @@ function ToolUseBlock(props: {
           </Show>
         </div>
         <div class={styles.toolBlock}>
-          <div class={styles.toolBodyGrid}>
-            <Show when={inputDisplay()}>
-              <div class={styles.toolBodyRow}>
-                <div class={styles.toolLabel}>IN</div>
-                <pre class={styles.toolValue}>{inputDisplay()}</pre>
-              </div>
-            </Show>
-            <Show when={props.result}>
-              {(r) => (
-                <div class={`${styles.toolBodyRow} ${r().isError ? styles.toolSectionError : ""}`}>
-                  <div class={`${styles.toolLabel} ${r().isError ? styles.toolLabelError : ""}`}>
-                    {r().isError ? "ERR" : "OUT"}
-                  </div>
-                  <Show when={!r().isError && isDiff(r().output)} fallback={
-                    <pre class={styles.toolValue}>{r().output}</pre>
-                  }>
-                    <DiffOutput text={r().output} />
-                  </Show>
+          <Show when={editInput()} fallback={
+            <div class={styles.toolBodyGrid}>
+              <Show when={inputDisplay()}>
+                <div class={styles.toolBodyRow}>
+                  <div class={styles.toolLabel}>IN</div>
+                  <pre class={styles.toolValue}>{inputDisplay()}</pre>
                 </div>
-              )}
-            </Show>
-          </div>
+              </Show>
+              <Show when={props.result}>
+                {(r) => (
+                  <div class={`${styles.toolBodyRow} ${r().isError ? styles.toolSectionError : ""}`}>
+                    <div class={`${styles.toolLabel} ${r().isError ? styles.toolLabelError : ""}`}>
+                      {r().isError ? "ERR" : "OUT"}
+                    </div>
+                    <Show when={!r().isError && isDiff(r().output)} fallback={
+                      <pre class={styles.toolValue}>{r().output}</pre>
+                    }>
+                      <DiffOutput text={r().output} />
+                    </Show>
+                  </div>
+                )}
+              </Show>
+            </div>
+          }>
+            {(edit) => <EditDiffView edit={edit()} />}
+          </Show>
         </div>
       </div>
     </div>
@@ -347,11 +406,14 @@ export function MessageBubble(props: MessageBubbleProps) {
       </Show>
 
       <Show when={msg().role === "system"}>
-        <div class={styles.systemMsg}>
-          <For each={msg().blocks}>
-            {(block) => block.kind === "text" ? <span>{block.text}</span> : null}
-          </For>
-        </div>
+        <For each={msg().blocks}>
+          {(block) => block.kind === "stderr"
+            ? <div class={styles.interrupted}>{block.text}</div>
+            : block.kind === "text"
+            ? <div class={styles.systemMsg}><span>{block.text}</span></div>
+            : null
+          }
+        </For>
       </Show>
     </div>
   );

@@ -94,6 +94,15 @@ export class StreamParser {
     this.notify();
   }
 
+  addInterrupted() {
+    this.messages.push({
+      role: "system",
+      blocks: [{ kind: "stderr", text: "Interrupted" }],
+      isStreaming: false,
+    });
+    this.notify();
+  }
+
   /** Process a single NDJSON line from Claude Code stream-json */
   processLine(raw: string) {
     let data: Record<string, unknown>;
