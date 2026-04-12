@@ -1,6 +1,7 @@
 import { For, Show, createMemo, createSignal, Index } from "solid-js";
 import type { ChatMessage, ChatBlock } from "../../types";
-import { escapeHtml, sanitizeHref, highlightDiffLine } from "../../lib/format/html";
+import { escapeHtml, highlightDiffLine } from "../../lib/format/html";
+import { applyInline as applyInlineRaw } from "../../lib/format/inline";
 import { formatInline } from "../../lib/format/markdown";
 import styles from "./chat-panel.module.css";
 
@@ -39,31 +40,9 @@ function renderMarkdown(text: string) {
 }
 
 
-/** Convert inline Markdown to HTML. Input must be HTML-escaped. */
+/** Bind applyInline to this module's CSS classes */
 function applyInline(text: string): string {
-  // Step 1: Replace Markdown links with placeholders to prevent auto-link from matching inside href
-  const placeholders: string[] = [];
-  let result = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) => {
-    const idx = placeholders.length;
-    placeholders.push(`<a class="${styles.mdLink}" href="${sanitizeHref(url)}" data-external-link="true">${label}</a>`);
-    return `\x00LINK${idx}\x00`;
-  });
-
-  // Step 2: Inline formatting
-  result = result
-    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*(.+?)\*/g, "<em>$1</em>")
-    .replace(/`([^`]+)`/g, `<code class="${styles.inlineCode}">$1</code>`);
-
-  // Step 3: Auto-link bare URLs (safe — Markdown links already replaced with placeholders)
-  result = result.replace(/(https?:\/\/[^\s<>\x00]+)/g, (url) =>
-    `<a class="${styles.mdLink}" href="${sanitizeHref(url)}" data-external-link="true">${url}</a>`
-  );
-
-  // Step 4: Restore placeholders
-  result = result.replace(/\x00LINK(\d+)\x00/g, (_, idx) => placeholders[parseInt(idx, 10)] ?? "");
-
-  return result;
+  return applyInlineRaw(text, { mdLink: styles.mdLink, inlineCode: styles.inlineCode });
 }
 
 // --- Edit tool helpers ---
@@ -72,15 +51,21 @@ const EDIT_TOOL_NAMES = new Set(["Edit", "str_replace_editor", "EditFile", "Mult
 
 interface EditInput { filePath: string; oldStr: string; newStr: string }
 
+function toRecord(v: unknown): Record<string, unknown> | null {
+  return typeof v === "object" && v !== null && !Array.isArray(v) ? v as Record<string, unknown> : null;
+}
+
+function str(v: unknown): string {
+  return typeof v === "string" ? v : "";
+}
+
 function parseEditInput(input: string): EditInput | null {
   try {
-    const obj = JSON.parse(input) as Record<string, unknown>;
-    const filePath = typeof (obj.file_path ?? obj.path) === "string"
-      ? (obj.file_path ?? obj.path) as string : "";
-    const oldStr = typeof (obj.old_string ?? obj.oldText ?? obj.old_str) === "string"
-      ? (obj.old_string ?? obj.oldText ?? obj.old_str) as string : "";
-    const newStr = typeof (obj.new_string ?? obj.newText ?? obj.new_str) === "string"
-      ? (obj.new_string ?? obj.newText ?? obj.new_str) as string : "";
+    const obj = toRecord(JSON.parse(input));
+    if (!obj) return null;
+    const filePath = str(obj.file_path ?? obj.path);
+    const oldStr = str(obj.old_string ?? obj.oldText ?? obj.old_str);
+    const newStr = str(obj.new_string ?? obj.newText ?? obj.new_str);
     if (!filePath) return null;
     return { filePath, oldStr, newStr };
   } catch { return null; }
@@ -154,9 +139,10 @@ function truncate(text: string, maxLen: number): string {
 }
 
 function isDiff(text: string): boolean {
-  const lines = text.split("\n").slice(0, 10);
-  return lines.some(l => l.startsWith("+") || l.startsWith("-")) &&
-    lines.some(l => l.startsWith("@@") || l.match(/^[+-]{3}/));
+  const lines = text.split("\n").slice(0, 15);
+  // Require @@ hunk header — plain +/- lines alone (e.g. vitest output) are NOT diffs
+  return lines.some(l => l.startsWith("@@")) &&
+    lines.some(l => l.startsWith("+") || l.startsWith("-"));
 }
 
 function DiffOutput(props: { text: string }) {
@@ -204,8 +190,8 @@ function ToolUseBlock(props: {
 
   const description = createMemo(() => {
     try {
-      const obj = JSON.parse(props.block.input);
-      return (obj.description as string) || "";
+      const obj = toRecord(JSON.parse(props.block.input));
+      return str(obj?.description);
     } catch { return ""; }
   });
 
@@ -218,19 +204,23 @@ function ToolUseBlock(props: {
   const todoItems = createMemo(() => {
     if (!isTodoWrite()) return null;
     try {
-      const obj = JSON.parse(props.block.input) as Record<string, unknown>;
-      if (!Array.isArray(obj.todos)) return null;
-      return (obj.todos as Array<Record<string, unknown>>).map(t => ({
-        content: typeof t.content === "string" ? t.content : "",
-        status: typeof t.status === "string" ? t.status : "pending",
-      }));
+      const obj = toRecord(JSON.parse(props.block.input));
+      if (!obj || !Array.isArray(obj.todos)) return null;
+      return obj.todos.map(item => {
+        const t = toRecord(item);
+        return {
+          content: str(t?.content),
+          status: str(t?.status) || "pending",
+        };
+      });
     } catch { return null; }
   });
 
   const inputDisplay = createMemo(() => {
     if (isTodoWrite()) return null; // Rendered separately as checklist
     try {
-      const obj = JSON.parse(props.block.input) as Record<string, unknown>;
+      const obj = toRecord(JSON.parse(props.block.input));
+      if (!obj) return props.block.input;
       if (typeof obj.command === "string") return obj.command;
       if (typeof obj.file_path === "string") {
         let s = obj.file_path;
@@ -287,10 +277,10 @@ function ToolUseBlock(props: {
               <Show when={inputDisplay()}>
                 <div class={styles.toolBodyRow}>
                   <div class={styles.toolLabel}>IN</div>
-                  <pre
-                    class={isShortText(inputDisplay() ?? "") ? styles.toolValueShort : styles.toolValue}
+                  <div
+                    class={styles.toolValue}
                     onClick={() => openContentAsTab(`${props.block.toolName} — Input`, inputDisplay() ?? "")}
-                  >{inputDisplay()}</pre>
+                  >{inputDisplay()}</div>
                 </div>
               </Show>
               <Show when={props.result}>
@@ -300,10 +290,10 @@ function ToolUseBlock(props: {
                       {r().isError ? "ERR" : "OUT"}
                     </div>
                     <Show when={!r().isError && isDiff(r().output)} fallback={
-                      <pre
-                        class={isShortText(r().output) ? styles.toolValueShort : styles.toolValue}
+                      <div
+                        class={styles.toolValue}
                         onClick={() => openContentAsTab(`${props.block.toolName} — Output`, r().output)}
-                      >{r().output}</pre>
+                      >{r().output}</div>
                     }>
                       <DiffOutput text={r().output} />
                     </Show>

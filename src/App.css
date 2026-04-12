@@ -6,6 +6,11 @@
   box-sizing: border-box;
 }
 
+pre {
+  font-size: inherit;
+  font-family: inherit;
+}
+
 html {
   font-size: 100%; /* controlled by Cmd+/- zoom */
 }
