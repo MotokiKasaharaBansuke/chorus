@@ -25,7 +25,7 @@ function App() {
   const sidebarStore = useSidebarStore();
   const [isModalOpen, setIsModalOpen] = createSignal(false);
   const [quickLaunchMode, setQuickLaunchMode] = createSignal<CliMode>("dangerously-skip-permissions");
-  const [fontSize, setFontSize] = createSignal(13);
+  const [fontSize, setFontSize] = createSignal(11);
   const [zoom, setZoom] = createSignal(100);
 
   const bottomTerminal = useBottomTerminal(() => sidebarStore.workingDir);
