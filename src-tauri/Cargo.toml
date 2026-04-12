@@ -27,5 +27,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 ignore = "0.4"
 base64 = "0.22"
+libc = "0.2"
 which = "7"
 shell-escape = "0.1"

@@ -100,6 +100,8 @@ pub struct StreamSession {
     pub working_dir: String,
     pub session_id: String,
     pub is_running: std::sync::Arc<parking_lot::Mutex<bool>>,
+    /// PID of the last spawned child process (for kill)
+    child_pid: std::sync::Arc<parking_lot::Mutex<Option<u32>>>,
 }
 
 impl StreamSession {
@@ -112,6 +114,7 @@ impl StreamSession {
         Self {
             cli_type,
             command,
+            child_pid: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             base_args,
             working_dir,
             session_id: uuid::Uuid::new_v4().to_string(),
@@ -211,6 +214,9 @@ impl StreamSession {
                 tracing::error!(error = %e, "Failed to spawn process");
                 AppError::PtySpawnFailed(e.to_string())
             })?;
+
+        // Store PID for kill()
+        *self.child_pid.lock() = Some(child.id());
 
         let stream_id = pane_id.to_string();
         let app_clone = app.clone();
@@ -582,7 +588,14 @@ impl StreamSession {
     }
 
     pub fn kill(&self) {
-        // Nothing to kill if not running; the subprocess will finish on its own
+        if let Some(pid) = self.child_pid.lock().take() {
+            // Send SIGTERM to the process group
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGTERM);
+            }
+            *self.is_running.lock() = false;
+            tracing::info!(pid, "Killed child process");
+        }
     }
 }
 
