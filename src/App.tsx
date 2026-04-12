@@ -105,33 +105,15 @@ function App() {
 
     // Listen for IPC "open directory" events sent by the `mlm` CLI.
     // Always adds a new split pane (not a tab in the current pane), then equalizes.
-    ipcUnlistenRef = await listen<string>("mlm-open-dir", async (event) => {
-      let dir: string;
-      let cliType: "claude-code" | "codex" = "claude-code";
-      try {
-        const payload = JSON.parse(event.payload) as { dir: string; cliType?: string };
-        dir = payload.dir;
-        if (payload.cliType === "codex") cliType = "codex";
-      } catch {
-        dir = event.payload; // fallback: plain string
-      }
+    ipcUnlistenRef = await listen<{ dir: string; cliType?: string }>("mlm-open-dir", async (event) => {
+      const { dir, cliType: rawCliType } = event.payload;
       if (!dir) return;
-
+      const cliType: "claude-code" | "codex" = rawCliType === "codex" ? "codex" : "claude-code";
       const config: CliConfig = { cliType, mode: quickLaunchMode(), workingDir: dir };
       try {
-        const id = await spawnPty(config);
-        const label = cliType === "claude-code" ? "Claude" : "Codex";
-        const tab: Tab = { id, title: `${label} ${tabStore.tabs.length + 1}`, status: "running", cliConfig: config };
-        const focusedGroup = tabStore.focusedGroupId;
-        if (focusedGroup && tabStore.layout) {
-          tabStore.openTab(tab);
-          tabStore.splitGroup(focusedGroup, "horizontal", id, "after");
-        } else {
-          tabStore.openTab(tab);
-        }
-        sidebarStore.setWorkingDir(dir);
+        await spawnAndOpenTab(config, { splitIntoNewPane: true });
         tabStore.equalize();
-      } catch (e) { console.error("IPC: failed to spawn:", e); }
+      } catch { /* IPC spawn failed */ }
     });
 
     const imgExts = ["png","jpg","jpeg","gif","webp","svg","bmp"];
@@ -170,16 +152,23 @@ function App() {
   onCleanup(() => { dropUnlistenRef?.(); ipcUnlistenRef?.(); });
 
   // --- Tab lifecycle ---
+  const CLI_LABELS: Record<string, string> = { "claude-code": "Claude", "codex": "Codex", "shell": "Shell" };
+
+  async function spawnAndOpenTab(config: CliConfig, options?: { splitIntoNewPane?: boolean }) {
+    const id = await spawnPty(config);
+    const label = CLI_LABELS[config.cliType] ?? config.cliType;
+    const tab: Tab = { id, title: `${label} ${tabStore.tabs.length + 1}`, status: "running", cliConfig: config };
+    tabStore.openTab(tab);
+    if (options?.splitIntoNewPane && tabStore.focusedGroupId && tabStore.layout) {
+      tabStore.splitGroup(tabStore.focusedGroupId, "horizontal", id, "after");
+    }
+    sidebarStore.setWorkingDir(config.workingDir);
+    return id;
+  }
+
   async function handleNewTab(config?: CliConfig) {
     if (!config) { setIsModalOpen(true); return; }
-    try {
-      const id = await spawnPty(config);
-      const cliLabel = config.cliType === "claude-code" ? "Claude"
-        : config.cliType === "codex" ? "Codex" : "Shell";
-      const tab: Tab = { id, title: `${cliLabel} ${tabStore.tabs.length + 1}`, status: "running", cliConfig: config };
-      tabStore.openTab(tab);
-      sidebarStore.setWorkingDir(config.workingDir);
-    } catch { /* spawn failed */ }
+    try { await spawnAndOpenTab(config); } catch { /* spawn failed */ }
   }
 
   async function handleCloseTab(id: string) {
@@ -208,19 +197,7 @@ function App() {
 
   async function quickLaunch(cliType: "claude-code" | "codex") {
     const config: CliConfig = { cliType, mode: quickLaunchMode(), workingDir: sidebarStore.workingDir || "~" };
-    try {
-      const id = await spawnPty(config);
-      const label = cliType === "claude-code" ? "Claude" : "Codex";
-      const tab: Tab = { id, title: `${label} ${tabStore.tabs.length + 1}`, status: "running", cliConfig: config };
-      const focusedGroup = tabStore.focusedGroupId;
-      if (focusedGroup && tabStore.layout) {
-        tabStore.openTab(tab);
-        tabStore.splitGroup(focusedGroup, "horizontal", id, "after");
-      } else {
-        tabStore.openTab(tab);
-      }
-      sidebarStore.setWorkingDir(config.workingDir);
-    } catch { /* spawn failed */ }
+    try { await spawnAndOpenTab(config, { splitIntoNewPane: true }); } catch { /* spawn failed */ }
   }
 
   // --- Zoom & font size ---
