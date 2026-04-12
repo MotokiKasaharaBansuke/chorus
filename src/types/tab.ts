@@ -18,6 +18,7 @@ export interface Tab {
   cliConfig: CliConfig;
   filePath?: string;
   lastSessionId?: string; // last loaded past session (for restore)
+  ptyId?: string; // current PTY ID (differs from tab.id after PTY respawn)
 }
 
 export interface TabStoreState {

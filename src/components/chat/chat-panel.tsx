@@ -1,7 +1,7 @@
 import { createSignal, For, Show, onMount, onCleanup } from "solid-js";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { sendMessage as sendMessageCmd, saveTempImage, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, type SessionInfo } from "../../lib/commands";
+import { sendMessage as sendMessageCmd, killPty, spawnPty, saveTempImage, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, type SessionInfo } from "../../lib/commands";
 import { StreamParser } from "../../lib/stream-parser";
 import { MessageBubble } from "./message-bubble";
 import { BusySpinner } from "./busy-spinner";
@@ -20,6 +20,8 @@ interface ChatPanelProps {
 
 export function ChatPanel(props: ChatPanelProps) {
   const store = useTabStore();
+  /** Effective PTY ID (differs from tab.id after PTY respawn) */
+  const ptyId = () => props.tab.ptyId ?? props.tab.id;
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = createSignal(false);
   const [attachedImages, setAttachedImages] = createSignal<Array<{ name: string; path: string }>>([]);
@@ -54,7 +56,7 @@ export function ChatPanel(props: ChatPanelProps) {
 
   onMount(async () => {
     unlisten = await listen<{ id: string; data: string }>("stream-event", (event) => {
-      if (event.payload.id === props.tab.id) {
+      if (event.payload.id === ptyId()) {
         parser.processLine(event.payload.data);
         // Match extension: busy until "result" event
         try {
@@ -71,7 +73,7 @@ export function ChatPanel(props: ChatPanelProps) {
     });
 
     exitUnlisten = await listen<{ id: string; code: number | null }>("pty-exit", (event) => {
-      if (event.payload.id === props.tab.id) {
+      if (event.payload.id === ptyId()) {
         store.updateStatus(props.tab.id, event.payload.code === 0 ? "completed" : "error");
       }
     });
@@ -126,6 +128,45 @@ export function ChatPanel(props: ChatPanelProps) {
     if (dragStateHandler) window.removeEventListener("mlm-drag-state", dragStateHandler);
   });
 
+  // Throttle PTY respawns: at most once per 5 seconds
+  let lastRespawnAt = 0;
+
+  /** Send a message to the PTY, respawning it once if the session is gone. */
+  async function sendWithRespawn(message: string): Promise<boolean> {
+    try {
+      await sendMessageCmd(ptyId(), message);
+      store.updateStatus(props.tab.id, "running");
+      return true;
+    } catch {
+      // PTY session may not exist (e.g. after app restart with restored tabs)
+      const now = Date.now();
+      if (now - lastRespawnAt < 5_000) {
+        setIsStreaming(false);
+        store.updateStatus(props.tab.id, "error");
+        parser.addUserMessage("[Error: PTY respawn failed. Please restart the tab.]");
+        return false;
+      }
+      try {
+        lastRespawnAt = now;
+        const newId = await spawnPty(props.tab.cliConfig);
+        if (!store.getTab(props.tab.id)) {
+          await killPty(newId).catch(() => {});
+          return false;
+        }
+        store.updatePtyId(props.tab.id, newId);
+        await sendMessageCmd(newId, message);
+        store.updateStatus(props.tab.id, "running");
+        return true;
+      } catch (retryError) {
+        setIsStreaming(false);
+        store.updateStatus(props.tab.id, "error");
+        const msg = retryError instanceof Error ? retryError.message : String(retryError);
+        parser.addUserMessage(`[Error: Failed to send message. ${msg}]`);
+        return false;
+      }
+    }
+  }
+
   async function handleSubmitFromInput(text: string) {
     let fullMessage = text;
     const images = attachedImages();
@@ -139,13 +180,7 @@ export function ChatPanel(props: ChatPanelProps) {
     setAttachedImages([]);
     setIsStreaming(true);
 
-    try {
-      await sendMessageCmd(props.tab.id, fullMessage);
-      store.updateStatus(props.tab.id, "running");
-    } catch {
-      setIsStreaming(false);
-      store.updateStatus(props.tab.id, "error");
-    }
+    await sendWithRespawn(fullMessage);
     for (const img of images) {
       deleteTempImage(img.path).catch(() => {});
     }
@@ -257,13 +292,7 @@ export function ChatPanel(props: ChatPanelProps) {
     const command = `/${id}`;
     parser.addUserMessage(command);
     setIsStreaming(true);
-    try {
-      await sendMessageCmd(props.tab.id, command);
-      store.updateStatus(props.tab.id, "running");
-    } catch {
-      setIsStreaming(false);
-      store.updateStatus(props.tab.id, "error");
-    }
+    await sendWithRespawn(command);
   }
 
 
@@ -288,6 +317,15 @@ export function ChatPanel(props: ChatPanelProps) {
     store.updateModel(props.tab.id, modelId || undefined);
     // Also notify the CLI about model change
     sendAsSlashCommand(`model ${modelId || "default"}`);
+  }
+
+  async function handleInterrupt() {
+    try {
+      await killPty(ptyId());
+    } catch { /* already stopped */ }
+    parser.addInterrupted();
+    setIsStreaming(false);
+    store.updateStatus(props.tab.id, "waiting");
   }
 
   return (
@@ -383,6 +421,7 @@ export function ChatPanel(props: ChatPanelProps) {
         onSubmit={handleSubmitFromInput}
         onSlashCommand={selectSlashCommand}
         onPaste={handlePaste}
+        onInterrupt={handleInterrupt}
         inputHistory={inputHistory}
       />
     </div>
