@@ -4,8 +4,10 @@ use tauri::{AppHandle, State};
 use crate::cli::registry::{CliMode, CliType, resolve_command};
 use crate::error::AppError;
 use crate::pty::manager::PtyManager;
+use crate::pty::session::ImageAttachment;
 
 const MAX_WRITE_SIZE: usize = 1_048_576;
+const MAX_IMAGE_ATTACHMENTS: usize = 10;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,13 +47,22 @@ pub fn spawn_pty(
 pub fn send_message(
     pane_id: String,
     message: String,
+    images: Option<Vec<ImageAttachment>>,
     state: State<'_, PtyManager>,
     app: AppHandle,
 ) -> Result<(), AppError> {
     if message.len() > MAX_WRITE_SIZE {
         return Err(AppError::PtyWriteFailed("Message too large".into()));
     }
-    state.send_stream_message(&pane_id, &message, app)
+    if let Some(ref imgs) = images {
+        if imgs.len() > MAX_IMAGE_ATTACHMENTS {
+            return Err(AppError::PtyWriteFailed(format!(
+                "Too many images: {} (max {MAX_IMAGE_ATTACHMENTS})",
+                imgs.len()
+            )));
+        }
+    }
+    state.send_stream_message(&pane_id, &message, images.as_deref(), app)
 }
 
 #[tauri::command]

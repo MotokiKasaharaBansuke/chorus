@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cli::registry::CliType;
 use crate::error::AppError;
@@ -23,6 +23,14 @@ pub struct PtyExitPayload {
 pub struct StreamEventPayload {
     pub id: String,
     pub data: String,
+}
+
+/// Image attachment for stream-json input to Claude Code CLI.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAttachment {
+    pub data: String,       // base64-encoded image data
+    pub media_type: String, // e.g. "image/png"
 }
 
 /// Raw PTY session for shell/legacy CLI
@@ -134,16 +142,25 @@ impl StreamSession {
         }
     }
 
-    /// Build CLI arguments for the current message
-    fn build_args(&self, message: &str) -> Vec<String> {
+    /// Build CLI arguments for the current message.
+    /// When `use_stream_input` is true (Claude Code with images), the message is sent
+    /// via stdin (stream-json) instead of as a positional argument.
+    /// For Codex, images are passed via `--image <path>` flags.
+    fn build_args(&self, message: &str, use_stream_input: bool, image_paths: &[String]) -> Vec<String> {
         let mut args = self.base_args.clone();
         match self.cli_type {
             CliType::ClaudeCode => {
                 args.push("-p".into());
-                args.push(message.into());
+                if !use_stream_input {
+                    args.push(message.into());
+                }
                 args.push("--output-format".into());
                 args.push("stream-json".into());
                 args.push("--verbose".into());
+                if use_stream_input {
+                    args.push("--input-format".into());
+                    args.push("stream-json".into());
+                }
                 // First message: --session-id UUID creates a new session
                 // Subsequent messages: --resume UUID resumes that specific session
                 if self.has_session.load(Ordering::Acquire) {
@@ -157,6 +174,10 @@ impl StreamSession {
                 // base_args already starts with ["exec", ...flags]
                 args.push("--json".into());
                 args.push("--skip-git-repo-check".into());
+                for path in image_paths {
+                    args.push("--image".into());
+                    args.push(path.clone());
+                }
                 // "--" prevents message content from being parsed as CLI flags
                 args.push("--".into());
                 args.push(message.into());
@@ -174,6 +195,7 @@ impl StreamSession {
         &self,
         pane_id: &str,
         message: &str,
+        images: Option<&[ImageAttachment]>,
         app: AppHandle,
     ) -> Result<(), AppError> {
         {
@@ -194,10 +216,38 @@ impl StreamSession {
         // If anything below panics or returns Err, Drop clears running_since automatically.
         let guard = super::running_guard::MessageRunGuard::new(self.running_since.clone());
 
-        let (child, stdout, stderr) = self.spawn_cli_process(message)?;
+        let has_images = images.is_some_and(|imgs| !imgs.is_empty());
+        // Claude Code: images sent via stdin (stream-json)
+        // Codex: images saved to temp files and passed via --image flags
+        let use_stream_input = has_images && self.cli_type == CliType::ClaudeCode;
+        let image_paths = if has_images && self.cli_type == CliType::Codex {
+            Self::save_images_to_temp(images.unwrap_or(&[]))?
+        } else {
+            Vec::new()
+        };
+
+        let (mut child, stdin, stdout, stderr) = self.spawn_cli_process(message, use_stream_input, &image_paths)?;
+
+        // When images are present for Claude Code, write stream-json input to stdin
+        if use_stream_input {
+            match (stdin, images) {
+                (Some(stdin_handle), Some(imgs)) => {
+                    if let Err(e) = Self::write_stream_json_input(stdin_handle, message, imgs) {
+                        let _ = child.kill();
+                        return Err(e);
+                    }
+                }
+                _ => {
+                    let _ = child.kill();
+                    return Err(AppError::PtyWriteFailed("stdin unavailable for stream-json input".into()));
+                }
+            }
+        }
+
         // Mark session as created so subsequent messages use --resume
+        // (set AFTER successful stdin write to avoid --resume on a never-started session)
         self.has_session.store(true, Ordering::Release);
-        self.start_reader_thread(pane_id, child, stdout, stderr, app, guard);
+        self.start_reader_thread(pane_id, child, stdout, stderr, app, guard, image_paths);
         Ok(())
     }
 
@@ -205,12 +255,14 @@ impl StreamSession {
     fn spawn_cli_process(
         &self,
         message: &str,
-    ) -> Result<(std::process::Child, std::process::ChildStdout, std::process::ChildStderr), AppError> {
-        let args = self.build_args(message);
+        use_stream_input: bool,
+        image_paths: &[String],
+    ) -> Result<(std::process::Child, Option<std::process::ChildStdin>, std::process::ChildStdout, std::process::ChildStderr), AppError> {
+        let args = self.build_args(message, use_stream_input, image_paths);
         let mut cmd = Command::new(&self.command);
         cmd.args(&args)
             .current_dir(&self.working_dir)
-            .stdin(Stdio::null())
+            .stdin(if use_stream_input { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -234,6 +286,7 @@ impl StreamSession {
 
         *self.child_pid.lock() = Some(child.id());
 
+        let stdin = child.stdin.take();
         let stdout = child.stdout.take()
             .ok_or_else(|| {
                 let _ = child.kill();
@@ -245,7 +298,74 @@ impl StreamSession {
                 AppError::PtySpawnFailed("stderr handle unavailable".into())
             })?;
 
-        Ok((child, stdout, stderr))
+        Ok((child, stdin, stdout, stderr))
+    }
+
+    /// Save base64 image attachments to temp files for Codex `--image` flag.
+    /// Delegates to the existing `save_temp_image` command which has full security
+    /// hardening (O_EXCL, mode 0o600, size limits, extension allowlist).
+    const ALLOWED_MEDIA_TYPES: &[&str] = &["image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"];
+
+    fn save_images_to_temp(images: &[ImageAttachment]) -> Result<Vec<String>, AppError> {
+        let mut paths = Vec::with_capacity(images.len());
+        for img in images {
+            if !Self::ALLOWED_MEDIA_TYPES.contains(&img.media_type.as_str()) {
+                return Err(AppError::ImageSaveFailed(format!(
+                    "Unsupported media type: {}",
+                    img.media_type
+                )));
+            }
+            let ext = img.media_type.strip_prefix("image/").unwrap_or("png");
+            // save_temp_image also validates extension via ALLOWED_EXTENSIONS
+            let path = crate::commands::image_commands::save_temp_image(
+                img.data.clone(),
+                Some(ext.to_string()),
+            )?;
+            paths.push(path);
+        }
+        Ok(paths)
+    }
+
+    /// Write a stream-json user message (with image content blocks) to stdin,
+    /// then drop stdin so the CLI processes the input.
+    fn write_stream_json_input(
+        stdin: std::process::ChildStdin,
+        message: &str,
+        images: &[ImageAttachment],
+    ) -> Result<(), AppError> {
+        let mut content = Vec::new();
+        for img in images {
+            content.push(serde_json::json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.media_type,
+                    "data": img.data,
+                }
+            }));
+        }
+        content.push(serde_json::json!({
+            "type": "text",
+            "text": message,
+        }));
+
+        let input_line = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": content,
+            }
+        });
+
+        let mut writer = std::io::BufWriter::new(stdin);
+        serde_json::to_writer(&mut writer, &input_line)
+            .map_err(|e| AppError::PtyWriteFailed(format!("Failed to write stream-json input: {e}")))?;
+        writer.write_all(b"\n")
+            .map_err(|e| AppError::PtyWriteFailed(format!("Failed to write newline: {e}")))?;
+        writer.flush()
+            .map_err(|e| AppError::PtyWriteFailed(format!("Failed to flush stdin: {e}")))?;
+        // stdin is dropped here, closing the pipe
+        Ok(())
     }
 
     /// Configure PATH and environment variables for the CLI process.
@@ -277,6 +397,7 @@ impl StreamSession {
         stderr: std::process::ChildStderr,
         app: AppHandle,
         guard: super::running_guard::MessageRunGuard,
+        temp_image_paths: Vec<String>,
     ) {
         let stream_id = pane_id.to_string();
         let cli_type = self.cli_type;
@@ -300,6 +421,10 @@ impl StreamSession {
                     .or_else(|| e.downcast_ref::<&str>().copied())
                     .unwrap_or("unknown");
                 tracing::error!(panic = msg, "Reader thread panicked");
+            }
+            // Clean up Codex temp image files after the CLI process exits
+            for path in &temp_image_paths {
+                let _ = std::fs::remove_file(path);
             }
         });
     }

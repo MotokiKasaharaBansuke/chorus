@@ -27,8 +27,21 @@ export async function writePty(ptyId: string, data: string): Promise<void> {
   return invoke("write_pty", { ptyId, data });
 }
 
-export async function sendMessage(paneId: string, message: string): Promise<void> {
-  return invoke("send_message", { paneId, message });
+export interface ImageAttachmentPayload {
+  data: string;      // base64-encoded image data (no data: prefix)
+  mediaType: string; // e.g. "image/png"
+}
+
+export async function sendMessage(
+  paneId: string,
+  message: string,
+  images?: ReadonlyArray<ImageAttachmentPayload>,
+): Promise<void> {
+  return invoke("send_message", {
+    paneId,
+    message,
+    images: images && images.length > 0 ? images : null,
+  });
 }
 
 export async function resizePty(ptyId: string, cols: number, rows: number): Promise<void> {

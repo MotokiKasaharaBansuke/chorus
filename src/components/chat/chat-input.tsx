@@ -2,7 +2,7 @@ import { createSignal, For, Show } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { SlashMenu, getFiltered } from "./slash-menu";
 import { useTabStore } from "../../stores/tab-store";
-import type { CliType, CliMode } from "../../types";
+import type { CliType, CliMode, AttachedImage } from "../../types";
 import styles from "./chat-panel.module.css";
 
 const CLAUDE_MODES: CliMode[] = ["default", "plan", "dangerously-skip-permissions"];
@@ -13,11 +13,6 @@ const MODE_LABELS: Record<CliMode, string> = {
   plan: "Plan",
   "dangerously-skip-permissions": "Bypass permissions",
 };
-
-interface AttachedImage {
-  name: string;
-  path: string;
-}
 
 interface ChatInputProps {
   tabId: string;

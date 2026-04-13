@@ -67,6 +67,7 @@ impl PtyManager {
         &self,
         id: &str,
         message: &str,
+        images: Option<&[super::session::ImageAttachment]>,
         app: AppHandle,
     ) -> Result<(), AppError> {
         let session = {
@@ -77,7 +78,7 @@ impl PtyManager {
                 None => return Err(AppError::PtyNotFound(id.to_string())),
             }
         }; // Lock released here — before cmd.spawn()
-        session.send_message(id, message, app)
+        session.send_message(id, message, images, app)
     }
 
     pub fn write(&self, id: &str, data: &[u8]) -> Result<(), AppError> {

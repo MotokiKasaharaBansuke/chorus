@@ -9,5 +9,5 @@ export type {
 export { effectivePtyId } from "./tab";
 
 export type { FileNode } from "./file-tree";
-export type { ChatBlock, ChatMessage } from "./chat";
+export type { AttachedImage, ChatBlock, ChatMessage } from "./chat";
 export type { SplitDirection, SplitNode, PaneGroupNode, LayoutNode } from "./layout";
