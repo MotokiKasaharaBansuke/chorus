@@ -1,7 +1,7 @@
 {
   "name": "chorus",
-  "version": "0.1.0",
-  "description": "",
+  "version": "0.2.0",
+  "description": "macOS desktop app for managing multiple AI coding assistants in parallel",
   "type": "module",
   "scripts": {
     "start": "vite",
