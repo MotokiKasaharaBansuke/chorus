@@ -356,7 +356,7 @@ export function MessageBubble(props: MessageBubbleProps) {
                 );
               }
               if (block.kind === "text") {
-                return <div>{block.text}</div>;
+                return <div class={styles.userText}>{block.text}</div>;
               }
               return null;
             }}

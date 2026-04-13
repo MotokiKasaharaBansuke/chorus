@@ -37,7 +37,11 @@
 
 /* === User === */
 .userBubble {
-  color: #ccc; font-size: var(--chat-font-size, 11px); line-height: 1.5; white-space: pre-wrap;
+  color: #ccc; font-size: var(--chat-font-size, 11px); line-height: 1.5;
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start;
+}
+.userText {
+  flex: 0 0 100%; white-space: pre-wrap;
 }
 .userImageFallback {
   display: inline-block;
@@ -108,7 +112,7 @@
   width: 14px; height: 14px;
   animation: spin 1s linear infinite;
 }
-.doingText { font-size: 13px; color: #ccc; font-weight: 500; }
+.doingText { font-size: var(--chat-font-size, 11px); color: #ccc; font-weight: 500; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes fadeIn { 0% { opacity: 0; } 100% { opacity: 1; } }
@@ -155,12 +159,12 @@
 /* === Code block === */
 .codeBlock { background: #111; border: 1px solid #252525; border-radius: 5px; margin: 4px 0; overflow: hidden; }
 .codeLang { padding: 3px 10px; font-size: 10px; color: #555; border-bottom: 1px solid #252525; font-family: var(--mono, 'SF Mono', monospace); }
-.codeContent { padding: 6px 10px; margin: 0; overflow-x: auto; font-family: var(--mono, 'SF Mono', monospace); font-size: 11px; line-height: 1.45; color: #ccc; }
+.codeContent { padding: 6px 10px; margin: 0; overflow-x: auto; font-family: var(--mono, 'SF Mono', monospace); font-size: var(--chat-font-size, 11px); line-height: 1.45; color: #ccc; }
 
 /* === Thinking === */
 .thinking { width: 100%; }
 .thinkingSummary {
-  cursor: pointer; font-size: 13px; color: #888; user-select: none;
+  cursor: pointer; font-size: var(--chat-font-size, 11px); color: #888; user-select: none;
   padding: 0; list-style: none; display: flex; align-items: center; gap: 4px;
   font-style: italic;
 }
@@ -171,7 +175,7 @@
 }
 .thinkingToggleOpen { transform: rotate(90deg); }
 .thinkingContent {
-  color: #777; margin-top: 4px; font-weight: 400; font-size: 12px;
+  color: #777; margin-top: 4px; font-weight: 400; font-size: var(--chat-font-size, 11px);
   line-height: 1.5; white-space: pre-wrap; max-height: 200px; overflow-y: auto;
 }
 
@@ -181,7 +185,7 @@
   display: flex; align-items: center; gap: 4px; padding: 0 0 2px;
 }
 .toolName {
-  font-size: 11px; font-weight: 600; color: #bbb; margin-right: 2px;
+  font-size: var(--chat-font-size, 11px); font-weight: 600; color: #bbb; margin-right: 2px;
 }
 .toolDesc {
   font-family: var(--mono, 'SF Mono', monospace); color: #58a6ff;
@@ -191,7 +195,7 @@
 
 .toolBlock {
   border: 0.5px solid #2a2a2a; background: #151515; border-radius: 4px;
-  margin: 2px 0; font-size: 11px; overflow: hidden;
+  margin: 2px 0; font-size: var(--chat-font-size, 11px); overflow: hidden;
 }
 
 /* Grid layout for IN/OUT rows */
@@ -288,24 +292,24 @@
 /* Tool annotation badge */
 .toolAnnotation {
   color: #74c991; background-color: #74c99133; border-radius: 3px;
-  padding: 2px 6px; font-size: 11px; margin-left: 4px;
+  padding: 2px 6px; font-size: var(--chat-font-size, 11px); margin-left: 4px;
 }
 .toolAnnotationDestructive { color: #c74e39; background-color: #c74e3933; }
 
 /* === Stderr === */
-.stderr { color: #c74e39; font-size: 12px; font-family: var(--mono, 'SF Mono', monospace); padding: 2px 0; }
+.stderr { color: #c74e39; font-size: var(--chat-font-size, 11px); font-family: var(--mono, 'SF Mono', monospace); padding: 2px 0; }
 
 /* === Cursor === */
 .cursor { color: #d97757; animation: cursorBlink 1s step-end infinite; font-size: 12px; }
 
 /* === Meta === */
-.meta { font-size: 11px; color: #444; margin-top: 6px; }
+.meta { font-size: var(--chat-font-size, 11px); color: #444; margin-top: 6px; }
 
 /* === System === */
-.systemMsg { font-size: 11px; color: #444; text-align: center; padding: 4px 0; }
+.systemMsg { font-size: var(--chat-font-size, 11px); color: #444; text-align: center; padding: 4px 0; }
 
 /* === Interrupted === */
-.interrupted { color: #888; font-style: italic; padding: 4px 0; font-size: 13px; }
+.interrupted { color: #888; font-style: italic; padding: 4px 0; font-size: var(--chat-font-size, 11px); }
 
 /* ======== Input (Cursor-style) ======== */
 .inputWrapper {
@@ -352,7 +356,7 @@
   line-height: 1;
 }
 .busyText {
-  font-size: 13px; font-weight: 500;
+  font-size: var(--chat-font-size, 11px); font-weight: 500;
   line-height: 1;
 }
 
