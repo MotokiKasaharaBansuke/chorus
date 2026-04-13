@@ -34,6 +34,24 @@ pnpm vitest run     # Run tests
   - `fs/` - File tree traversal
   - `error.rs` - Shared error type
 
+## Release
+
+- **release-please** でバージョン管理を自動化
+- `feat:` / `fix:` などの Conventional Commits プレフィックスからバージョンを自動決定
+- mainにマージされると release-please が自動でバンプPRを作成
+- バンプPRをマージ → `v*` タグ自動作成 → GitHub Actions でビルド・リリース
+- **手動でのバージョンバンプは不要**（package.json, Cargo.toml, tauri.conf.json は release-please が更新）
+- バージョンは3箇所で同期が必要: `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`
+
+### コミットメッセージとバージョンの関係
+
+| プレフィックス | バージョン変更 | 例 |
+|---|---|---|
+| `feat:` | minor (0.x.0) | `feat: セッション復元機能を追加` |
+| `fix:` | patch (0.0.x) | `fix: 画像D&Dが動かない問題を修正` |
+| `feat!:` / `BREAKING CHANGE` | major (x.0.0) | `feat!: 設定ファイル形式を変更` |
+| `chore:` / `refactor:` / `docs:` | バージョン変更なし | `chore: lint設定を更新` |
+
 ## Design Principles
 
 - Stores manage state only. IPC goes through `lib/commands/`

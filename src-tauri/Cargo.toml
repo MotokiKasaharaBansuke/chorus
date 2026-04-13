@@ -1,5 +1,6 @@
 [package]
 name = "chorus"
+# x-release-please-version
 version = "0.3.0"
 description = "Chorus: macOS desktop app for managing multiple AI coding assistants in parallel"
 authors = ["kasaharamotoki"]
