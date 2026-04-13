@@ -1,7 +1,7 @@
 import { createSignal, createEffect, For, Show, onMount, onCleanup } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
-import { sendMessage as sendMessageCmd, killPty, spawnPty, saveTempImage, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
+import { sendMessage as sendMessageCmd, killPty, spawnPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
 import { StreamParser } from "../../lib/stream-parser";
 import { MessageBubble } from "./message-bubble";
 import { BusySpinner } from "./busy-spinner";
@@ -92,18 +92,21 @@ export function ChatPanel(props: ChatPanelProps) {
 
   // Image drop events dispatched from App.tsx — co-located with cleanup via createEffect
   createEffect(() => {
-    function handleImageDrop(e: Event) {
+    async function handleImageDrop(e: Event) {
       if (!(e instanceof CustomEvent)) return;
       const { tabId, paths } = e.detail ?? {};
       if (tabId !== props.tab.id || !Array.isArray(paths)) return;
       dropHandledAt = Date.now();
       for (const p of paths) {
-        if (typeof p !== "string" || !isValidTempImagePath(p)) continue;
-        setAttachedImages(prev =>
-          prev.some(img => img.path === p)
-            ? prev
-            : [...prev, { name: p.split("/").pop() ?? "image", path: p }]
-        );
+        if (typeof p !== "string") continue;
+        try {
+          const imported = await importImageFile(p);
+          setAttachedImages(prev =>
+            prev.some(img => img.path === imported.path)
+              ? prev
+              : [...prev, { name: p.split("/").pop() ?? "image", ...imported }]
+          );
+        } catch { /* unsupported format or read error — skip */ }
       }
     }
     window.addEventListener("mlm-image-drop", handleImageDrop);
@@ -325,7 +328,7 @@ export function ChatPanel(props: ChatPanelProps) {
   }
 
   return (
-    <div class={styles.container} ref={containerRef}>
+    <div class={styles.container} ref={containerRef} data-tab-id={props.tab.id}>
       <Show when={showSessionPicker()}>
         <SessionPicker
           sessions={pastSessions()}

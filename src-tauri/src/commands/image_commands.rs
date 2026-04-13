@@ -67,6 +67,43 @@ fn is_valid_image_filename(filename: &str) -> bool {
         && ALLOWED_EXTENSIONS.contains(&ext)
 }
 
+// ── shared helper ────────────────────────────────────────────────────────────
+
+/// Write raw bytes to a new temp file with hardened permissions.
+/// O_CREAT | O_EXCL | mode 0600: atomic exclusive creation.
+fn write_temp_file(bytes: &[u8], ext: &str) -> Result<String, AppError> {
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(AppError::ImageSaveFailed(format!(
+            "Image too large: {} bytes (max {})",
+            bytes.len(), MAX_IMAGE_BYTES
+        )));
+    }
+
+    let dir = get_temp_dir()?;
+    let filename = format!("{}.{ext}", uuid::Uuid::new_v4());
+    let file_path = dir.join(&filename);
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&file_path)
+        .map_err(into_save_error)?;
+
+    file.write_all(bytes).map_err(|e| {
+        let _ = fs::remove_file(&file_path);
+        into_save_error(e)
+    })?;
+
+    file_path
+        .to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
+            let _ = fs::remove_file(&file_path);
+            AppError::ImageSaveFailed("Non-UTF8 path".into())
+        })
+}
+
 // ── Tauri commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -76,54 +113,86 @@ pub fn save_temp_image(data: String, extension: Option<String>) -> Result<String
     if !ALLOWED_EXTENSIONS.contains(&ext) {
         return Err(AppError::ImageSaveFailed(format!("Unsupported extension: {ext}")));
     }
-
-    // Pre-decode size guard: reject obviously oversized payloads before allocating memory.
     if data.len() > MAX_ENCODED_LEN {
         return Err(AppError::ImageSaveFailed(format!(
-            "Image data too large (max {} bytes decoded)",
-            MAX_IMAGE_BYTES
+            "Image data too large (max {} bytes decoded)", MAX_IMAGE_BYTES
         )));
     }
-
-    let dir = get_temp_dir()?;
-    let filename = format!("{}.{ext}", uuid::Uuid::new_v4());
-    let file_path = dir.join(&filename);
 
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&data)
         .map_err(|e| AppError::ImageSaveFailed(format!("Invalid base64: {e}")))?;
 
-    if bytes.len() > MAX_IMAGE_BYTES {
+    write_temp_file(&bytes, ext)
+}
+
+/// Import an image from a native file path: read it, save to temp dir, and return
+/// the temp path + base64 data + media type for the frontend AttachedImage.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedImage {
+    pub path: String,
+    pub base64_data: String,
+    pub media_type: String,
+}
+
+#[tauri::command]
+pub fn import_image_file(file_path: String) -> Result<ImportedImage, AppError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::io::Read;
+
+    let src = std::path::Path::new(&file_path);
+
+    // Reject paths with ".." components to prevent path traversal.
+    if src.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(AppError::ImageSaveFailed("Path traversal not allowed".into()));
+    }
+
+    let ext = src.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    // Normalise "jpg" → "jpeg" so media_type matches the IANA standard ("image/jpeg").
+    let ext = if ext == "jpg" { "jpeg".to_string() } else { ext };
+    if !ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
+        return Err(AppError::ImageSaveFailed(format!("Unsupported extension: {ext}")));
+    }
+
+    // Open with O_NOFOLLOW to atomically reject symlinks (no TOCTOU window).
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(src)
+        .map_err(|e| {
+            if e.raw_os_error() == Some(libc::ELOOP) {
+                AppError::ImageSaveFailed("Symlinks not allowed".into())
+            } else {
+                into_save_error(e)
+            }
+        })?;
+
+    let meta = file.metadata().map_err(into_save_error)?;
+    if !meta.is_file() {
+        return Err(AppError::ImageSaveFailed(format!("Not a regular file: {file_path}")));
+    }
+    if meta.len() > MAX_IMAGE_BYTES as u64 {
         return Err(AppError::ImageSaveFailed(format!(
-            "Image too large: {} bytes (max {})",
-            bytes.len(),
-            MAX_IMAGE_BYTES
+            "Image too large: {} bytes (max {})", meta.len(), MAX_IMAGE_BYTES
         )));
     }
 
-    // O_CREAT | O_EXCL | mode 0600: atomic exclusive creation with correct permissions.
-    // Prevents symlink race attacks and ensures no permission window between write and chmod.
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&file_path)
-        .map_err(into_save_error)?;
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.read_to_end(&mut bytes).map_err(into_save_error)?;
 
-    file.write_all(&bytes).map_err(|e| {
-        // Best-effort cleanup: remove the empty file left by O_EXCL on write failure.
-        let _ = fs::remove_file(&file_path);
-        into_save_error(e)
-    })?;
+    let temp_path = write_temp_file(&bytes, &ext)?;
+    let base64_data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let media_type = format!("image/{ext}");
 
-    file_path
-        .to_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            // Best-effort cleanup: remove the written file if the path can't be returned.
-            let _ = fs::remove_file(&file_path);
-            AppError::ImageSaveFailed("Non-UTF8 path".into())
-        })
+    Ok(ImportedImage {
+        path: temp_path,
+        base64_data,
+        media_type,
+    })
 }
 
 #[tauri::command]
