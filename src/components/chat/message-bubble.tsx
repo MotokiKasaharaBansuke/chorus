@@ -341,18 +341,18 @@ export function MessageBubble(props: MessageBubbleProps) {
                 const [hasError, setHasError] = createSignal(false);
                 const truncatedName = truncate(block.name, 64);
                 return (
-                  <div class={styles.userImagePreview}>
-                    <Show when={!hasError()} fallback={
-                      <span class={styles.userImageFallback}>{truncatedName}</span>
-                    }>
+                  <Show when={!hasError()} fallback={
+                    <span class={styles.userImageFallback}>{truncatedName}</span>
+                  }>
+                    <div class={styles.imageThumbnail}>
                       <img
                         src={convertFileSrc(block.path)}
                         alt={truncatedName}
-                        class={styles.userImageThumbnail}
+                        class={styles.thumbnailImg}
                         onError={() => setHasError(true)}
                       />
-                    </Show>
-                  </div>
+                    </div>
+                  </Show>
                 );
               }
               if (block.kind === "text") {
