@@ -117,32 +117,57 @@ function App() {
       } catch (e) { console.error("IPC: failed to spawn pane:", e); }
     });
 
-    const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"]);
+    const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
     const isImagePath = (p: string) => IMAGE_EXTENSIONS.has(p.split(".").pop()?.toLowerCase() ?? "");
 
     const webview = getCurrentWebviewWindow();
+    /** Find the tab ID at the given coordinates by walking up from elementFromPoint. */
+    function findTabIdAtPosition(x: number, y: number): string | null {
+      const el = document.elementFromPoint(x, y);
+      const container = el?.closest("[data-tab-id]");
+      return container?.getAttribute("data-tab-id") ?? null;
+    }
+
+    let isDraggingImages = false;
+
+    function emitDragState(tabId: string | null, over: boolean) {
+      window.dispatchEvent(new CustomEvent("mlm-drag-state", { detail: { tabId, over } }));
+    }
+
+    function resolveTabId(pos: { x: number; y: number } | undefined): string | null {
+      return (pos ? findTabIdAtPosition(pos.x, pos.y) : null) ?? tabStore.activeTabId;
+    }
+
     dropUnlistenRef = await webview.onDragDropEvent((event) => {
-      if (event.payload.type === "drop") {
-        const targetId = tabStore.activeTabId;
-        if (!targetId) return;
-        const imagePaths = event.payload.paths.filter(isImagePath);
-        if (imagePaths.length > 0) {
-          const dropKey = imagePaths.join("|");
-          const now = Date.now();
-          if (dropKey === lastDropKey && now - lastDropTime < 500) return;
-          lastDropKey = dropKey;
-          lastDropTime = now;
-          window.dispatchEvent(new CustomEvent("mlm-image-drop", { detail: { tabId: targetId, paths: imagePaths } }));
-        }
-        window.dispatchEvent(new CustomEvent("mlm-drag-state", { detail: { tabId: null, over: false } }));
-      } else if (event.payload.type === "over") {
-        const hasImageFiles = (event.payload.paths ?? []).some(isImagePath);
-        if (hasImageFiles) {
-          window.dispatchEvent(new CustomEvent("mlm-drag-state", { detail: { tabId: tabStore.activeTabId, over: true } }));
-        }
-      } else {
-        window.dispatchEvent(new CustomEvent("mlm-drag-state", { detail: { tabId: null, over: false } }));
+      const type = event.payload.type;
+
+      if (type === "enter") {
+        isDraggingImages = (event.payload.paths ?? []).some(isImagePath);
       }
+
+      if ((type === "enter" || type === "over") && isDraggingImages) {
+        emitDragState(resolveTabId(event.payload.position), true);
+        return;
+      }
+
+      if (type === "drop") {
+        const targetId = resolveTabId(event.payload.position);
+        if (targetId) {
+          const imagePaths = (event.payload.paths ?? []).filter(isImagePath);
+          if (imagePaths.length > 0) {
+            const deduplicationKey = imagePaths.join("|");
+            const now = Date.now();
+            if (deduplicationKey !== lastDropKey || now - lastDropTime >= 500) {
+              lastDropKey = deduplicationKey;
+              lastDropTime = now;
+              window.dispatchEvent(new CustomEvent("mlm-image-drop", { detail: { tabId: targetId, paths: imagePaths } }));
+            }
+          }
+        }
+      }
+
+      isDraggingImages = false;
+      emitDragState(null, false);
     });
   });
 
