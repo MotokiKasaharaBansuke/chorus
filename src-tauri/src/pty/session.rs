@@ -2,6 +2,10 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtyPair, PtySize, PtySystem}
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter};
 use serde::Serialize;
 
@@ -104,9 +108,11 @@ pub struct StreamSession {
     pub session_id: String,
     /// Tracks when the current message started processing. None = idle.
     /// Used to detect stale locks (e.g. process crash without cleanup).
-    pub running_since: std::sync::Arc<parking_lot::Mutex<Option<std::time::Instant>>>,
+    pub running_since: Arc<Mutex<Option<Instant>>>,
     /// PID of the last spawned child process (for kill)
-    child_pid: std::sync::Arc<parking_lot::Mutex<Option<u32>>>,
+    child_pid: Arc<Mutex<Option<u32>>>,
+    /// Whether the first message has been sent (for Claude Code --resume flag)
+    has_session: Arc<AtomicBool>,
 }
 
 impl StreamSession {
@@ -119,11 +125,12 @@ impl StreamSession {
         Self {
             cli_type,
             command,
-            child_pid: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            child_pid: Arc::new(Mutex::new(None)),
             base_args,
             working_dir,
             session_id: uuid::Uuid::new_v4().to_string(),
-            running_since: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            running_since: Arc::new(Mutex::new(None)),
+            has_session: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -137,7 +144,13 @@ impl StreamSession {
                 args.push("--output-format".into());
                 args.push("stream-json".into());
                 args.push("--verbose".into());
-                args.push("--session-id".into());
+                // First message: --session-id UUID creates a new session
+                // Subsequent messages: --resume UUID resumes that specific session
+                if self.has_session.load(Ordering::Acquire) {
+                    args.push("--resume".into());
+                } else {
+                    args.push("--session-id".into());
+                }
                 args.push(self.session_id.clone());
             }
             CliType::Codex => {
@@ -155,7 +168,7 @@ impl StreamSession {
 
     /// Send a user message and stream the response back via events
     /// Maximum time a single message can run before the lock is considered stale
-    const STALE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600); // 10 minutes
+    const STALE_LOCK_TIMEOUT: Duration = Duration::from_secs(600); // 10 minutes
 
     pub fn send_message(
         &self,
@@ -174,7 +187,7 @@ impl StreamSession {
                 // Kill the stale process if PID is still set
                 self.kill();
             }
-            *running = Some(std::time::Instant::now());
+            *running = Some(Instant::now());
         }
 
         // Guard created immediately after setting running_since.
@@ -182,6 +195,8 @@ impl StreamSession {
         let guard = super::running_guard::MessageRunGuard::new(self.running_since.clone());
 
         let (child, stdout, stderr) = self.spawn_cli_process(message)?;
+        // Mark session as created so subsequent messages use --resume
+        self.has_session.store(true, Ordering::Release);
         self.start_reader_thread(pane_id, child, stdout, stderr, app, guard);
         Ok(())
     }
@@ -298,11 +313,24 @@ impl StreamSession {
         stream_id: &str,
         app: &AppHandle,
     ) {
-        spawn_stderr_logger(stderr, "Claude Code");
+        // Capture stderr in a background thread so we can forward it on failure
+        let stderr_handle = std::thread::spawn(move || {
+            let mut collected = String::new();
+            for line in BufReader::new(stderr).lines().flatten() {
+                if !line.is_empty() {
+                    tracing::warn!(stderr = %line, "Claude Code stderr");
+                    collected.push_str(&line);
+                    collected.push('\n');
+                }
+            }
+            collected
+        });
 
+        let mut got_output = false;
         for line in BufReader::new(stdout).lines() {
             match line {
                 Ok(l) if !l.is_empty() => {
+                    got_output = true;
                     let _ = app.emit("stream-event", StreamEventPayload {
                         id: stream_id.to_string(),
                         data: l,
@@ -314,6 +342,19 @@ impl StreamSession {
         }
 
         let exit_code = child.wait().ok().and_then(|s| s.code());
+        let stderr_text = stderr_handle.join().unwrap_or_default();
+
+        // Forward stderr to frontend when process failed or produced no output
+        if (!got_output || exit_code.is_none_or(|c| c != 0)) && !stderr_text.is_empty() {
+            let _ = app.emit("stream-event", StreamEventPayload {
+                id: stream_id.to_string(),
+                data: serde_json::json!({
+                    "type": "stderr",
+                    "text": stderr_text.trim(),
+                }).to_string(),
+            });
+        }
+
         let _ = app.emit("stream-event", StreamEventPayload {
             id: stream_id.to_string(),
             data: serde_json::json!({
@@ -496,7 +537,7 @@ impl StreamSession {
                     // Signal 0 checks whether the process group still exists before sending SIGKILL,
                     // preventing a kill of an unrelated process that recycled the same PID.
                     std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        std::thread::sleep(Duration::from_secs(3));
                         if unsafe { libc::kill(-pid_i32, 0) } == 0 {
                             unsafe { libc::kill(-pid_i32, libc::SIGKILL); }
                         }

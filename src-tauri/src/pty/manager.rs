@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use parking_lot::Mutex;
 use tauri::AppHandle;
 
@@ -10,7 +11,7 @@ const MAX_TABS: usize = 20;
 
 enum Session {
     Pty(PtySession),
-    Stream(StreamSession),
+    Stream(Arc<StreamSession>),
 }
 
 pub struct PtyManager {
@@ -54,23 +55,29 @@ impl PtyManager {
             return Err(AppError::PtySpawnFailed(format!("Maximum tabs ({MAX_TABS}) reached")));
         }
         let session = StreamSession::new(cli_type, command, base_args, working_dir);
-        self.sessions.lock().insert(id.to_string(), Session::Stream(session));
+        self.sessions.lock().insert(id.to_string(), Session::Stream(Arc::new(session)));
         tracing::info!(session_id = id, "Stream session created");
         Ok(())
     }
 
+    /// Send a message to a stream session.
+    /// The Arc clone allows releasing the sessions lock before spawning the CLI process,
+    /// so other sessions are not blocked during process startup.
     pub fn send_stream_message(
         &self,
         id: &str,
         message: &str,
         app: AppHandle,
     ) -> Result<(), AppError> {
-        let sessions = self.sessions.lock();
-        match sessions.get(id) {
-            Some(Session::Stream(s)) => s.send_message(id, message, app),
-            Some(Session::Pty(_)) => Err(AppError::PtyWriteFailed("Not a stream session".into())),
-            None => Err(AppError::PtyNotFound(id.to_string())),
-        }
+        let session = {
+            let sessions = self.sessions.lock();
+            match sessions.get(id) {
+                Some(Session::Stream(s)) => Arc::clone(s),
+                Some(Session::Pty(_)) => return Err(AppError::PtyWriteFailed("Not a stream session".into())),
+                None => return Err(AppError::PtyNotFound(id.to_string())),
+            }
+        }; // Lock released here — before cmd.spawn()
+        session.send_message(id, message, app)
     }
 
     pub fn write(&self, id: &str, data: &[u8]) -> Result<(), AppError> {
