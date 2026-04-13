@@ -155,10 +155,16 @@ export class StreamParser {
     this.notify();
   }
 
-  addUserMessage(text: string) {
+  /** @param images Caller MUST validate paths via isValidTempImagePath before passing. */
+  addUserMessage(text: string, images?: ReadonlyArray<{ path: string; name: string }>) {
+    const imageBlocks: ChatBlock[] = (images ?? []).map(img => ({
+      kind: "image" as const,
+      path: img.path,
+      name: img.name,
+    }));
     this.messages.push({
       role: "user",
-      blocks: [{ kind: "text", text }],
+      blocks: [...imageBlocks, { kind: "text", text }],
       isStreaming: false,
     });
     this.notify();

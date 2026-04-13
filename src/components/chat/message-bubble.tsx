@@ -1,8 +1,10 @@
 import { For, Show, createMemo, createSignal, Index } from "solid-js";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import type { ChatMessage, ChatBlock } from "../../types";
 import { escapeHtml, highlightDiffLine } from "../../lib/format/html";
 import { applyInline as applyInlineRaw } from "../../lib/format/inline";
 import { formatInline } from "../../lib/format/markdown";
+import { isValidTempImagePath } from "../../lib/validate-path";
 import styles from "./chat-panel.module.css";
 
 interface MessageBubbleProps {
@@ -333,7 +335,31 @@ export function MessageBubble(props: MessageBubbleProps) {
       <Show when={msg().role === "user"}>
         <div class={styles.userBubble}>
           <For each={msg().blocks}>
-            {(block) => block.kind === "text" ? <div>{block.text}</div> : null}
+            {(block) => {
+              if (block.kind === "image") {
+                if (!isValidTempImagePath(block.path)) return null;
+                const [hasError, setHasError] = createSignal(false);
+                const truncatedName = truncate(block.name, 64);
+                return (
+                  <div class={styles.userImagePreview}>
+                    <Show when={!hasError()} fallback={
+                      <span class={styles.userImageFallback}>{truncatedName}</span>
+                    }>
+                      <img
+                        src={convertFileSrc(block.path)}
+                        alt={truncatedName}
+                        class={styles.userImageThumbnail}
+                        onError={() => setHasError(true)}
+                      />
+                    </Show>
+                  </div>
+                );
+              }
+              if (block.kind === "text") {
+                return <div>{block.text}</div>;
+              }
+              return null;
+            }}
           </For>
         </div>
       </Show>
