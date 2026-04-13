@@ -13,19 +13,12 @@ import type { Tab, ChatMessage } from "../../types";
 import { effectivePtyId } from "../../types";
 import { useTabStore } from "../../stores/tab-store";
 import { classifyStreamError } from "../../lib/classify-error";
+import { isValidTempImagePath } from "../../lib/validate-path";
 import styles from "./chat-panel.module.css";
 
 
 interface ChatPanelProps {
   tab: Tab;
-}
-
-/** True only for paths that Chorus wrote into the temp image directory (no traversal). */
-function isValidTempImagePath(p: string): boolean {
-  return p.startsWith("/tmp/chorus-images/")
-    && !p.includes("..")
-    && !p.includes("\n")
-    && !p.includes("\r");
 }
 
 export function ChatPanel(props: ChatPanelProps) {
@@ -197,7 +190,7 @@ export function ChatPanel(props: ChatPanelProps) {
       if (imagePrefixes) fullMessage = `${imagePrefixes}\n${fullMessage}`;
     }
 
-    parser.addUserMessage(text + (images.length > 0 ? ` [${images.length} image(s)]` : ""));
+    parser.addUserMessage(text, images);
     setAttachedImages([]);
     setIsStreaming(true);
 

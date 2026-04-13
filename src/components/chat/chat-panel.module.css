@@ -39,6 +39,26 @@
 .userBubble {
   color: #ccc; font-size: var(--chat-font-size, 11px); line-height: 1.5; white-space: pre-wrap;
 }
+.userImagePreview {
+  display: inline-block;
+  margin-bottom: 4px;
+}
+.userImageThumbnail {
+  min-width: 40px;
+  min-height: 40px;
+  max-width: 200px;
+  max-height: 150px;
+  border-radius: 4px;
+  object-fit: contain;
+}
+.userImageFallback {
+  display: inline-block;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: #888;
+  background: #2a2a2a;
+  border-radius: 4px;
+}
 
 /* === Assistant === */
 .assistantContent { font-size: var(--chat-font-size, 11px); line-height: 1.5; color: #ccc; width: 100%; }

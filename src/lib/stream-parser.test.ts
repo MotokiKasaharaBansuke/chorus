@@ -313,3 +313,37 @@ describe("StreamParser.onUpdate", () => {
     expect(firstSnapshot).toHaveLength(1);
   });
 });
+
+describe("StreamParser.addUserMessage with images", () => {
+  it("places image blocks before text block", () => {
+    const parser = new StreamParser();
+    const images = [
+      { path: "/tmp/chorus-images/a.png", name: "a.png" },
+      { path: "/tmp/chorus-images/b.jpg", name: "b.jpg" },
+    ];
+    parser.addUserMessage("hello", images);
+    const msgs = parser.getMessages();
+    expect(msgs).toHaveLength(1);
+    const blocks = msgs[0].blocks;
+    expect(blocks).toHaveLength(3);
+    expect(blocks[0]).toEqual({ kind: "image", path: "/tmp/chorus-images/a.png", name: "a.png" });
+    expect(blocks[1]).toEqual({ kind: "image", path: "/tmp/chorus-images/b.jpg", name: "b.jpg" });
+    expect(blocks[2]).toEqual({ kind: "text", text: "hello" });
+  });
+
+  it("produces no image blocks when images is an empty array", () => {
+    const parser = new StreamParser();
+    parser.addUserMessage("hello", []);
+    const blocks = parser.getMessages()[0].blocks;
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toEqual({ kind: "text", text: "hello" });
+  });
+
+  it("produces no image blocks when images is undefined", () => {
+    const parser = new StreamParser();
+    parser.addUserMessage("hello");
+    const blocks = parser.getMessages()[0].blocks;
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toEqual({ kind: "text", text: "hello" });
+  });
+});
