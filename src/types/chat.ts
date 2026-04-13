@@ -1,3 +1,11 @@
+/** Image attached to a chat message (preview + send data). */
+export interface AttachedImage {
+  name: string;
+  path: string;
+  base64Data: string;
+  mediaType: string;
+}
+
 /** Parsed chat message for rendering */
 export type ChatBlock =
   | { kind: "text"; text: string }

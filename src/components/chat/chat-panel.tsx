@@ -1,7 +1,7 @@
 import { createSignal, createEffect, For, Show, onMount, onCleanup } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
-import { sendMessage as sendMessageCmd, killPty, spawnPty, saveTempImage, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, type SessionInfo } from "../../lib/commands";
+import { sendMessage as sendMessageCmd, killPty, spawnPty, saveTempImage, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
 import { StreamParser } from "../../lib/stream-parser";
 import { MessageBubble } from "./message-bubble";
 import { BusySpinner } from "./busy-spinner";
@@ -9,7 +9,7 @@ import { ModelPicker } from "./model-picker";
 import { ChatInput } from "./chat-input";
 import { SessionPicker } from "./session-picker";
 import { ClawdIcon, CodexIcon } from "../icons";
-import type { Tab, ChatMessage } from "../../types";
+import type { Tab, ChatMessage, AttachedImage } from "../../types";
 import { effectivePtyId } from "../../types";
 import { useTabStore } from "../../stores/tab-store";
 import { classifyStreamError } from "../../lib/classify-error";
@@ -27,7 +27,7 @@ export function ChatPanel(props: ChatPanelProps) {
   const ptyId = () => effectivePtyId(props.tab);
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = createSignal(false);
-  const [attachedImages, setAttachedImages] = createSignal<Array<{ name: string; path: string }>>([]);
+  const [attachedImages, setAttachedImages] = createSignal<AttachedImage[]>([]);
   const [isDragOver, setIsDragOver] = createSignal(false);
   const [pastSessions, setPastSessions] = createSignal<SessionInfo[]>([]);
   const [showSessionPicker, setShowSessionPicker] = createSignal(false);
@@ -124,9 +124,9 @@ export function ChatPanel(props: ChatPanelProps) {
   let lastRespawnAt = 0;
 
   /** Send a message to the PTY, respawning it once if the session is gone. */
-  async function sendWithRespawn(message: string): Promise<boolean> {
+  async function sendWithRespawn(message: string, images?: ReadonlyArray<ImageAttachmentPayload>): Promise<boolean> {
     try {
-      await sendMessageCmd(ptyId(), message);
+      await sendMessageCmd(ptyId(), message, images);
       store.updateStatus(props.tab.id, "running");
       return true;
     } catch (error: unknown) {
@@ -164,7 +164,7 @@ export function ChatPanel(props: ChatPanelProps) {
           return false;
         }
         store.updatePtyId(props.tab.id, newId);
-        await sendMessageCmd(newId, message);
+        await sendMessageCmd(newId, message, images);
         store.updateStatus(props.tab.id, "running");
         return true;
       } catch (retryError: unknown) {
@@ -179,22 +179,16 @@ export function ChatPanel(props: ChatPanelProps) {
 
   async function handleSubmitFromInput(text: string) {
     if (isStreaming()) return;
-    let fullMessage = text;
     const images = attachedImages();
-    if (images.length > 0) {
-      const imagePrefixes = images
-        .map(img => img.path)
-        .filter(isValidTempImagePath)
-        .map(p => `/image ${p}`)
-        .join("\n");
-      if (imagePrefixes) fullMessage = `${imagePrefixes}\n${fullMessage}`;
-    }
+    const imagePayloads = images
+      .filter(img => isValidTempImagePath(img.path) && img.base64Data && img.mediaType)
+      .map(img => ({ data: img.base64Data, mediaType: img.mediaType }));
 
     parser.addUserMessage(text, images);
     setAttachedImages([]);
     setIsStreaming(true);
 
-    const sent = await sendWithRespawn(fullMessage);
+    const sent = await sendWithRespawn(text, imagePayloads.length > 0 ? imagePayloads : undefined);
     // Ensure isStreaming is reset on any failure path that sendWithRespawn may not cover
     if (!sent) setIsStreaming(false);
     for (const img of images) {
@@ -242,7 +236,8 @@ export function ChatPanel(props: ChatPanelProps) {
 
       const path = await saveTempImage(base64, saveExt);
       const name = file.name || `screenshot.${saveExt}`;
-      setAttachedImages(prev => [...prev, { name, path }]);
+      const mediaType = `image/${saveExt}`;
+      setAttachedImages(prev => [...prev, { name, path, base64Data: base64, mediaType }]);
     } catch { /* ignore */ }
   }
 
