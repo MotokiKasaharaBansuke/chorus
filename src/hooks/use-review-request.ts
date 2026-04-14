@@ -45,6 +45,7 @@ export function useReviewRequest({ tab, reviewCliType, addMessage }: UseReviewRe
       title: `${label} ${store.tabs.length + 1}`,
       status: "running",
       cliConfig: config,
+      sourceTabId: tab.id,
     };
     store.openTab(newTab);
     return newTab;

@@ -542,6 +542,17 @@
 }
 .reviewBtn:hover:not(:disabled) { color: #58a6ff; border-color: #58a6ff; background: #58a6ff15; }
 .reviewBtn:disabled { opacity: 0.25; cursor: not-allowed; }
+
+.sendToSourceBtn {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0 8px 4px; padding: 6px 12px;
+  background: #1e2a1e; border: 1px solid #2a4a2a; border-radius: 6px;
+  color: #74c991; font-size: 11px; font-weight: 500;
+  cursor: pointer; transition: background 0.1s, border-color 0.1s;
+}
+.sendToSourceBtn:hover:not(:disabled) { background: #2a3a2a; border-color: #3fb950; }
+.sendToSourceBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .inputHint {
   color: #444; font-size: 11px; width: 18px; height: 18px;
   display: flex; align-items: center; justify-content: center;

@@ -85,6 +85,9 @@ describe("useReviewRequest", () => {
       mode: "default",
       workingDir: "/test/project",
     });
+    expect(mockOpenTab).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceTabId: "tab-1" }),
+    );
     expect(mockSetActiveTab).toHaveBeenCalledWith("codex-pty-1");
   });
 
