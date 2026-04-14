@@ -8,6 +8,7 @@ mod pty;
 use tauri::Manager;
 
 use commands::{fs_commands, image_commands, pty_commands, session_commands};
+use fs::watcher::WatcherState;
 use pty::manager::PtyManager;
 
 /// Parse --directory flag from command line args, fall back to CWD
@@ -45,11 +46,13 @@ pub fn run() {
     }
 
     let pty_manager = PtyManager::new();
+    let watcher_state = WatcherState::new();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(pty_manager)
+        .manage(watcher_state)
         .setup(|app| {
             ipc::start(app.handle().clone());
             Ok(())
@@ -63,6 +66,8 @@ pub fn run() {
             pty_commands::kill_pty,
             fs_commands::list_directory,
             fs_commands::read_file,
+            fs_commands::watch_directory,
+            fs_commands::unwatch_directory,
             fs_commands::list_sessions,
             fs_commands::read_session,
             fs_commands::list_codex_sessions,

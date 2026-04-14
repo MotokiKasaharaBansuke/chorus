@@ -1,8 +1,10 @@
 use std::io::{BufRead, BufReader};
 use std::process::Command;
 use serde::Serialize;
+use tauri::{AppHandle, State};
 use crate::error::AppError;
 use crate::fs::tree::{self, FileNode};
+use crate::fs::watcher::WatcherState;
 
 /// Validate that `path` is within the user's home directory.
 /// Blocks access to system directories like /etc, /var, etc.
@@ -40,6 +42,22 @@ pub fn list_directory(path: String, depth: Option<usize>) -> Result<Vec<FileNode
 pub fn read_file(path: String) -> Result<String, AppError> {
     validate_path_scope(&path)?;
     tree::read_file_content(&path)
+}
+
+#[tauri::command]
+pub fn watch_directory(
+    path: String,
+    app: AppHandle,
+    state: State<'_, WatcherState>,
+) -> Result<(), AppError> {
+    validate_path_scope(&path)?;
+    state.start(&path, app)
+}
+
+#[tauri::command]
+pub fn unwatch_directory(state: State<'_, WatcherState>) -> Result<(), AppError> {
+    state.stop();
+    Ok(())
 }
 
 #[derive(Serialize)]

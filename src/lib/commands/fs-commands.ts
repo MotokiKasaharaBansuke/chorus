@@ -9,6 +9,14 @@ export async function readFile(path: string): Promise<string> {
   return invoke<string>("read_file", { path });
 }
 
+export async function watchDirectory(path: string): Promise<void> {
+  return invoke<void>("watch_directory", { path });
+}
+
+export async function unwatchDirectory(): Promise<void> {
+  return invoke<void>("unwatch_directory");
+}
+
 export interface SessionInfo {
   sessionId: string;
   lastModified: number;

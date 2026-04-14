@@ -1,0 +1,87 @@
+# Ignore list for OSV-Scanner.
+# All entries below are transitive dependencies pulled in by Tauri's
+# GTK/webview stack (or equivalents) and were already present on main
+# before this repository added explicit ignores. They are accepted as
+# pre-existing risk until Tauri's upstream bumps them.
+#
+# Review periodically and drop entries as upstream fixes land.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0411"
+reason = "Transitive via Tauri/gtk-rs (gdkwayland-sys unmaintained). Pre-existing."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0412"
+reason = "Transitive via Tauri/gtk-rs (gdk unmaintained). Pre-existing."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0413"
+reason = "Transitive via Tauri/gtk-rs (atk unmaintained). Pre-existing."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0414"
+reason = "Transitive via Tauri/gtk-rs (gdkx11-sys unmaintained). Pre-existing."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0415"
+reason = "Transitive via Tauri/gtk-rs (gtk unmaintained). Pre-existing."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0416"
+reason = "Transitive via Tauri/gtk-rs (atk-sys unmaintained). Pre-existing."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0417"
+reason = "Transitive via Tauri/gtk-rs (gdkx11 unmaintained). Pre-existing."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0418"
+reason = "Transitive via Tauri/gtk-rs (gdk-sys unmaintained). Pre-existing."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0419"
+reason = "Transitive via Tauri/gtk-rs (gtk3-macros unmaintained). Pre-existing."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0420"
+reason = "Transitive via Tauri/gtk-rs (gtk-sys unmaintained). Pre-existing."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0429"
+reason = "Transitive glib 0.18.5 via Tauri/gtk-rs. Pre-existing; awaiting Tauri upstream bump to glib >= 0.20."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+reason = "Transitive proc-macro-error via legacy macro crates. Pre-existing."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0057"
+reason = "Transitive fxhash via notify/Tauri stack. Pre-existing."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0097"
+reason = "Transitive rand 0.7/0.8 via legacy deps. Pre-existing; local-only desktop app, not a cryptographic surface."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2017-0008"
+reason = "Transitive serial crate via portable-pty. Pre-existing; PTY usage is local-only."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0075"
+reason = "Transitive unic-char-range via idna/tldextract stack. Pre-existing."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0080"
+reason = "Transitive unic-common. Pre-existing."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0081"
+reason = "Transitive unic-char-property. Pre-existing."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0098"
+reason = "Transitive unic-ucd-version. Pre-existing."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0100"
+reason = "Transitive unic-ucd-ident. Pre-existing."
