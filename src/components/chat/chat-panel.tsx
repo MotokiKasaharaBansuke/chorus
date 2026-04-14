@@ -2,6 +2,7 @@ import { createSignal, createEffect, For, Show, onMount, onCleanup } from "solid
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
 import { sendMessage as sendMessageCmd, killPty, spawnPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
+import { useCodexReview } from "../../hooks/use-codex-review";
 import { StreamParser } from "../../lib/stream-parser";
 import { MessageBubble } from "./message-bubble";
 import { BusySpinner } from "./busy-spinner";
@@ -126,20 +127,22 @@ export function ChatPanel(props: ChatPanelProps) {
   // Throttle PTY respawns: at most once per 5 seconds
   let lastRespawnAt = 0;
 
+  type SendResult = "sent" | "busy" | "error";
+
   /** Send a message to the PTY, respawning it once if the session is gone. */
-  async function sendWithRespawn(message: string, images?: ReadonlyArray<ImageAttachmentPayload>): Promise<boolean> {
+  async function sendWithRespawn(message: string, images?: ReadonlyArray<ImageAttachmentPayload>): Promise<SendResult> {
     try {
       await sendMessageCmd(ptyId(), message, images);
       store.updateStatus(props.tab.id, "running");
-      return true;
+      return "sent";
     } catch (error: unknown) {
       const kind = classifyStreamError(error);
 
-      // Session is busy — do NOT respawn, just notify the user
+      // Session is busy — keep spinner visible since the CLI is still processing
       if (kind === "busy") {
-        setIsStreaming(false);
+        store.updateStatus(props.tab.id, "running");
         parser.addUserMessage("[Waiting for current response to complete...]");
-        return false;
+        return "busy";
       }
 
       // Session not found — respawn (e.g. after app restart with restored tabs)
@@ -147,7 +150,7 @@ export function ChatPanel(props: ChatPanelProps) {
         setIsStreaming(false);
         store.updateStatus(props.tab.id, "error");
         parser.addUserMessage("[Error: Failed to send message.]");
-        return false;
+        return "error";
       }
 
       const now = Date.now();
@@ -155,7 +158,7 @@ export function ChatPanel(props: ChatPanelProps) {
         setIsStreaming(false);
         store.updateStatus(props.tab.id, "error");
         parser.addUserMessage("[Error: PTY respawn failed. Please restart the tab.]");
-        return false;
+        return "error";
       }
       try {
         lastRespawnAt = now;
@@ -164,18 +167,18 @@ export function ChatPanel(props: ChatPanelProps) {
         const newId = await spawnPty(props.tab.cliConfig);
         if (!store.getTab(props.tab.id)) {
           await killPty(newId).catch(() => {});
-          return false;
+          return "error";
         }
         store.updatePtyId(props.tab.id, newId);
         await sendMessageCmd(newId, message, images);
         store.updateStatus(props.tab.id, "running");
-        return true;
+        return "sent";
       } catch (retryError: unknown) {
         setIsStreaming(false);
         store.updateStatus(props.tab.id, "error");
         const errorMessage = retryError instanceof Error ? retryError.message : String(retryError);
         parser.addUserMessage(`[Error: Failed to send message. ${errorMessage}]`);
-        return false;
+        return "error";
       }
     }
   }
@@ -191,9 +194,9 @@ export function ChatPanel(props: ChatPanelProps) {
     setAttachedImages([]);
     setIsStreaming(true);
 
-    const sent = await sendWithRespawn(text, imagePayloads.length > 0 ? imagePayloads : undefined);
-    // Ensure isStreaming is reset on any failure path that sendWithRespawn may not cover
-    if (!sent) setIsStreaming(false);
+    const result = await sendWithRespawn(text, imagePayloads.length > 0 ? imagePayloads : undefined);
+    // Reset spinner on error, but keep it visible on "busy" (CLI is still processing)
+    if (result === "error") setIsStreaming(false);
     for (const img of images) {
       deleteTempImage(img.path).catch(() => {});
     }
@@ -327,6 +330,10 @@ export function ChatPanel(props: ChatPanelProps) {
     store.updateStatus(props.tab.id, "waiting");
   }
 
+  const codexReview = props.tab.cliConfig.cliType === "claude-code"
+    ? useCodexReview({ tab: props.tab, addMessage: (t) => parser.addUserMessage(t) })
+    : null;
+
   return (
     <div class={styles.container} ref={containerRef} data-tab-id={props.tab.id}>
       <Show when={showSessionPicker()}>
@@ -430,6 +437,8 @@ export function ChatPanel(props: ChatPanelProps) {
         onSlashCommand={selectSlashCommand}
         onPaste={handlePaste}
         onInterrupt={handleInterrupt}
+        onRequestReview={codexReview?.requestReview}
+        isReviewInProgress={codexReview?.isReviewInProgress() ?? false}
         inputHistory={inputHistory}
       />
     </div>
