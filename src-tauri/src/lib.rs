@@ -67,6 +67,7 @@ pub fn run() {
             fs_commands::read_session,
             fs_commands::list_codex_sessions,
             fs_commands::read_codex_session,
+            fs_commands::git_changed_files,
             image_commands::save_temp_image,
             image_commands::import_image_file,
             image_commands::delete_temp_image,

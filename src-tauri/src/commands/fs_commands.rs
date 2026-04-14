@@ -1,4 +1,5 @@
 use std::io::{BufRead, BufReader};
+use std::process::Command;
 use serde::Serialize;
 use crate::error::AppError;
 use crate::fs::tree::{self, FileNode};
@@ -304,4 +305,72 @@ pub fn read_codex_session(session_path: String) -> Result<Vec<String>, AppError>
         .filter(|l| !l.is_empty() && l.contains("\"event_msg\""))
         .map(|l| l.to_string())
         .collect())
+}
+
+const MAX_CHANGED_FILES: usize = 200;
+const GIT_TIMEOUT_SECS: u64 = 10;
+
+/// Run a git command with a timeout. Kills the child process if it exceeds the limit.
+fn run_git_with_timeout(args: &[&str], working_dir: &str) -> Result<Vec<String>, AppError> {
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(working_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| AppError::FileSystemError(format!("Failed to run git: {e}")))?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(GIT_TIMEOUT_SECS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    return Err(AppError::FileSystemError(
+                        format!("git {args:?} timed out after {GIT_TIMEOUT_SECS}s"),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(AppError::FileSystemError(format!("git process error: {e}"))),
+        }
+    }
+
+    let output = child.wait_with_output()
+        .map_err(|e| AppError::FileSystemError(format!("git process error: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let hint = stderr.lines().next().unwrap_or("unknown error");
+        return Err(AppError::FileSystemError(format!("git {args:?} failed: {hint}")));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect())
+}
+
+/// Get files changed in the git working tree (staged, unstaged, and untracked).
+/// Returns a sorted, deduplicated list of relative file paths (max 200).
+#[tauri::command]
+pub fn git_changed_files(working_dir: String) -> Result<Vec<String>, AppError> {
+    validate_path_scope(&working_dir)?;
+
+    let mut files: Vec<String> = Vec::new();
+
+    // Unstaged changes
+    files.extend(run_git_with_timeout(&["diff", "--name-only"], &working_dir)?);
+    // Staged changes
+    files.extend(run_git_with_timeout(&["diff", "--cached", "--name-only"], &working_dir)?);
+    // Untracked files
+    files.extend(run_git_with_timeout(&["ls-files", "--others", "--exclude-standard"], &working_dir)?);
+
+    files.sort();
+    files.dedup();
+    files.truncate(MAX_CHANGED_FILES);
+    Ok(files)
 }
