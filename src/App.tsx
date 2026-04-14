@@ -299,11 +299,11 @@ function App() {
 
   return (
     <div class="app">
-      {/* Header: sits inside the title bar overlay area */}
-      <div class="app-header" data-tauri-drag-region onMouseDown={(e) => {
-        const target = e.target as HTMLElement;
-        if (!target.closest("button, [data-no-drag]")) getCurrentWindow().startDragging();
-      }}>
+      {/* Drag region for macOS traffic lights */}
+      <div class="drag-region" data-tauri-drag-region onMouseDown={() => getCurrentWindow().startDragging()} />
+
+      {/* Toolbar: DEV badge (left) + action icons (right) */}
+      <div class="toolbar">
         {import.meta.env.DEV && <span class="dev-badge">DEV</span>}
         <TopBar
           isSidebarOpen={sidebarStore.isOpen}

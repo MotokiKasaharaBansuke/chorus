@@ -295,8 +295,8 @@ export function ChatPanel(props: ChatPanelProps) {
     const command = `/${id}`;
     parser.addUserMessage(command);
     setIsStreaming(true);
-    const sent = await sendWithRespawn(command);
-    if (!sent) setIsStreaming(false);
+    const result = await sendWithRespawn(command);
+    if (result === "error") setIsStreaming(false);
   }
 
 
@@ -330,6 +330,45 @@ export function ChatPanel(props: ChatPanelProps) {
     parser.addInterrupted();
     setIsStreaming(false);
     store.updateStatus(props.tab.id, "waiting");
+  }
+
+  function extractLastAssistantText(): string | null {
+    const msgs = messages();
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role !== "assistant") continue;
+      const textBlocks = msgs[i].blocks
+        .filter((b): b is { kind: "text"; text: string } => b.kind === "text")
+        .map((b) => b.text);
+      if (textBlocks.length > 0) return textBlocks.join("\n");
+    }
+    return null;
+  }
+
+  async function sendReviewToSource() {
+    const sourceId = props.tab.sourceTabId;
+    if (!sourceId) return;
+    const sourceTab = store.getTab(sourceId);
+    if (!sourceTab) {
+      parser.addUserMessage("[Source tab no longer exists.]");
+      return;
+    }
+
+    const text = extractLastAssistantText();
+    if (!text) {
+      parser.addUserMessage("[No review result to send.]");
+      return;
+    }
+
+    const sourcePtyId = effectivePtyId(sourceTab);
+    const prompt = `Here is the review result from another session:\n\n${text}\n\nPlease address the issues found in this review.`;
+    try {
+      await sendMessageCmd(sourcePtyId, prompt);
+      store.updateStatus(sourceTab.id, "running");
+      store.setActiveTab(sourceTab.id);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : String(error);
+      parser.addUserMessage(`[Failed to send review to source tab: ${msg}]`);
+    }
   }
 
   // Review hook is always initialized; requestReview no-ops for non-CLI tabs
@@ -426,6 +465,19 @@ export function ChatPanel(props: ChatPanelProps) {
       </div>
       <Show when={isStreaming()}>
         <BusySpinner />
+      </Show>
+      <Show when={props.tab.sourceTabId && !isStreaming() && messages().length > 0}>
+        <button
+          class={styles.sendToSourceBtn}
+          onClick={sendReviewToSource}
+          title="Send review result to source tab"
+        >
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+            <path d="M14 8H2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <path d="M6 4L2 8l4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Send review to source
+        </button>
       </Show>
       <ChatInput
         tabId={props.tab.id}

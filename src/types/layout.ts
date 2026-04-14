@@ -16,3 +16,13 @@ export interface PaneGroupNode {
 }
 
 export type LayoutNode = SplitNode | PaneGroupNode;
+
+/** Which window edges this node touches (used for traffic-light / action-button placement). */
+export interface LayoutEdges {
+  top: boolean;
+  right: boolean;
+  left: boolean;
+  bottom: boolean;
+}
+
+export const ALL_EDGES: LayoutEdges = { top: true, right: true, left: true, bottom: true };
