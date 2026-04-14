@@ -56,7 +56,39 @@ body, #root {
 }
 .sidebar-resize:hover { background: #555; width: 2px; }
 
-/* (Top bar styles moved to top-bar.module.css) */
+/* ===== Drag region for macOS traffic lights ===== */
+.drag-region {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 72px;
+  height: 28px;
+  z-index: 90;
+  -webkit-app-region: drag;
+}
+
+/* ===== Toolbar (below tab bars) ===== */
+.toolbar {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  flex-shrink: 0;
+  background: #181818;
+  border-bottom: 1px solid #2d2d2d;
+  padding: 0 8px;
+}
+
+.dev-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #1a1a1a;
+  background: #d97757;
+  padding: 1px 6px;
+  border-radius: 3px;
+  user-select: none;
+  flex-shrink: 0;
+}
 
 /* ===== Main Area ===== */
 .main-area {
@@ -81,6 +113,7 @@ body, #root {
   display: flex;
   overflow: hidden;
   background: #181818;
+  position: relative;
 }
 
 /* ===== Bottom Terminal ===== */

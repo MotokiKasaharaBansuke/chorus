@@ -6,6 +6,7 @@
   min-width: 240px;
   min-height: 200px;
   background: #1a1a1a;
+  position: relative;
 }
 
 .focused {
@@ -21,16 +22,17 @@
   border-bottom: 1px solid #2d2d2d;
   height: 28px;
   flex-shrink: 0;
-  overflow: hidden;
-}
-
-.tabList {
-  display: flex;
-  flex: 1;
   overflow-x: auto;
+  overflow-y: hidden;
   scrollbar-width: none;
 }
-.tabList::-webkit-scrollbar { display: none; }
+.tabBar::-webkit-scrollbar { display: none; }
+
+/* Traffic-light padding: top-left pane when sidebar is closed */
+.tabBarLeftPad {
+  padding-left: 72px;
+}
+
 
 .tab {
   display: flex;
@@ -131,6 +133,7 @@
   display: flex;
   align-items: center;
   gap: 4px;
+  margin-left: auto;
   padding: 0 10px;
   font-size: 10px;
   color: #555;

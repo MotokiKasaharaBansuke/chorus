@@ -9,10 +9,25 @@
 }
 
 .header {
-  padding: 6px 14px;
+  padding: 6px 14px 6px 72px;
   font-size: 10px;
   letter-spacing: 0.08em;
   font-weight: 600;
+  flex-shrink: 0;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.devBadge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #1a1a1a;
+  background: #d97757;
+  padding: 1px 6px;
+  border-radius: 3px;
   flex-shrink: 0;
 }
 

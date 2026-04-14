@@ -1,4 +1,4 @@
-import type { CliConfig, CliMode, LayoutNode, PaneGroupNode, SplitNode, Tab } from "../types";
+import type { CliConfig, CliMode, ReviewCliType, LayoutNode, PaneGroupNode, SplitNode, Tab } from "../types";
 import { saveSession, loadSession } from "./commands/session-commands";
 import { spawnPty } from "./commands";
 
@@ -36,6 +36,7 @@ export interface SavedSession {
   sidebarWidth: number;
   workingDir: string;
   quickLaunchMode: CliMode;
+  reviewCliType?: ReviewCliType;
 }
 
 export interface RestoredWorkspace {
@@ -46,6 +47,7 @@ export interface RestoredWorkspace {
   sidebarOpen: boolean;
   sidebarWidth: number;
   quickLaunchMode: CliMode;
+  reviewCliType: ReviewCliType;
 }
 
 // ---- Serialize current state ----
@@ -85,7 +87,8 @@ export function buildSavedSession(
   sidebarOpen: boolean,
   sidebarWidth: number,
   workingDir: string,
-  quickLaunchMode: CliMode
+  quickLaunchMode: CliMode,
+  reviewCliType: ReviewCliType = "codex",
 ): SavedSession | null {
   if (!layout) return null;
 
@@ -104,6 +107,7 @@ export function buildSavedSession(
     sidebarWidth,
     workingDir,
     quickLaunchMode,
+    reviewCliType,
   };
 }
 
@@ -197,6 +201,7 @@ export async function restoreSession(data: string): Promise<RestoredWorkspace | 
     sidebarOpen: session.sidebarOpen,
     sidebarWidth: session.sidebarWidth,
     quickLaunchMode: session.quickLaunchMode,
+    reviewCliType: session.reviewCliType ?? "codex",
   };
 }
 

@@ -2,6 +2,8 @@ import { createSignal, createEffect, For, Show, onMount, onCleanup } from "solid
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
 import { sendMessage as sendMessageCmd, killPty, spawnPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
+import { useReviewRequest } from "../../hooks/use-review-request";
+import { useSendReview } from "../../hooks/use-send-review";
 import { StreamParser } from "../../lib/stream-parser";
 import { MessageBubble } from "./message-bubble";
 import { BusySpinner } from "./busy-spinner";
@@ -12,6 +14,7 @@ import { ClawdIcon, CodexIcon } from "../icons";
 import type { Tab, ChatMessage, AttachedImage } from "../../types";
 import { effectivePtyId } from "../../types";
 import { useTabStore } from "../../stores/tab-store";
+import { useSettingsStore } from "../../stores/settings-store";
 import { classifyStreamError } from "../../lib/classify-error";
 import { isValidTempImagePath } from "../../lib/validate-path";
 import styles from "./chat-panel.module.css";
@@ -23,6 +26,7 @@ interface ChatPanelProps {
 
 export function ChatPanel(props: ChatPanelProps) {
   const store = useTabStore();
+  const settings = useSettingsStore();
   /** Effective PTY ID (differs from tab.id after PTY respawn) */
   const ptyId = () => effectivePtyId(props.tab);
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
@@ -126,20 +130,22 @@ export function ChatPanel(props: ChatPanelProps) {
   // Throttle PTY respawns: at most once per 5 seconds
   let lastRespawnAt = 0;
 
+  type SendResult = "sent" | "busy" | "error";
+
   /** Send a message to the PTY, respawning it once if the session is gone. */
-  async function sendWithRespawn(message: string, images?: ReadonlyArray<ImageAttachmentPayload>): Promise<boolean> {
+  async function sendWithRespawn(message: string, images?: ReadonlyArray<ImageAttachmentPayload>): Promise<SendResult> {
     try {
       await sendMessageCmd(ptyId(), message, images);
       store.updateStatus(props.tab.id, "running");
-      return true;
+      return "sent";
     } catch (error: unknown) {
       const kind = classifyStreamError(error);
 
-      // Session is busy — do NOT respawn, just notify the user
+      // Session is busy — keep spinner visible since the CLI is still processing
       if (kind === "busy") {
-        setIsStreaming(false);
+        store.updateStatus(props.tab.id, "running");
         parser.addUserMessage("[Waiting for current response to complete...]");
-        return false;
+        return "busy";
       }
 
       // Session not found — respawn (e.g. after app restart with restored tabs)
@@ -147,7 +153,7 @@ export function ChatPanel(props: ChatPanelProps) {
         setIsStreaming(false);
         store.updateStatus(props.tab.id, "error");
         parser.addUserMessage("[Error: Failed to send message.]");
-        return false;
+        return "error";
       }
 
       const now = Date.now();
@@ -155,7 +161,7 @@ export function ChatPanel(props: ChatPanelProps) {
         setIsStreaming(false);
         store.updateStatus(props.tab.id, "error");
         parser.addUserMessage("[Error: PTY respawn failed. Please restart the tab.]");
-        return false;
+        return "error";
       }
       try {
         lastRespawnAt = now;
@@ -164,18 +170,18 @@ export function ChatPanel(props: ChatPanelProps) {
         const newId = await spawnPty(props.tab.cliConfig);
         if (!store.getTab(props.tab.id)) {
           await killPty(newId).catch(() => {});
-          return false;
+          return "error";
         }
         store.updatePtyId(props.tab.id, newId);
         await sendMessageCmd(newId, message, images);
         store.updateStatus(props.tab.id, "running");
-        return true;
+        return "sent";
       } catch (retryError: unknown) {
         setIsStreaming(false);
         store.updateStatus(props.tab.id, "error");
         const errorMessage = retryError instanceof Error ? retryError.message : String(retryError);
         parser.addUserMessage(`[Error: Failed to send message. ${errorMessage}]`);
-        return false;
+        return "error";
       }
     }
   }
@@ -191,9 +197,9 @@ export function ChatPanel(props: ChatPanelProps) {
     setAttachedImages([]);
     setIsStreaming(true);
 
-    const sent = await sendWithRespawn(text, imagePayloads.length > 0 ? imagePayloads : undefined);
-    // Ensure isStreaming is reset on any failure path that sendWithRespawn may not cover
-    if (!sent) setIsStreaming(false);
+    const result = await sendWithRespawn(text, imagePayloads.length > 0 ? imagePayloads : undefined);
+    // Reset spinner on error, but keep it visible on "busy" (CLI is still processing)
+    if (result === "error") setIsStreaming(false);
     for (const img of images) {
       deleteTempImage(img.path).catch(() => {});
     }
@@ -290,8 +296,8 @@ export function ChatPanel(props: ChatPanelProps) {
     const command = `/${id}`;
     parser.addUserMessage(command);
     setIsStreaming(true);
-    const sent = await sendWithRespawn(command);
-    if (!sent) setIsStreaming(false);
+    const result = await sendWithRespawn(command);
+    if (result === "error") setIsStreaming(false);
   }
 
 
@@ -326,6 +332,20 @@ export function ChatPanel(props: ChatPanelProps) {
     setIsStreaming(false);
     store.updateStatus(props.tab.id, "waiting");
   }
+
+  const sendReview = useSendReview({
+    tab: props.tab,
+    messages,
+    addMessage: (t) => parser.addUserMessage(t),
+  });
+
+  // Review hook is always initialized; requestReview no-ops for non-CLI tabs
+  // since git_changed_files will return an error for non-existent working dirs.
+  const review = useReviewRequest({
+    tab: props.tab,
+    reviewCliType: () => settings.reviewCliType,
+    addMessage: (t) => parser.addUserMessage(t),
+  });
 
   return (
     <div class={styles.container} ref={containerRef} data-tab-id={props.tab.id}>
@@ -414,6 +434,20 @@ export function ChatPanel(props: ChatPanelProps) {
       <Show when={isStreaming()}>
         <BusySpinner />
       </Show>
+      <Show when={sendReview.hasSourceTab() && !isStreaming() && messages().length > 0}>
+        <button
+          class={styles.sendToSourceBtn}
+          onClick={sendReview.sendToSource}
+          disabled={sendReview.isSending()}
+          title="Send review result to source tab"
+        >
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+            <path d="M14 8H2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <path d="M6 4L2 8l4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          {sendReview.isSending() ? "Sending..." : "Send review to source"}
+        </button>
+      </Show>
       <ChatInput
         tabId={props.tab.id}
         cliType={props.tab.cliConfig.cliType}
@@ -430,6 +464,8 @@ export function ChatPanel(props: ChatPanelProps) {
         onSlashCommand={selectSlashCommand}
         onPaste={handlePaste}
         onInterrupt={handleInterrupt}
+        onRequestReview={review.requestReview}
+        isReviewInProgress={review.isReviewInProgress()}
         inputHistory={inputHistory}
       />
     </div>

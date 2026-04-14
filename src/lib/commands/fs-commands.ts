@@ -38,3 +38,7 @@ export async function listCodexSessions(workingDir: string): Promise<SessionInfo
 export async function readCodexSession(sessionPath: string): Promise<string[]> {
   return invoke<string[]>("read_codex_session", { sessionPath });
 }
+
+export async function gitChangedFiles(workingDir: string): Promise<string[]> {
+  return invoke<string[]>("git_changed_files", { workingDir });
+}
