@@ -1,6 +1,8 @@
 import { createSignal, Show, For } from "solid-js";
+import { createStore, reconcile } from "solid-js/store";
 import type { FileNode as FileNodeType } from "../../types";
 import { listDirectory } from "../../lib/commands";
+import { useDirectoryWatch } from "../../hooks/use-directory-watch";
 import { FileIcon } from "./file-icon";
 import styles from "./sidebar.module.css";
 
@@ -12,8 +14,19 @@ interface FileNodeProps {
 
 export function FileNodeComponent(props: FileNodeProps) {
   const [isExpanded, setIsExpanded] = createSignal(false);
-  const [children, setChildren] = createSignal<FileNodeType[]>([]);
+  const [children, setChildren] = createStore<{ nodes: FileNodeType[] }>({ nodes: [] });
   const [isLoading, setIsLoading] = createSignal(false);
+
+  async function loadChildren() {
+    setIsLoading(true);
+    try {
+      const nodes = await listDirectory(props.node.path, 1);
+      setChildren("nodes", reconcile(nodes, { key: "path", merge: true }));
+    } catch (e) {
+      console.error("loadChildren failed:", e);
+    }
+    setIsLoading(false);
+  }
 
   async function toggleExpand() {
     if (!props.node.isDirectory) {
@@ -26,16 +39,14 @@ export function FileNodeComponent(props: FileNodeProps) {
       return;
     }
 
-    setIsLoading(true);
-    try {
-      const nodes = await listDirectory(props.node.path, 1);
-      setChildren(nodes);
-      setIsExpanded(true);
-    } catch {
-      // ignore
-    }
-    setIsLoading(false);
+    await loadChildren();
+    setIsExpanded(true);
   }
+
+  useDirectoryWatch({
+    dir: () => (isExpanded() ? props.node.path : undefined),
+    onDirectoryChanged: loadChildren,
+  });
 
   return (
     <div>
@@ -64,7 +75,7 @@ export function FileNodeComponent(props: FileNodeProps) {
         </Show>
       </div>
       <Show when={isExpanded()}>
-        <For each={children()}>
+        <For each={children.nodes}>
           {(child) => (
             <FileNodeComponent
               node={child}
