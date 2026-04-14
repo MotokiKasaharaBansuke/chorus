@@ -192,10 +192,10 @@ export function ChatInput(props: ChatInputProps) {
         <div class={styles.inputRight}>
           <Show when={props.onRequestReview}>
             <button
-              class={styles.codexReviewBtn}
+              class={styles.reviewBtn}
               onClick={() => props.onRequestReview?.()}
               disabled={props.isStreaming || props.isReviewInProgress}
-              title="Send changed files to Codex for review"
+              title="Send changed files for review"
             >
               <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
                 <path d="M1 3h14v1H1zM1 7h10v1H1zM1 11h12v1H1z" fill="currentColor"/>

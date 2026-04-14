@@ -2,6 +2,8 @@ export type TabStatus = "idle" | "running" | "waiting" | "completed" | "error";
 
 export type CliType = "claude-code" | "codex" | "shell" | "file-viewer";
 
+export type ReviewCliType = Extract<CliType, "claude-code" | "codex">;
+
 export type CliMode = "default" | "plan" | "dangerously-skip-permissions";
 
 export interface CliConfig {

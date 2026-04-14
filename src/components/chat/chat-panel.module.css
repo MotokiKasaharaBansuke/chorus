@@ -534,14 +534,14 @@
 }
 
 .inputRight { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
-.codexReviewBtn {
+.reviewBtn {
   width: 18px; height: 18px; border-radius: 3px; background: transparent;
   border: 1px solid #333; color: #555; cursor: pointer;
   display: flex; align-items: center; justify-content: center; padding: 0;
   transition: color 0.1s, border-color 0.1s, background 0.1s;
 }
-.codexReviewBtn:hover:not(:disabled) { color: #58a6ff; border-color: #58a6ff; background: #58a6ff15; }
-.codexReviewBtn:disabled { opacity: 0.25; cursor: not-allowed; }
+.reviewBtn:hover:not(:disabled) { color: #58a6ff; border-color: #58a6ff; background: #58a6ff15; }
+.reviewBtn:disabled { opacity: 0.25; cursor: not-allowed; }
 .inputHint {
   color: #444; font-size: 11px; width: 18px; height: 18px;
   display: flex; align-items: center; justify-content: center;

@@ -2,7 +2,7 @@ import { createSignal, createEffect, For, Show, onMount, onCleanup } from "solid
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
 import { sendMessage as sendMessageCmd, killPty, spawnPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
-import { useCodexReview } from "../../hooks/use-codex-review";
+import { useReviewRequest } from "../../hooks/use-review-request";
 import { StreamParser } from "../../lib/stream-parser";
 import { MessageBubble } from "./message-bubble";
 import { BusySpinner } from "./busy-spinner";
@@ -13,6 +13,7 @@ import { ClawdIcon, CodexIcon } from "../icons";
 import type { Tab, ChatMessage, AttachedImage } from "../../types";
 import { effectivePtyId } from "../../types";
 import { useTabStore } from "../../stores/tab-store";
+import { useSettingsStore } from "../../stores/settings-store";
 import { classifyStreamError } from "../../lib/classify-error";
 import { isValidTempImagePath } from "../../lib/validate-path";
 import styles from "./chat-panel.module.css";
@@ -24,6 +25,7 @@ interface ChatPanelProps {
 
 export function ChatPanel(props: ChatPanelProps) {
   const store = useTabStore();
+  const settings = useSettingsStore();
   /** Effective PTY ID (differs from tab.id after PTY respawn) */
   const ptyId = () => effectivePtyId(props.tab);
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
@@ -330,9 +332,13 @@ export function ChatPanel(props: ChatPanelProps) {
     store.updateStatus(props.tab.id, "waiting");
   }
 
-  const codexReview = props.tab.cliConfig.cliType === "claude-code"
-    ? useCodexReview({ tab: props.tab, addMessage: (t) => parser.addUserMessage(t) })
-    : null;
+  // Review hook is always initialized; requestReview no-ops for non-CLI tabs
+  // since git_changed_files will return an error for non-existent working dirs.
+  const review = useReviewRequest({
+    tab: props.tab,
+    reviewCliType: () => settings.reviewCliType,
+    addMessage: (t) => parser.addUserMessage(t),
+  });
 
   return (
     <div class={styles.container} ref={containerRef} data-tab-id={props.tab.id}>
@@ -437,8 +443,8 @@ export function ChatPanel(props: ChatPanelProps) {
         onSlashCommand={selectSlashCommand}
         onPaste={handlePaste}
         onInterrupt={handleInterrupt}
-        onRequestReview={codexReview?.requestReview}
-        isReviewInProgress={codexReview?.isReviewInProgress() ?? false}
+        onRequestReview={review.requestReview}
+        isReviewInProgress={review.isReviewInProgress()}
         inputHistory={inputHistory}
       />
     </div>
