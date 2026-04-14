@@ -1,11 +1,8 @@
 .topBar {
+  margin-left: auto;
+  height: 100%;
   display: flex;
   align-items: center;
-  background: #181818;
-  border-bottom: 1px solid #2d2d2d;
-  height: 28px;
-  padding: 0 8px 0 78px;
-  gap: 4px;
   user-select: none;
   flex-shrink: 0;
 }
@@ -16,16 +13,8 @@
   gap: 4px;
   -webkit-app-region: no-drag;
   flex-shrink: 0;
-}
-
-.center {
-  flex: 1;
-  text-align: center;
-  font-size: 11px;
-  color: #444;
-  -webkit-app-region: drag;
-  font-weight: 400;
-  min-width: 0;
+  height: 100%;
+  padding: 0 8px;
 }
 
 .btn {

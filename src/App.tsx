@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTabStore } from "./stores/tab-store";
 import { useSidebarStore } from "./stores/sidebar-store";
+import { useSettingsStore } from "./stores/settings-store";
 import { spawnPty, killPty } from "./lib/commands";
 import { buildSavedSession, persistSession, restoreSession, tryLoadSession } from "./lib/session";
 import { TerminalPanel } from "./components/terminal/terminal-panel";
@@ -24,6 +25,7 @@ import "./App.css";
 function App() {
   const tabStore = useTabStore();
   const sidebarStore = useSidebarStore();
+  const settingsStore = useSettingsStore();
   const [isModalOpen, setIsModalOpen] = createSignal(false);
   const [quickLaunchMode, setQuickLaunchMode] = createSignal<CliMode>("dangerously-skip-permissions");
   const [fontSize, setFontSize] = createSignal(11);
@@ -69,7 +71,8 @@ function App() {
         sidebarStore.isOpen,
         sidebarStore.width,
         sidebarStore.workingDir,
-        quickLaunchMode()
+        quickLaunchMode(),
+        settingsStore.reviewCliType,
       );
       if (session) persistSession(session).catch(() => {});
     }, 500);
@@ -96,6 +99,7 @@ function App() {
         if (workspace.sidebarOpen !== sidebarStore.isOpen) sidebarStore.toggle();
         sidebarStore.setWidth(workspace.sidebarWidth);
         setQuickLaunchMode(workspace.quickLaunchMode);
+        settingsStore.setReviewCliType(workspace.reviewCliType);
       }
     }
 
@@ -257,7 +261,7 @@ function App() {
   function applyFontSize(size: number) {
     const clamped = Math.max(10, Math.min(20, size));
     setFontSize(clamped);
-    document.documentElement.style.setProperty("--chat-font-size", `${clamped}px`);
+    document.documentElement.style.setProperty("--global-chat-font-size", `${clamped}px`);
   }
 
   // --- Keyboard shortcuts ---
@@ -295,18 +299,26 @@ function App() {
 
   return (
     <div class="app">
-      <TopBar
-        paneCount={tabStore.tabs.length}
-        isSidebarOpen={sidebarStore.isOpen}
-        onToggleSidebar={() => sidebarStore.toggle()}
-        onToggleTerminal={() => bottomTerminal.toggle()}
-        onNewTab={() => handleNewTab()}
-        canOpenTab={tabStore.canOpenTab}
-        quickLaunchMode={quickLaunchMode()}
-        onQuickLaunchModeChange={setQuickLaunchMode}
-        fontSize={fontSize()}
-        onFontSizeChange={applyFontSize}
-      />
+      {/* Drag region for macOS traffic lights */}
+      <div class="drag-region" data-tauri-drag-region onMouseDown={() => getCurrentWindow().startDragging()} />
+
+      {/* Toolbar: DEV badge (left) + action icons (right) */}
+      <div class="toolbar">
+        {import.meta.env.DEV && <span class="dev-badge">DEV</span>}
+        <TopBar
+          isSidebarOpen={sidebarStore.isOpen}
+          onToggleSidebar={() => sidebarStore.toggle()}
+          onToggleTerminal={() => bottomTerminal.toggle()}
+          onNewTab={() => handleNewTab()}
+          canOpenTab={tabStore.canOpenTab}
+          quickLaunchMode={quickLaunchMode()}
+          onQuickLaunchModeChange={setQuickLaunchMode}
+          reviewCliType={settingsStore.reviewCliType}
+          onReviewCliTypeChange={(t) => settingsStore.setReviewCliType(t)}
+          fontSize={fontSize()}
+          onFontSizeChange={applyFontSize}
+        />
+      </div>
 
       <div class="app-body">
         <Show when={sidebarStore.isOpen}>

@@ -1,13 +1,11 @@
 import { createSignal, Show } from "solid-js";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTabStore } from "../../stores/tab-store";
 import { HelpModal } from "../help/help-modal";
 import { SidebarIcon, TerminalIcon } from "../icons";
-import type { CliMode } from "../../types";
+import type { CliMode, ReviewCliType } from "../../types";
 import styles from "./top-bar.module.css";
 
 interface TopBarProps {
-  paneCount: number;
   isSidebarOpen: boolean;
   onToggleSidebar: () => void;
   onToggleTerminal: () => void;
@@ -15,6 +13,8 @@ interface TopBarProps {
   canOpenTab: boolean;
   quickLaunchMode: CliMode;
   onQuickLaunchModeChange: (mode: CliMode) => void;
+  reviewCliType: ReviewCliType;
+  onReviewCliTypeChange: (type: ReviewCliType) => void;
   fontSize: number;
   onFontSizeChange: (size: number) => void;
 }
@@ -26,10 +26,6 @@ export function TopBar(props: TopBarProps) {
 
   return (
     <div class={styles.topBar}>
-      <div class={styles.center} data-tauri-drag-region onMouseDown={() => getCurrentWindow().startDragging()}>
-        {props.paneCount > 0 ? `${props.paneCount} tab${props.paneCount > 1 ? "s" : ""}` : "Chorus"}
-      </div>
-
       <div class={styles.right}>
         <button class={styles.btn} onClick={props.onToggleSidebar} title="Toggle Sidebar (⌘B)">
           <SidebarIcon isOpen={props.isSidebarOpen} size={14} />
@@ -63,6 +59,12 @@ export function TopBar(props: TopBarProps) {
                 Bypass permissions
                 <span style={{ color: "#c74e39", "font-size": "10px", "margin-left": "4px" }}>DANGER</span>
               </div>
+              <div class={styles.divider} />
+              <div class={styles.dropdownTitle}>Review CLI</div>
+              <div class={`${styles.dropdownItem} ${props.reviewCliType === "codex" ? styles.dropdownActive : ""}`}
+                onClick={() => { props.onReviewCliTypeChange("codex"); setShowSettings(false); }}>Codex</div>
+              <div class={`${styles.dropdownItem} ${props.reviewCliType === "claude-code" ? styles.dropdownActive : ""}`}
+                onClick={() => { props.onReviewCliTypeChange("claude-code"); setShowSettings(false); }}>Claude Code</div>
               <div class={styles.divider} />
               <div class={styles.dropdownTitle}>Font Size</div>
               <div class={styles.fontRow}>

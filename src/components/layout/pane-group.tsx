@@ -5,11 +5,14 @@ import { TerminalPanel } from "../terminal/terminal-panel";
 import { FileViewer } from "../sidebar/file-viewer";
 import { StatusIndicator } from "../status/status-indicator";
 import { ClawdIcon, CodexIcon, TerminalIcon } from "../icons";
-import type { PaneGroupNode, Tab, SplitDirection } from "../../types";
+import { useSidebarStore } from "../../stores/sidebar-store";
+import type { PaneGroupNode, Tab, SplitDirection, LayoutEdges } from "../../types";
+import { ALL_EDGES } from "../../types";
 import styles from "./pane-group.module.css";
 
 interface PaneGroupProps {
   node: PaneGroupNode;
+  edges?: LayoutEdges;
   onCloseTab: (tabId: string) => void;
   onRestartTab: (tab: Tab) => void;
 }
@@ -116,12 +119,16 @@ function isInRect(x: number, y: number, rect: DOMRect) {
 // ─────────────────────────────────────────────────────────────────────────────
 export function PaneGroup(props: PaneGroupProps) {
   const store = useTabStore();
+
   const [dropEdge, setDropEdge] = createSignal<DropEdge>(null);
   const [tabBarDragOver, setTabBarDragOver] = createSignal(false);
   let contentRef: HTMLDivElement | undefined;
   let tabBarRef: HTMLDivElement | undefined;
 
+  const sidebarStore = useSidebarStore();
+  const edges = () => props.edges ?? ALL_EDGES;
   const isFocused = () => store.focusedGroupId === props.node.id;
+  const needsTrafficLightPad = () => edges().top && edges().left && !sidebarStore.isOpen;
 
   function renderContent(tab: Tab) {
     if (tab.cliConfig.cliType === "file-viewer" && tab.filePath) {
@@ -235,9 +242,8 @@ export function PaneGroup(props: PaneGroupProps) {
       {/* Tab bar */}
       <div
         ref={tabBarRef}
-        class={`${styles.tabBar} ${tabBarDragOver() ? styles.tabBarDragOver : ""}`}
+        class={`${styles.tabBar} ${tabBarDragOver() ? styles.tabBarDragOver : ""} ${needsTrafficLightPad() ? styles.tabBarLeftPad : ""}`}
       >
-        <div class={styles.tabList}>{/* tabs */}
           <For each={props.node.tabIds}>
             {(tabId) => {
               const tab = () => store.getTab(tabId);
@@ -281,30 +287,29 @@ export function PaneGroup(props: PaneGroupProps) {
               );
             }}
           </For>
-        </div>
 
-        {/* Active tab's directory — shown right of tabs for quick identification */}
-        {(() => {
-          const activeTab = () => store.getTab(props.node.activeTabId ?? "");
-          const dir = () => {
-            const wd = activeTab()?.cliConfig.workingDir;
-            if (!wd) return null;
-            return wd.split("/").filter(Boolean).pop() ?? wd;
-          };
-          const fullPath = () => activeTab()?.cliConfig.workingDir ?? "";
-          return (
-            <Show when={dir()}>
-              {(d) => (
-                <div class={styles.dirBadge} title={fullPath()}>
-                  <svg width="9" height="9" viewBox="0 0 12 12" fill="none" style={{ "flex-shrink": 0 }}>
-                    <path d="M1 3.5A1.5 1.5 0 012.5 2h2l1 1.5H9.5A1.5 1.5 0 0111 5v4A1.5 1.5 0 019.5 10.5h-7A1.5 1.5 0 011 9V3.5z" fill="currentColor" opacity=".7"/>
-                  </svg>
-                  {d()}
-                </div>
-              )}
-            </Show>
-          );
-        })()}
+          {/* Active tab's directory */}
+          {(() => {
+            const activeTab = () => store.getTab(props.node.activeTabId ?? "");
+            const dir = () => {
+              const wd = activeTab()?.cliConfig.workingDir;
+              if (!wd) return null;
+              return wd.split("/").filter(Boolean).pop() ?? wd;
+            };
+            const fullPath = () => activeTab()?.cliConfig.workingDir ?? "";
+            return (
+              <Show when={dir()}>
+                {(d) => (
+                  <div class={styles.dirBadge} title={fullPath()}>
+                    <svg width="9" height="9" viewBox="0 0 12 12" fill="none" style={{ "flex-shrink": 0 }}>
+                      <path d="M1 3.5A1.5 1.5 0 012.5 2h2l1 1.5H9.5A1.5 1.5 0 0111 5v4A1.5 1.5 0 019.5 10.5h-7A1.5 1.5 0 011 9V3.5z" fill="currentColor" opacity=".7"/>
+                    </svg>
+                    {d()}
+                  </div>
+                )}
+              </Show>
+            );
+          })()}
       </div>
 
       {/* Content area with VS Code-style drop indicators */}
