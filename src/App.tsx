@@ -52,7 +52,10 @@ function App() {
   // Track the repo root of the currently active pane so the worktree
   // settings list can display that repo's worktrees.
   createEffect(() => {
-    const dir = tabStore.activeTab?.cliConfig.workingDir;
+    const tab = tabStore.activeTab;
+    if (!tab) { setActiveRepoRoot(null); return; }
+    if (tab.worktree?.repoRoot) { setActiveRepoRoot(tab.worktree.repoRoot); return; }
+    const dir = tab.cliConfig.workingDir;
     if (!dir) { setActiveRepoRoot(null); return; }
     findGitRepoRoot(dir).then(setActiveRepoRoot).catch(() => setActiveRepoRoot(null));
   });
@@ -75,9 +78,10 @@ function App() {
     max: 600,
   });
 
-  // Sidebar follows the active tab's working directory
+  // Sidebar follows the active tab's working directory (prefer repo root for worktrees)
   createEffect(() => {
-    const dir = tabStore.activeTab?.cliConfig.workingDir;
+    const tab = tabStore.activeTab;
+    const dir = tab?.worktree?.repoRoot ?? tab?.cliConfig.workingDir;
     if (dir) sidebarStore.setWorkingDir(dir);
   });
 
@@ -215,7 +219,7 @@ function App() {
   async function spawnAndOpenTab(config: CliConfig, options?: { splitIntoNewPane?: boolean }) {
     spawningCount++;
     try {
-      const { paneId, finalConfig, worktree } = await spawnPaneWithWorktree(
+      const { paneId, finalConfig, worktree, repoRoot } = await spawnPaneWithWorktree(
         config,
         settingsStore.worktree,
         {
@@ -244,14 +248,14 @@ function App() {
         status: "waiting",
         cliConfig: finalConfig,
         worktree: worktree
-          ? { path: worktree.path, branch: worktree.branch, headSha: worktree.headSha }
+          ? { path: worktree.path, branch: worktree.branch, headSha: worktree.headSha, repoRoot: repoRoot ?? config.workingDir }
           : undefined,
       };
       tabStore.openTab(tab);
       if (options?.splitIntoNewPane && tabStore.focusedGroupId && tabStore.layout) {
         tabStore.splitGroup(tabStore.focusedGroupId, "horizontal", paneId, "after");
       }
-      sidebarStore.setWorkingDir(finalConfig.workingDir);
+      sidebarStore.setWorkingDir(repoRoot ?? finalConfig.workingDir);
       return paneId;
     } finally {
       spawningCount--;

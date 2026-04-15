@@ -20,6 +20,8 @@ export interface SpawnPaneOutcome {
   paneId: string;
   worktree: CreatedWorktree | null;
   finalConfig: CliConfig;
+  /** Non-null whenever `worktree` is non-null. */
+  repoRoot: string | null;
 }
 
 /**
@@ -38,13 +40,13 @@ export async function spawnPaneWithWorktree(
 ): Promise<SpawnPaneOutcome> {
   if (!settings.autoCreate) {
     const paneId = await deps.spawnPty(config);
-    return { paneId, worktree: null, finalConfig: config };
+    return { paneId, worktree: null, finalConfig: config, repoRoot: null };
   }
 
   const repoRoot = await deps.findGitRepoRoot(config.workingDir);
   if (!repoRoot) {
     const paneId = await deps.spawnPty(config);
-    return { paneId, worktree: null, finalConfig: config };
+    return { paneId, worktree: null, finalConfig: config, repoRoot: null };
   }
 
   const now = deps.now?.() ?? new Date();
@@ -67,5 +69,5 @@ export async function spawnPaneWithWorktree(
 
   const finalConfig: CliConfig = { ...config, workingDir: created.path };
   const paneId = await deps.spawnPty(finalConfig);
-  return { paneId, worktree: created, finalConfig };
+  return { paneId, worktree: created, finalConfig, repoRoot };
 }
