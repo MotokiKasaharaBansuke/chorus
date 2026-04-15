@@ -21,6 +21,7 @@ export function useTerminal(options: UseTerminalOptions) {
   let unsubscribePtyExit: (() => void) | null = null;
   let observer: ResizeObserver | null = null;
   let zoomHandler: ((e: Event) => void) | null = null;
+  let rafId: number | null = null;
   const BASE_FONT_SIZE = 13;
 
   function mount(container: HTMLDivElement) {
@@ -89,12 +90,22 @@ export function useTerminal(options: UseTerminalOptions) {
       }
     });
 
-    // Subscribe to PTY output via global dispatcher (one Tauri listener per event type)
+    let pendingWrites: string[] = [];
+
+    function flushWrites() {
+      rafId = null;
+      if (!terminal || pendingWrites.length === 0) return;
+      const batch = pendingWrites.join("");
+      pendingWrites.length = 0;
+      terminal.write(batch);
+    }
+
     unsubscribePtyOutput = ptyOutputDispatcher.subscribe(options.ptyId, (payload) => {
       if (!terminal) return;
-      terminal.write(payload.data);
+      pendingWrites.push(payload.data);
       const status = detectStatus(payload.data, options.cliType);
       if (status) options.onStatusChange(status);
+      if (rafId === null) rafId = requestAnimationFrame(flushWrites);
     });
 
     // Subscribe to PTY exit via global dispatcher
@@ -127,6 +138,7 @@ export function useTerminal(options: UseTerminalOptions) {
       window.removeEventListener("mlm-zoom", zoomHandler);
       zoomHandler = null;
     }
+    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
     observer?.disconnect();
     observer = null;
     unsubscribePtyOutput?.();

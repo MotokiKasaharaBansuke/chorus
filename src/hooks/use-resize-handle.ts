@@ -16,8 +16,10 @@ export function useResizeHandle(options: ResizeHandleOptions) {
   const { direction, getValue, setValue, min = 100, max = 600 } = options;
   let moveHandler: ((e: MouseEvent) => void) | null = null;
   let upHandler: (() => void) | null = null;
+  let rafId: number | null = null;
 
   function cleanup() {
+    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
     if (moveHandler) document.removeEventListener("mousemove", moveHandler);
     if (upHandler) document.removeEventListener("mouseup", upHandler);
     moveHandler = null;
@@ -29,13 +31,21 @@ export function useResizeHandle(options: ResizeHandleOptions) {
     cleanup();
     const startPos = direction === "horizontal" ? e.clientX : e.clientY;
     const startValue = getValue();
+    let pendingPos: number | null = null;
+
+    function applyResize() {
+      rafId = null;
+      if (pendingPos === null) return;
+      const delta = direction === "horizontal"
+        ? pendingPos - startPos
+        : startPos - pendingPos;
+      pendingPos = null;
+      setValue(Math.max(min, Math.min(max, startValue + delta)));
+    }
 
     moveHandler = (ev: MouseEvent) => {
-      const currentPos = direction === "horizontal" ? ev.clientX : ev.clientY;
-      const delta = direction === "horizontal"
-        ? currentPos - startPos
-        : startPos - currentPos; // vertical: drag up = increase
-      setValue(Math.max(min, Math.min(max, startValue + delta)));
+      pendingPos = direction === "horizontal" ? ev.clientX : ev.clientY;
+      if (rafId === null) rafId = requestAnimationFrame(applyResize);
     };
 
     upHandler = cleanup;

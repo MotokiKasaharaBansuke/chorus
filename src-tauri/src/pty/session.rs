@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::cli::registry::CliType;
 use crate::error::AppError;
 use super::output_buffer::OutputBuffer;
+use super::stream_buffer::StreamBuffer;
 
 #[derive(Clone, Serialize)]
 pub struct PtyExitPayload {
@@ -76,7 +77,7 @@ impl PtySession {
         let buffer = OutputBuffer::new(id.to_string(), app.clone());
         let pty_id = id.to_string();
         std::thread::spawn(move || {
-            let mut buf = [0u8; 4096];
+            let mut buf = [0u8; 16384];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) | Err(_) => {
@@ -453,21 +454,21 @@ impl StreamSession {
             collected
         });
 
+        let buffer = StreamBuffer::new(stream_id.to_string(), app.clone());
         let mut got_output = false;
         for line in BufReader::new(stdout).lines() {
             match line {
                 Ok(l) if !l.is_empty() => {
                     got_output = true;
-                    let _ = app.emit("stream-event", StreamEventPayload {
-                        id: stream_id.to_string(),
-                        data: l,
-                    });
+                    buffer.push(l);
                 }
                 Err(_) => break,
                 _ => {}
             }
         }
         tracing::debug!(stream_id, "Claude Code stdout EOF reached");
+        // Flush remaining buffered lines before turn_complete via unbatched channel
+        drop(buffer);
 
         let wait_start = Instant::now();
         let exit_code = child.wait().ok().and_then(|s| s.code());
@@ -475,7 +476,6 @@ impl StreamSession {
         let stderr_text = stderr_handle.join().unwrap_or_default();
         tracing::debug!(stream_id, "Claude Code stderr thread joined");
 
-        // Forward stderr to frontend when process failed or produced no output
         if (!got_output || exit_code.is_none_or(|c| c != 0)) && !stderr_text.is_empty() {
             let _ = app.emit("stream-event", StreamEventPayload {
                 id: stream_id.to_string(),
@@ -522,14 +522,21 @@ impl StreamSession {
 
         spawn_stderr_logger(stderr, "Codex");
 
+        let buffer = StreamBuffer::new(stream_id.to_string(), app.clone());
         for line in BufReader::new(stdout).lines() {
             match line {
-                Ok(l) if !l.is_empty() => Self::translate_codex_line(&l, stream_id, app),
+                Ok(l) if !l.is_empty() => {
+                    if let Some(translated) = Self::translate_codex_line_to_string(&l) {
+                        buffer.push(translated);
+                    }
+                }
                 Err(_) => break,
                 _ => {}
             }
         }
         tracing::debug!(stream_id, "Codex stdout EOF reached");
+        // Flush remaining buffered lines before turn_complete via unbatched channel
+        drop(buffer);
 
         let wait_start = Instant::now();
         let _ = child.wait();
@@ -547,119 +554,105 @@ impl StreamSession {
         // running_since is cleared by MessageRunGuard (RAII)
     }
 
-    /// Translate a single Codex JSONL line into a Claude Code-compatible stream-event.
-    fn translate_codex_line(line: &str, stream_id: &str, app: &AppHandle) {
+    fn translate_codex_line_to_string(line: &str) -> Option<String> {
         let obj: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
-            Err(_) => return,
+            Err(_) => return None,
         };
 
         let event_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
         match event_type {
             "item.completed" | "item.started" => {
-                if let Some(item) = obj.get("item") {
-                    let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let item = obj.get("item")?;
+                let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
 
-                    match item_type {
-                        // Reasoning → thinking block
-                        "reasoning" if !text.is_empty() => {
-                            Self::emit_translated(stream_id, app, serde_json::json!({
-                                "type": "assistant",
-                                "message": {
-                                    "role": "assistant",
-                                    "content": [{ "type": "thinking", "thinking": text }]
-                                }
-                            }));
-                        }
-                        // Agent message → text block
-                        "agent_message" if !text.is_empty() => {
-                            Self::emit_translated(stream_id, app, serde_json::json!({
-                                "type": "assistant",
-                                "message": {
-                                    "role": "assistant",
-                                    "content": [{ "type": "text", "text": text }]
-                                }
-                            }));
-                        }
-                        // Function calls (shell, apply_patch, etc.)
-                        "function_call" | "local_shell_call" | "mcp_tool_call" => {
-                            let tool_name = item.get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("tool");
-                            let tool_id = item.get("id")
-                                .or_else(|| item.get("call_id"))
+                match item_type {
+                    "reasoning" if !text.is_empty() => {
+                        Some(serde_json::json!({
+                            "type": "assistant",
+                            "message": {
+                                "role": "assistant",
+                                "content": [{ "type": "thinking", "thinking": text }]
+                            }
+                        }).to_string())
+                    }
+                    "agent_message" if !text.is_empty() => {
+                        Some(serde_json::json!({
+                            "type": "assistant",
+                            "message": {
+                                "role": "assistant",
+                                "content": [{ "type": "text", "text": text }]
+                            }
+                        }).to_string())
+                    }
+                    "function_call" | "local_shell_call" | "mcp_tool_call" => {
+                        let tool_name = item.get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("tool");
+                        let tool_id = item.get("id")
+                            .or_else(|| item.get("call_id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let input = item.get("arguments")
+                            .map(|v| v.as_str().unwrap_or("").to_string())
+                            .or_else(|| item.get("command").map(|c|
+                                c.as_str().map(|s| s.to_string())
+                                    .unwrap_or_else(|| serde_json::to_string_pretty(c).unwrap_or_default())
+                            ))
+                            .unwrap_or_default();
+
+                        let mut blocks = vec![serde_json::json!({
+                            "type": "tool_use",
+                            "name": tool_name,
+                            "id": tool_id,
+                            "input": input,
+                        })];
+
+                        if event_type == "item.completed" {
+                            let output = item.get("output")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
-                            let input = item.get("arguments")
-                                .map(|v| v.as_str().unwrap_or("").to_string())
-                                .or_else(|| item.get("command").map(|c|
-                                    c.as_str().map(|s| s.to_string())
-                                        .unwrap_or_else(|| serde_json::to_string_pretty(c).unwrap_or_default())
-                                ))
-                                .unwrap_or_default();
-
-                            let mut blocks = vec![serde_json::json!({
-                                "type": "tool_use",
-                                "name": tool_name,
-                                "id": tool_id,
-                                "input": input,
-                            })];
-
-                            // On completion, add tool_result
-                            if event_type == "item.completed" {
-                                let output = item.get("output")
+                            let is_error = item.get("exit_code")
+                                .and_then(|v| v.as_i64())
+                                .map(|c| c != 0)
+                                .or_else(|| item.get("status")
                                     .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                let is_error = item.get("exit_code")
-                                    .and_then(|v| v.as_i64())
-                                    .map(|c| c != 0)
-                                    .or_else(|| item.get("status")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s != "completed"))
-                                    .unwrap_or(false);
-                                blocks.push(serde_json::json!({
-                                    "type": "tool_result",
-                                    "tool_use_id": tool_id,
-                                    "content": output,
-                                    "is_error": is_error,
-                                }));
-                            }
-
-                            Self::emit_translated(stream_id, app, serde_json::json!({
-                                "type": "assistant",
-                                "message": { "role": "assistant", "content": blocks }
+                                    .map(|s| s != "completed"))
+                                .unwrap_or(false);
+                            blocks.push(serde_json::json!({
+                                "type": "tool_result",
+                                "tool_use_id": tool_id,
+                                "content": output,
+                                "is_error": is_error,
                             }));
                         }
-                        _ => {
-                            tracing::debug!(item_type = item_type, "Unknown Codex item type");
-                        }
+
+                        Some(serde_json::json!({
+                            "type": "assistant",
+                            "message": { "role": "assistant", "content": blocks }
+                        }).to_string())
+                    }
+                    _ => {
+                        tracing::debug!(item_type = item_type, "Unknown Codex item type");
+                        None
                     }
                 }
             }
-            // turn.completed carries usage info
             "turn.completed" => {
-                if let Some(usage) = obj.get("usage") {
-                    Self::emit_translated(stream_id, app, serde_json::json!({
+                obj.get("usage").map(|usage| {
+                    serde_json::json!({
                         "type": "result",
                         "usage": {
                             "input_tokens": usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                             "output_tokens": usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
                         }
-                    }));
-                }
+                    }).to_string()
+                })
             }
-            // thread.started, turn.started → already covered by synthetic init
-            _ => {}
+            _ => None,
         }
-    }
-
-    fn emit_translated(stream_id: &str, app: &AppHandle, data: serde_json::Value) {
-        let _ = app.emit("stream-event", StreamEventPayload {
-            id: stream_id.to_string(),
-            data: data.to_string(),
-        });
     }
 
     pub fn kill(&self) {
