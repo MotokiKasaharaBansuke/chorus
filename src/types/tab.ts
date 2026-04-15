@@ -13,6 +13,13 @@ export interface CliConfig {
   workingDir: string;
 }
 
+/** Auto-created worktree metadata attached to a Tab by the auto-worktree flow. */
+export interface TabWorktree {
+  path: string;
+  branch: string;
+  headSha: string;
+}
+
 export interface Tab {
   id: string;
   title: string;
@@ -23,11 +30,17 @@ export interface Tab {
   ptyId?: string; // current PTY ID (differs from tab.id after PTY respawn)
   contentOverride?: string; // inline content for read-only tabs (tool output)
   sourceTabId?: string; // tab that requested this review (for "send back" feature)
+  worktree?: TabWorktree; // present when this pane was opened with auto-worktree
 }
 
 /** Resolve the effective PTY ID (falls back to tab.id when no respawn has occurred) */
 export function effectivePtyId(tab: Tab): string {
   return tab.ptyId ?? tab.id;
+}
+
+/** Whether the tab's persisted status indicates active streaming */
+export function isTabStreaming(status: TabStatus): boolean {
+  return status === "running";
 }
 
 export interface TabStoreState {

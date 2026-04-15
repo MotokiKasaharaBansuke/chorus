@@ -1,13 +1,16 @@
 mod cli;
 mod commands;
+mod config_path;
 mod error;
 mod fs;
 mod ipc;
 mod pty;
+mod settings;
+mod worktree;
 
 use tauri::Manager;
 
-use commands::{fs_commands, image_commands, pty_commands, session_commands};
+use commands::{fs_commands, image_commands, pty_commands, session_commands, settings_commands, worktree_commands};
 use fs::watcher::WatcherState;
 use pty::manager::PtyManager;
 
@@ -64,6 +67,8 @@ pub fn run() {
             pty_commands::write_pty,
             pty_commands::resize_pty,
             pty_commands::kill_pty,
+            pty_commands::list_session_ids,
+            pty_commands::kill_zombie_sessions,
             fs_commands::list_directory,
             fs_commands::read_file,
             fs_commands::watch_directory,
@@ -73,12 +78,21 @@ pub fn run() {
             fs_commands::list_codex_sessions,
             fs_commands::read_codex_session,
             fs_commands::git_changed_files,
+            fs_commands::git_has_tracked_changes,
             image_commands::save_temp_image,
             image_commands::import_image_file,
             image_commands::delete_temp_image,
             image_commands::cleanup_temp_images,
             session_commands::save_session,
             session_commands::load_session,
+            settings_commands::load_settings,
+            settings_commands::save_settings,
+            worktree_commands::find_git_repo_root,
+            worktree_commands::list_branches,
+            worktree_commands::list_worktrees,
+            worktree_commands::create_worktree,
+            worktree_commands::remove_worktree,
+            worktree_commands::get_disk_usage,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {

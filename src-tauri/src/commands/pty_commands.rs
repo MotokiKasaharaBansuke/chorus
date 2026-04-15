@@ -94,3 +94,18 @@ pub fn kill_pty(
 ) -> Result<(), AppError> {
     state.kill(&pty_id)
 }
+
+#[tauri::command]
+pub fn list_session_ids(
+    state: State<'_, PtyManager>,
+) -> Vec<String> {
+    state.list_session_ids()
+}
+
+#[tauri::command]
+pub fn kill_zombie_sessions(
+    keep_ids: Vec<String>,
+    state: State<'_, PtyManager>,
+) -> u32 {
+    state.kill_except(&keep_ids)
+}

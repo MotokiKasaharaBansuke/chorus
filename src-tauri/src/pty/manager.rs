@@ -101,10 +101,7 @@ impl PtyManager {
 
     pub fn kill(&self, id: &str) -> Result<(), AppError> {
         if let Some(mut session) = self.sessions.lock().remove(id) {
-            match &mut session {
-                Session::Pty(s) => s.kill(),
-                Session::Stream(s) => s.kill(),
-            }
+            kill_session(&mut session);
             tracing::info!(session_id = id, "Session killed");
             Ok(())
         } else {
@@ -112,13 +109,40 @@ impl PtyManager {
         }
     }
 
+    pub fn list_session_ids(&self) -> Vec<String> {
+        self.sessions.lock().keys().cloned().collect()
+    }
+
+    pub fn kill_except(&self, keep: &[String]) -> u32 {
+        let mut sessions = self.sessions.lock();
+        let keep_set: std::collections::HashSet<&str> =
+            keep.iter().map(|s| s.as_str()).collect();
+        let zombie_ids: Vec<String> = sessions
+            .keys()
+            .filter(|id| !keep_set.contains(id.as_str()))
+            .cloned()
+            .collect();
+        let count = zombie_ids.len() as u32;
+        for id in &zombie_ids {
+            if let Some(mut session) = sessions.remove(id) {
+                kill_session(&mut session);
+                tracing::info!(session_id = %id, "Zombie session killed");
+            }
+        }
+        count
+    }
+
     pub fn kill_all(&self) {
         for (id, mut session) in self.sessions.lock().drain() {
-            match &mut session {
-                Session::Pty(s) => s.kill(),
-                Session::Stream(s) => s.kill(),
-            }
+            kill_session(&mut session);
             tracing::info!(session_id = id, "Session killed (shutdown)");
         }
+    }
+}
+
+fn kill_session(session: &mut Session) {
+    match session {
+        Session::Pty(s) => s.kill(),
+        Session::Stream(s) => s.kill(),
     }
 }

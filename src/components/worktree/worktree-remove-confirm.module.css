@@ -1,0 +1,90 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 118;
+  backdrop-filter: blur(4px);
+}
+
+.modal {
+  background: #252525;
+  border: 1px solid #3d3d3d;
+  border-radius: 10px;
+  padding: 22px;
+  width: 440px;
+  max-width: 92vw;
+}
+
+.title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #cccccc;
+}
+
+.sub {
+  margin: 0 0 14px;
+  font-size: 11px;
+  color: #888;
+}
+
+.meta {
+  padding: 10px 12px;
+  background: #1f1f1f;
+  border: 1px solid #2d2d2d;
+  border-radius: 6px;
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 11px;
+  color: #ccc;
+  word-break: break-all;
+}
+
+.warning {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: #3a1515;
+  border: 1px solid #f85149;
+  border-radius: 6px;
+  color: #ffa198;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.keepBtn {
+  padding: 7px 14px;
+  background: transparent;
+  border: 1px solid #3d3d3d;
+  border-radius: 6px;
+  color: #ccc;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.keepBtn:hover {
+  background: #2d2d2d;
+}
+
+.removeBtn {
+  padding: 7px 18px;
+  background: #f85149;
+  border: none;
+  border-radius: 6px;
+  color: white;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.removeBtn:hover {
+  background: #ff6961;
+}

@@ -1,17 +1,10 @@
 use std::fs;
-use std::path::PathBuf;
 
-fn session_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| String::from("~"));
-    PathBuf::from(home)
-        .join(".config")
-        .join("chorus")
-        .join("session.json")
-}
+use crate::config_path::session_file;
 
 #[tauri::command]
 pub fn save_session(data: String) -> Result<(), String> {
-    let path = session_path();
+    let path = session_file();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -20,7 +13,7 @@ pub fn save_session(data: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn load_session() -> Result<Option<String>, String> {
-    let path = session_path();
+    let path = session_file();
     if path.exists() {
         fs::read_to_string(&path).map(Some).map_err(|e| e.to_string())
     } else {
