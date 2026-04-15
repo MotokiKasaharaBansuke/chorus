@@ -169,7 +169,7 @@ describe("StreamParser.processLine", () => {
 
   it("ignores unknown event types silently", () => {
     const parser = new StreamParser();
-    parser.processLine(JSON.stringify({ type: "rate_limit_event", data: {} }));
+    parser.processLine(JSON.stringify({ type: "completely_unknown_type", data: {} }));
     expect(parser.getMessages()).toHaveLength(0);
   });
 
@@ -345,5 +345,118 @@ describe("StreamParser.addUserMessage with images", () => {
     const blocks = parser.getMessages()[0].blocks;
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toEqual({ kind: "text", text: "hello" });
+  });
+});
+
+// ---- rate_limit_event ----
+
+function rateLimitLine(info: Record<string, unknown>) {
+  return JSON.stringify({ type: "rate_limit_event", rate_limit_info: info });
+}
+
+describe("StreamParser.onRateLimit", () => {
+  it("fires listener with parsed rate limit info", () => {
+    const parser = new StreamParser();
+    let received: unknown = null;
+    parser.onRateLimit((info) => { received = info; });
+    parser.processLine(rateLimitLine({
+      status: "allowed_warning",
+      rateLimitType: "seven_day",
+      utilization: 0.57,
+      resetsAt: 1776654000,
+      isUsingOverage: false,
+    }));
+    expect(received).toEqual({
+      status: "allowed_warning",
+      rateLimitType: "seven_day",
+      utilization: 0.57,
+      resetsAt: 1776654000,
+      isUsingOverage: false,
+    });
+  });
+
+  it("fires for rejected status", () => {
+    const parser = new StreamParser();
+    let received: unknown = null;
+    parser.onRateLimit((info) => { received = info; });
+    parser.processLine(rateLimitLine({
+      status: "rejected",
+      rateLimitType: "five_hour",
+      utilization: 1.0,
+      resetsAt: 1776654000,
+      isUsingOverage: false,
+    }));
+    expect(received).toMatchObject({ status: "rejected", rateLimitType: "five_hour" });
+  });
+
+  it("does not fire for allowed status (still parsed but listener fires)", () => {
+    const parser = new StreamParser();
+    let received: unknown = null;
+    parser.onRateLimit((info) => { received = info; });
+    parser.processLine(rateLimitLine({
+      status: "allowed",
+      rateLimitType: "seven_day",
+      utilization: 0.2,
+      resetsAt: 1776654000,
+      isUsingOverage: false,
+    }));
+    expect(received).toMatchObject({ status: "allowed" });
+  });
+
+  it("ignores rate_limit_event with missing rate_limit_info", () => {
+    const parser = new StreamParser();
+    let called = false;
+    parser.onRateLimit(() => { called = true; });
+    parser.processLine(JSON.stringify({ type: "rate_limit_event" }));
+    expect(called).toBe(false);
+  });
+
+  it("ignores rate_limit_event with invalid status", () => {
+    const parser = new StreamParser();
+    let called = false;
+    parser.onRateLimit(() => { called = true; });
+    parser.processLine(rateLimitLine({
+      status: "unknown_status",
+      rateLimitType: "seven_day",
+      utilization: 0.5,
+      resetsAt: 1776654000,
+      isUsingOverage: false,
+    }));
+    expect(called).toBe(false);
+  });
+
+  it("does not produce any chat messages", () => {
+    const parser = new StreamParser();
+    parser.processLine(rateLimitLine({
+      status: "allowed_warning",
+      rateLimitType: "seven_day",
+      utilization: 0.57,
+      resetsAt: 1776654000,
+      isUsingOverage: false,
+    }));
+    expect(parser.getMessages()).toHaveLength(0);
+  });
+
+  it("unsubscribe stops listener", () => {
+    const parser = new StreamParser();
+    let callCount = 0;
+    const unsub = parser.onRateLimit(() => { callCount++; });
+    parser.processLine(rateLimitLine({
+      status: "allowed_warning",
+      rateLimitType: "seven_day",
+      utilization: 0.5,
+      resetsAt: 1776654000,
+      isUsingOverage: false,
+    }));
+    expect(callCount).toBe(1);
+    unsub();
+    parser.processLine(rateLimitLine({
+      status: "rejected",
+      rateLimitType: "seven_day",
+      utilization: 1.0,
+      resetsAt: 1776654000,
+      isUsingOverage: false,
+    }));
+    expect(callCount).toBe(1);
   });
 });

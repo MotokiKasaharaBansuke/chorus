@@ -574,6 +574,7 @@ function App() {
           isActiveTabStale={isActiveTabStale()}
           onRefreshActiveTab={handleRefreshActiveTab}
           usageSummary={usageStore.summary}
+          rateLimit={usageStore.rateLimit}
           onViewUsage={() => setShowUsageModal(true)}
         />
       </div>

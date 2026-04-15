@@ -139,6 +139,28 @@
   line-height: 1;
 }
 
+.rateLimitBanner {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: #2a2518;
+  border: 1px solid #4a3a20;
+  border-radius: 5px;
+  padding: 3px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.rateLimitRejected {
+  background: #2a1818;
+  border-color: #5a2020;
+}
+.rateLimitText {
+  color: #c9a84c;
+}
+.rateLimitRejected .rateLimitText {
+  color: #e07060;
+}
+
 .usageBanner {
   -webkit-app-region: no-drag;
   display: flex;

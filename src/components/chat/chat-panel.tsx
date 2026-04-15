@@ -78,6 +78,9 @@ export function ChatPanel(props: ChatPanelProps) {
     setIsStreaming(status === "streaming");
     store.updateStatus(props.tab.id, status === "streaming" ? "running" : "waiting");
   });
+  parser.onRateLimit((info) => {
+    usageStore.updateRateLimit(info);
+  });
 
   // Safety net: sync isStreaming if store status is externally cleared (e.g. final PTY event lost during remount)
   createEffect(() => {

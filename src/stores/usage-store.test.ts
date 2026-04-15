@@ -113,6 +113,45 @@ describe("usage-store", () => {
     expect(store.summary.tabs).toHaveLength(0);
   });
 
+  it("rateLimit starts as null", () => {
+    expect(store.rateLimit).toBeNull();
+  });
+
+  it("updateRateLimit sets rate limit info", () => {
+    store.updateRateLimit({
+      status: "allowed_warning",
+      rateLimitType: "seven_day",
+      utilization: 0.57,
+      resetsAt: 1776654000,
+      isUsingOverage: false,
+    });
+    expect(store.rateLimit).toEqual({
+      status: "allowed_warning",
+      rateLimitType: "seven_day",
+      utilization: 0.57,
+      resetsAt: 1776654000,
+      isUsingOverage: false,
+    });
+  });
+
+  it("updateRateLimit overwrites previous value", () => {
+    store.updateRateLimit({
+      status: "allowed_warning",
+      rateLimitType: "seven_day",
+      utilization: 0.5,
+      resetsAt: 1776654000,
+      isUsingOverage: false,
+    });
+    store.updateRateLimit({
+      status: "rejected",
+      rateLimitType: "five_hour",
+      utilization: 1.0,
+      resetsAt: 1776660000,
+      isUsingOverage: false,
+    });
+    expect(store.rateLimit).toMatchObject({ status: "rejected", rateLimitType: "five_hour" });
+  });
+
   it("rounds accumulated costs to avoid floating-point artifacts", () => {
     store.updateTabUsage({
       tabId: "t1",
