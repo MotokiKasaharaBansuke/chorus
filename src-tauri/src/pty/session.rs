@@ -201,11 +201,13 @@ impl StreamSession {
         {
             let mut running = self.running_since.lock();
             if let Some(started) = *running {
-                if started.elapsed() < Self::STALE_LOCK_TIMEOUT {
+                let elapsed = started.elapsed();
+                if elapsed < Self::STALE_LOCK_TIMEOUT {
+                    tracing::warn!(pane_id = %pane_id, elapsed_ms = elapsed.as_millis(), "send_message rejected: running_since still held");
                     return Err(AppError::StreamSessionBusy("Already processing a message".into()));
                 }
                 // Stale lock: previous process likely crashed. Force reset.
-                tracing::warn!(elapsed_secs = started.elapsed().as_secs(), "Resetting stale is_running lock");
+                tracing::warn!(elapsed_secs = elapsed.as_secs(), "Resetting stale is_running lock");
                 // Kill the stale process if PID is still set
                 self.kill();
             }
@@ -465,9 +467,13 @@ impl StreamSession {
                 _ => {}
             }
         }
+        tracing::debug!(stream_id, "Claude Code stdout EOF reached");
 
+        let wait_start = Instant::now();
         let exit_code = child.wait().ok().and_then(|s| s.code());
+        tracing::debug!(stream_id, exit_code, wait_ms = wait_start.elapsed().as_millis(), "Claude Code child.wait() returned");
         let stderr_text = stderr_handle.join().unwrap_or_default();
+        tracing::debug!(stream_id, "Claude Code stderr thread joined");
 
         // Forward stderr to frontend when process failed or produced no output
         if (!got_output || exit_code.is_none_or(|c| c != 0)) && !stderr_text.is_empty() {
@@ -487,6 +493,7 @@ impl StreamSession {
                 "exit_code": exit_code,
             }).to_string(),
         });
+        tracing::debug!(stream_id, "Claude Code read_stream_json returning — guard will drop");
         // running_since is cleared by MessageRunGuard (RAII)
     }
 
@@ -522,8 +529,11 @@ impl StreamSession {
                 _ => {}
             }
         }
+        tracing::debug!(stream_id, "Codex stdout EOF reached");
 
+        let wait_start = Instant::now();
         let _ = child.wait();
+        tracing::debug!(stream_id, wait_ms = wait_start.elapsed().as_millis(), "Codex child.wait() returned");
         // Ensure result + turn_complete is emitted even if Codex didn't send turn.completed
         let _ = app.emit("stream-event", StreamEventPayload {
             id: stream_id.to_string(),
@@ -533,6 +543,7 @@ impl StreamSession {
             id: stream_id.to_string(),
             data: serde_json::json!({ "type": "turn_complete" }).to_string(),
         });
+        tracing::debug!(stream_id, "Codex read_codex_jsonl returning — guard will drop");
         // running_since is cleared by MessageRunGuard (RAII)
     }
 
