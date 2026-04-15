@@ -34,6 +34,19 @@ export function SidebarIcon(props: { isOpen: boolean; size?: number }) {
   );
 }
 
+/** Refresh/reload icon */
+export function RefreshIcon(props: { size?: number }) {
+  const s = props.size ?? 16;
+  return (
+    <svg width={s} height={s} viewBox="0 0 16 16" fill="none">
+      <path d="M13.5 8a5.5 5.5 0 01-10.58 2.12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" fill="none"/>
+      <path d="M2.5 8a5.5 5.5 0 0110.58-2.12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" fill="none"/>
+      <path d="M1 11.5l1.92-1.38L4.5 11.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      <path d="M15 4.5l-1.92 1.38L11.5 4.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </svg>
+  );
+}
+
 /** Terminal icon */
 export function TerminalIcon(props: { size?: number }) {
   const s = props.size ?? 16;

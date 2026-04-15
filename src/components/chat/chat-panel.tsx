@@ -102,6 +102,16 @@ export function ChatPanel(props: ChatPanelProps) {
     }
   });
 
+  // Listen for refresh events dispatched from App.tsx to clear parser state
+  function handleRefreshEvent(e: Event) {
+    if (!(e instanceof CustomEvent)) return;
+    if (e.detail?.tabId !== props.tab.id) return;
+    parser.loadSession([]);
+    setIsStreaming(false);
+  }
+  window.addEventListener("mlm-refresh-tab", handleRefreshEvent);
+  onCleanup(() => window.removeEventListener("mlm-refresh-tab", handleRefreshEvent));
+
   // Image drop events dispatched from App.tsx — co-located with cleanup via createEffect
   createEffect(() => {
     async function handleImageDrop(e: Event) {
