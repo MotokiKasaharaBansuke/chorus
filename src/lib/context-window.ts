@@ -5,7 +5,7 @@ export const CONTEXT_WARN_THRESHOLD = 0.8;
 
 export function contextColor(pct: number): string {
   if (pct >= AUTO_COMPACT_THRESHOLD) return "#c74e39";
-  if (pct >= CONTEXT_WARN_THRESHOLD) return "#d97757";
+  if (pct >= CONTEXT_WARN_THRESHOLD) return "#e8587a";
   if (pct >= AUTO_COMPACT_RESET_THRESHOLD) return "#e1c08d";
   return "#3fb950";
 }

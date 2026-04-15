@@ -86,7 +86,7 @@
   align-items: center;
 }
 .dropdownItem:hover { background: #333; color: #ccc; }
-.dropdownActive { color: #d97757; font-weight: 600; }
+.dropdownActive { color: #e8587a; font-weight: 600; }
 
 .divider { height: 1px; background: #333; margin: 4px 0; }
 
