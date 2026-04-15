@@ -375,12 +375,18 @@ function App() {
     }
   }
 
+  function collectActivePtyIds(): string[] {
+    return [
+      ...tabStore.tabs.map(t => effectivePtyId(t)),
+      ...bottomTerminal.termTabs().map(t => t.id),
+    ];
+  }
+
   async function checkSessionHealth() {
     if (spawningCount > 0) return;
     try {
       const backendIds = await listSessionIds();
-      const frontendIds = tabStore.tabs.map(t => effectivePtyId(t));
-      setZombieCount(countZombies(backendIds, frontendIds));
+      setZombieCount(countZombies(backendIds, collectActivePtyIds()));
 
       const activeTab = tabStore.activeTab;
       if (activeTab && activeTab.cliConfig.cliType !== "file-viewer") {
@@ -433,9 +439,8 @@ function App() {
   }
 
   async function handleKillZombies() {
-    const keepIds = tabStore.tabs.map(t => effectivePtyId(t));
     try {
-      await killZombieSessions(keepIds);
+      await killZombieSessions(collectActivePtyIds());
     } catch { /* best effort */ }
     void checkSessionHealth();
   }
