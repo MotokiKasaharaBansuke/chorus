@@ -8,6 +8,7 @@ import styles from "./sidebar.module.css";
 
 interface SidebarProps {
   workingDir: string;
+  displayDir?: string;
   onFileOpen?: (path: string) => void;
 }
 
@@ -48,8 +49,9 @@ export function Sidebar(props: SidebarProps) {
   }
 
   const projectName = () => {
-    if (!props.workingDir) return "EXPLORER";
-    const parts = props.workingDir.split("/");
+    const dir = props.displayDir ?? props.workingDir;
+    if (!dir) return "EXPLORER";
+    const parts = dir.split("/");
     return parts[parts.length - 1]?.toUpperCase() || "EXPLORER";
   };
 

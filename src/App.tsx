@@ -78,10 +78,9 @@ function App() {
     max: 600,
   });
 
-  // Sidebar follows the active tab's working directory (prefer repo root for worktrees)
+  // Sidebar follows the active tab's working directory
   createEffect(() => {
-    const tab = tabStore.activeTab;
-    const dir = tab?.worktree?.repoRoot ?? tab?.cliConfig.workingDir;
+    const dir = tabStore.activeTab?.cliConfig.workingDir;
     if (dir) sidebarStore.setWorkingDir(dir);
   });
 
@@ -255,7 +254,7 @@ function App() {
       if (options?.splitIntoNewPane && tabStore.focusedGroupId && tabStore.layout) {
         tabStore.splitGroup(tabStore.focusedGroupId, "horizontal", paneId, "after");
       }
-      sidebarStore.setWorkingDir(repoRoot ?? finalConfig.workingDir);
+      sidebarStore.setWorkingDir(finalConfig.workingDir);
       return paneId;
     } finally {
       spawningCount--;
@@ -469,7 +468,7 @@ function App() {
       <div class="app-body">
         <Show when={sidebarStore.isOpen}>
           <div class="sidebar-container" style={{ width: `${sidebarStore.width}px` }}>
-            <Sidebar workingDir={sidebarStore.workingDir} onFileOpen={handleFileOpen} />
+            <Sidebar workingDir={sidebarStore.workingDir} displayDir={tabStore.activeTab?.worktree?.repoRoot} onFileOpen={handleFileOpen} />
           </div>
           <div class="sidebar-resize" onMouseDown={sidebarResizeDown} />
         </Show>
