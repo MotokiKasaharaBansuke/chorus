@@ -1,10 +1,11 @@
-import { createSignal, Show } from "solid-js";
+import { createSignal, For, Show } from "solid-js";
 import { useTabStore } from "../../stores/tab-store";
 import { HelpModal } from "../help/help-modal";
 import { SidebarIcon, TerminalIcon, RefreshIcon } from "../icons";
-import { formatCost, formatTokens } from "../../lib/format/usage";
+import { formatResetsIn, formatUtilization, USAGE_WARNING_THRESHOLD } from "../../lib/format/usage";
+import type { ZombieSessionInfo } from "../../lib/commands";
 import type { CliMode, ReviewCliType } from "../../types";
-import type { UsageSummary } from "../../types";
+import type { RateLimitEntry } from "../../types/usage";
 import styles from "./top-bar.module.css";
 
 interface TopBarProps {
@@ -20,22 +21,45 @@ interface TopBarProps {
   fontSize: number;
   onFontSizeChange: (size: number) => void;
   onOpenWorktreeSettings: () => void;
-  zombieCount: number;
-  onKillZombies: () => void;
+  zombieSessions: ZombieSessionInfo[];
+  onKillZombie: (id: string) => void;
+  onKillAllZombies: () => void;
   hasActiveTab: boolean;
   isActiveTabStale: boolean;
   onRefreshActiveTab: () => void;
-  usageSummary: UsageSummary;
+  rateLimits: readonly RateLimitEntry[];
   onViewUsage: () => void;
+}
+
+function highestUtilizationEntry(rateLimits: readonly RateLimitEntry[]): RateLimitEntry | null {
+  if (rateLimits.length === 0) return null;
+  return [...rateLimits].sort((a, b) => b.utilization - a.utilization)[0] ?? null;
 }
 
 export function TopBar(props: TopBarProps) {
   const tabStore = useTabStore();
   const [showSettings, setShowSettings] = createSignal(false);
   const [showHelp, setShowHelp] = createSignal(false);
+  const [showZombies, setShowZombies] = createSignal(false);
+
+  const top = () => highestUtilizationEntry(props.rateLimits);
 
   return (
     <div class={styles.topBar}>
+      <Show when={top()}>
+        {(entry) => (
+          <button
+            class={`${styles.usageBanner} ${entry().utilization >= USAGE_WARNING_THRESHOLD ? styles.usageBannerWarn : ""}`}
+            onClick={props.onViewUsage}
+            title="View subscription usage"
+          >
+            <span class={styles.usagePct}>{formatUtilization(entry().utilization)}</span>
+            <span class={styles.usageSep}>·</span>
+            <span class={styles.usageResets}>resets in {formatResetsIn(entry().resetsAt)}</span>
+            <span class={styles.usageLink}>View usage</span>
+          </button>
+        )}
+      </Show>
       <div class={styles.right}>
         <button class={styles.btn} onClick={props.onToggleSidebar} title="Toggle Sidebar (⌘B)">
           <SidebarIcon isOpen={props.isSidebarOpen} size={14} />
@@ -75,7 +99,7 @@ export function TopBar(props: TopBarProps) {
                 onClick={() => { props.onQuickLaunchModeChange("plan"); setShowSettings(false); }}>Plan</div>
               <div class={`${styles.dropdownItem} ${props.quickLaunchMode === "dangerously-skip-permissions" ? styles.dropdownActive : ""}`}
                 onClick={() => { props.onQuickLaunchModeChange("dangerously-skip-permissions"); setShowSettings(false); }}>
-                Bypass permissions
+                Bypass
                 <span style={{ color: "#c74e39", "font-size": "10px", "margin-left": "4px" }}>DANGER</span>
               </div>
               <div class={styles.divider} />
@@ -106,25 +130,46 @@ export function TopBar(props: TopBarProps) {
             <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           </svg>
         </button>
-        <Show when={props.zombieCount > 0}>
-          <button
-            class={`${styles.btn} ${styles.zombieBtn}`}
-            onClick={props.onKillZombies}
-            title={`Kill ${props.zombieCount} zombie session(s)`}
-          >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-              <path d="M1 1l14 14M1 15L15 1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-            </svg>
-            <span class={styles.zombieBadge}>{props.zombieCount}</span>
-          </button>
-        </Show>
-        <Show when={props.usageSummary.totalCostUsd > 0}>
-          <button class={styles.usageBanner} onClick={props.onViewUsage} title="View session usage">
-            <span class={styles.usageCost}>{formatCost(props.usageSummary.totalCostUsd)}</span>
-            <span class={styles.usageSep}>·</span>
-            <span class={styles.usageTokens}>{formatTokens(props.usageSummary.totalInputTokens + props.usageSummary.totalOutputTokens)} tokens</span>
-            <span class={styles.usageLink}>View usage</span>
-          </button>
+        <Show when={props.zombieSessions.length > 0}>
+          <div class={styles.dropdownWrap}>
+            <button
+              class={`${styles.btn} ${styles.zombieBtn}`}
+              onClick={() => setShowZombies(!showZombies())}
+              title={`${props.zombieSessions.length} zombie session(s) — click to manage`}
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <path d="M1 1l14 14M1 15L15 1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+              <span class={styles.zombieBadge}>{props.zombieSessions.length}</span>
+            </button>
+            <Show when={showZombies()}>
+              <div class={`${styles.dropdown} ${styles.zombieDropdown}`}>
+                <div class={styles.dropdownTitle}>Zombie Sessions</div>
+                <For each={props.zombieSessions}>
+                  {(session) => (
+                    <div class={styles.zombieRow}>
+                      <span class={styles.zombieCliType}>{session.cliType}</span>
+                      <span class={styles.zombieId}>{session.id.slice(0, 8)}</span>
+                      <button
+                        class={styles.zombieKillBtn}
+                        onClick={() => { props.onKillZombie(session.id); }}
+                        title={`Kill session ${session.id}`}
+                      >
+                        Kill
+                      </button>
+                    </div>
+                  )}
+                </For>
+                <div class={styles.divider} />
+                <div
+                  class={`${styles.dropdownItem} ${styles.zombieKillAll}`}
+                  onClick={() => { props.onKillAllZombies(); setShowZombies(false); }}
+                >
+                  Kill All
+                </div>
+              </div>
+            </Show>
+          </div>
         </Show>
         <button class={styles.btn} onClick={() => setShowHelp(true)} title="Keyboard shortcuts & CLI commands">
           ?

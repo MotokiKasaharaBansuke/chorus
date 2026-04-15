@@ -187,4 +187,34 @@ describe("useTabStore", () => {
       dispose();
     });
   });
+
+  it("updateAccount sets accountId on existing tab", () => {
+    createRoot((dispose) => {
+      const store = useTabStore();
+      store.openTab(makeTab("t1"));
+      expect(store.getTab("t1")?.cliConfig.accountId).toBeUndefined();
+      store.updateAccount("t1", "acc-123");
+      expect(store.getTab("t1")?.cliConfig.accountId).toBe("acc-123");
+      dispose();
+    });
+  });
+
+  it("updateAccount clears accountId when given undefined", () => {
+    createRoot((dispose) => {
+      const store = useTabStore();
+      store.openTab({ ...makeTab("t1"), cliConfig: { cliType: "claude-code", mode: "default", workingDir: "/tmp", accountId: "acc-123" } });
+      store.updateAccount("t1", undefined);
+      expect(store.getTab("t1")?.cliConfig.accountId).toBeUndefined();
+      dispose();
+    });
+  });
+
+  it("updateAccount on non-existent id does nothing", () => {
+    createRoot((dispose) => {
+      const store = useTabStore();
+      store.updateAccount("nonexistent", "acc-123");
+      expect(store.getTab("nonexistent")).toBeUndefined();
+      dispose();
+    });
+  });
 });

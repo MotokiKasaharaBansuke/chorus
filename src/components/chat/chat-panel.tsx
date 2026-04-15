@@ -1,4 +1,4 @@
-import { createSignal, createEffect, For, Show, onMount, onCleanup } from "solid-js";
+import { createSignal, createEffect, createMemo, For, Show, onMount, onCleanup } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
 import { sendMessage as sendMessageCmd, killPty, spawnPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
@@ -8,6 +8,7 @@ import { getOrCreateParser } from "../../lib/stream-parser-registry";
 import { MessageBubble } from "./message-bubble";
 import { BusySpinner } from "./busy-spinner";
 import { ModelPicker } from "./model-picker";
+import { AccountPicker } from "./account-picker";
 import { ChatInput } from "./chat-input";
 import { SessionPicker } from "./session-picker";
 import { ClawdIcon, CodexIcon } from "../icons";
@@ -20,6 +21,7 @@ import { classifyStreamError } from "../../lib/classify-error";
 import { isValidTempImagePath } from "../../lib/validate-path";
 import { submitWithBusyRetry } from "../../lib/submit-with-busy-retry";
 import { WorktreeResetConfirm } from "../worktree/worktree-reset-confirm";
+import { CONTEXT_WINDOW_SIZE, AUTO_COMPACT_THRESHOLD, AUTO_COMPACT_RESET_THRESHOLD, contextColor, shouldAutoCompact } from "../../lib/context-window";
 import styles from "./chat-panel.module.css";
 
 
@@ -39,6 +41,13 @@ export function ChatPanel(props: ChatPanelProps) {
   const [pastSessions, setPastSessions] = createSignal<SessionInfo[]>([]);
   const [showSessionPicker, setShowSessionPicker] = createSignal(false);
   const [showModelPicker, setShowModelPicker] = createSignal(false);
+  const [showAccountPicker, setShowAccountPicker] = createSignal(false);
+  const [contextInputTokens, setContextInputTokens] = createSignal(0);
+  const contextPct = createMemo(() => contextInputTokens() / CONTEXT_WINDOW_SIZE);
+  const contextBarColor = createMemo(() => contextColor(contextPct()));
+  const showContextBar = createMemo(() =>
+    contextInputTokens() > 0 && props.tab.cliConfig.cliType === "claude-code"
+  );
   const inputHistory: string[] = [];
   let scrollRef: HTMLDivElement | undefined;
   let containerRef: HTMLDivElement | undefined;
@@ -47,6 +56,7 @@ export function ChatPanel(props: ChatPanelProps) {
   // then suppress the subsequent DOM paste if it arrives within the dedup window.
   const DROP_DEDUP_WINDOW_MS = 500;
   let dropHandledAt = 0;
+  let autoCompactTriggered = false;
 
   const usageStore = useUsageStore();
 
@@ -68,23 +78,47 @@ export function ChatPanel(props: ChatPanelProps) {
       if (scrollRef) scrollRef.scrollTop = scrollRef.scrollHeight;
     });
 
+    const cliType = props.tab.cliConfig.cliType;
     let costUsd = 0;
     let inputTokens = 0;
     let outputTokens = 0;
     let turnCount = 0;
+    // lastContextTokens: the final assistant message's inputTokens = cumulative context usage
+    let lastContextTokens: number | undefined;
     for (const m of msgs) {
       if (m.role !== "assistant") continue;
       turnCount++;
       costUsd += m.costUsd ?? 0;
       inputTokens += m.inputTokens ?? 0;
       outputTokens += m.outputTokens ?? 0;
+      if (m.inputTokens !== undefined) lastContextTokens = m.inputTokens;
     }
-    const cliType = props.tab.cliConfig.cliType;
     if (cliType === "claude-code" || cliType === "codex") {
       usageStore.updateTabUsage({ tabId: props.tab.id, tabTitle: props.tab.title, cliType, costUsd, inputTokens, outputTokens, turnCount });
     }
+
+    // Update context window tracking and schedule auto-compact if needed.
+    // onStatusChange("idle") fires before this rAF callback, so isStreaming() is already false
+    // when a turn completes — making it safe to check here without an extra effect.
+    if (cliType === "claude-code" && lastContextTokens !== undefined) {
+      setContextInputTokens(lastContextTokens);
+      // contextPct() is already updated synchronously by setContextInputTokens above
+      const pct = contextPct();
+      if (pct < AUTO_COMPACT_RESET_THRESHOLD) {
+        // Reset after a successful compact has brought context back down
+        autoCompactTriggered = false;
+      } else if (shouldAutoCompact(pct, isStreaming(), autoCompactTriggered)) {
+        autoCompactTriggered = true;
+        // queueMicrotask defers the async call outside the synchronous update callback
+        queueMicrotask(() => sendAsSlashCommand("compact"));
+      }
+    }
   });
   onCleanup(unsubUpdate);
+  parser.onRateLimit((info) => {
+    usageStore.updateRateLimit(info);
+  });
+
   // Status transitions delegated to StreamParser (avoids re-parsing the same JSON line)
   const unsubStatus = parser.onStatusChange((status) => {
     setIsStreaming(status === "streaming");
@@ -102,6 +136,8 @@ export function ChatPanel(props: ChatPanelProps) {
   // Reactive subscriptions — re-subscribe automatically when ptyId changes (e.g. after respawn)
   createEffect(() => {
     const id = ptyId();
+    // Reset auto-compact guard on respawn so the new session can trigger compact independently
+    autoCompactTriggered = false;
     const unsub = streamEventDispatcher.subscribe(id, (payload) => {
       parser.processLine(payload.data);
     });
@@ -230,7 +266,10 @@ export function ChatPanel(props: ChatPanelProps) {
         // Kill old session first to prevent orphaned sessions leaking in PtyManager
         await killPty(ptyId()).catch(() => {});
         if (isCancelled()) return "error";
-        const newId = await spawnPty(props.tab.cliConfig);
+        const accountProfile = props.tab.cliConfig.accountId
+          ? settings.findAccount(props.tab.cliConfig.accountId)
+          : undefined;
+        const newId = await spawnPty(props.tab.cliConfig, undefined, undefined, accountProfile?.claudeConfigDir);
         // Bail if the tab was closed mid-respawn (cleanup the new PTY we
         // just spawned to avoid an orphan).
         if (isCancelled() || !store.getTab(props.tab.id)) {
@@ -378,6 +417,7 @@ export function ChatPanel(props: ChatPanelProps) {
       if (messages().length > 0) { setMessages([]); parser.loadSession([]); }
     },
     "model": () => setShowModelPicker(true),
+    "switch-account": () => setShowAccountPicker(true),
   };
 
   function selectSlashCommand(id: string) {
@@ -417,6 +457,17 @@ export function ChatPanel(props: ChatPanelProps) {
     store.updateModel(props.tab.id, modelId || undefined);
     // Also notify the CLI about model change
     sendAsSlashCommand(`model ${modelId || "default"}`);
+  }
+
+  async function handleAccountSelect(accountId: string | undefined) {
+    if (isStreaming()) return;
+    store.updateAccount(props.tab.id, accountId);
+    parser.loadSession([]);
+    // Kill the existing PTY so the next message respawns with the new account's env vars.
+    // sendWithRespawn detects "not found" and calls spawnPty(tab.cliConfig) which picks
+    // up the updated accountId and passes the correct CLAUDE_CONFIG_DIR.
+    await killPty(ptyId()).catch(() => {});
+    store.updateStatus(props.tab.id, "waiting");
   }
 
   async function handleInterrupt() {
@@ -482,6 +533,16 @@ export function ChatPanel(props: ChatPanelProps) {
           onClose={() => setShowModelPicker(false)}
         />
       </Show>
+      <Show when={showAccountPicker()}>
+        <AccountPicker
+          currentAccountId={props.tab.cliConfig.accountId}
+          onSelect={handleAccountSelect}
+          onDelete={(deletedId) => {
+            if (!isStreaming() && props.tab.cliConfig.accountId === deletedId) handleAccountSelect(undefined);
+          }}
+          onClose={() => setShowAccountPicker(false)}
+        />
+      </Show>
       <Show when={isDragOver()}>
         <div class={styles.dropOverlay}>
           <span>Drop files here</span>
@@ -522,7 +583,7 @@ export function ChatPanel(props: ChatPanelProps) {
             </div>
             <div class={styles.welcomeSub}>
               {props.tab.cliConfig.mode === "dangerously-skip-permissions"
-                ? "Dangerous mode — bypass permissions on"
+                ? "Dangerous mode — bypass on"
                 : "Ready for input"}
             </div>
             <Show when={pastSessions().length > 0}>
@@ -564,6 +625,22 @@ export function ChatPanel(props: ChatPanelProps) {
           </svg>
           {sendReview.isSending() ? "Sending..." : "Send review to source"}
         </button>
+      </Show>
+      <Show when={showContextBar()}>
+        <div
+          class={styles.contextBar}
+          onClick={() => sendAsSlashCommand("compact")}
+          title="Click to compact conversation"
+          style={{ "pointer-events": isStreaming() ? "none" : undefined }}
+        >
+          <div
+            class={styles.contextBarFill}
+            style={{ width: `${Math.min(contextPct() * 100, 100)}%`, background: contextBarColor() }}
+          />
+          <span class={styles.contextBarText} style={{ color: contextBarColor() }}>
+            {Math.round(contextPct() * 100)}% context used — click to compact
+          </span>
+        </div>
       </Show>
       <ChatInput
         tabId={props.tab.id}

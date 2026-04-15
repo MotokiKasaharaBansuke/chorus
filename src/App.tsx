@@ -7,7 +7,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTabStore } from "./stores/tab-store";
 import { useSidebarStore } from "./stores/sidebar-store";
 import { useSettingsStore } from "./stores/settings-store";
-import { spawnPty, killPty, findGitRepoRoot, createWorktree, listWorktrees, removeWorktree, gitHasTrackedChanges, listSessionIds, killZombieSessions } from "./lib/commands";
+import { spawnPty, killPty, findGitRepoRoot, createWorktree, listWorktrees, removeWorktree, gitHasTrackedChanges, listSessionIds, killZombieSessions, listZombieSessions, killSessionById } from "./lib/commands";
+import type { ZombieSessionInfo } from "./lib/commands";
 import { buildSavedSession, persistSession, restoreSession, tryLoadSession } from "./lib/session";
 import { spawnPaneWithWorktree } from "./lib/worktree/spawn-pane";
 import { decideCloseAction } from "./lib/worktree/decide-close-action";
@@ -20,8 +21,9 @@ import { WorktreeErrorDialog } from "./components/worktree/worktree-error-dialog
 import { WorktreeRemoveConfirm } from "./components/worktree/worktree-remove-confirm";
 import { UsageModal } from "./components/usage/usage-modal";
 import { classifyWorktreeError, type WorktreeErrorInfo } from "./lib/worktree/classify-error";
+import { resolveLaunchDir } from "./lib/worktree/resolve-launch-dir";
 import { resetWorktree } from "./lib/worktree/reset-worktree";
-import { countZombies, isSessionStale } from "./lib/zombie-sessions";
+import { analyzeSessionHealth } from "./lib/zombie-sessions";
 import { useUsageStore } from "./stores/usage-store";
 import type { TabWorktree } from "./types";
 import { TopBar } from "./components/top-bar/top-bar";
@@ -52,9 +54,18 @@ function App() {
     { worktree: TabWorktree; isDirty: boolean } | null
   >(null);
   const [activeRepoRoot, setActiveRepoRoot] = createSignal<string | null>(null);
-  const [zombieCount, setZombieCount] = createSignal(0);
+  const [zombieSessions, setZombieSessions] = createSignal<ZombieSessionInfo[]>([]);
   const [isActiveTabStale, setIsActiveTabStale] = createSignal(false);
   let spawningCount = 0;
+
+  function resolveClaudeConfigDir(accountId?: string): string | undefined {
+    if (!accountId) return undefined;
+    return settingsStore.findAccount(accountId)?.claudeConfigDir;
+  }
+
+  function spawnPtyWithAccount(config: CliConfig): Promise<string> {
+    return spawnPty(config, undefined, undefined, resolveClaudeConfigDir(config.accountId));
+  }
 
   // Track the repo root of the currently active pane so the worktree
   // settings list can display that repo's worktrees.
@@ -132,7 +143,9 @@ function App() {
     // Restore previous session
     const savedSession = await tryLoadSession();
     if (savedSession) {
-      const workspace = await restoreSession(JSON.stringify(savedSession));
+      const workspace = await restoreSession(JSON.stringify(savedSession), {
+        resolveClaudeConfigDir,
+      });
       if (workspace) {
         tabStore.restore(workspace.tabMap, workspace.layout, workspace.focusedGroupId);
         sidebarStore.setWorkingDir(workspace.workingDir);
@@ -247,10 +260,11 @@ function App() {
               shareCargoTarget: w.shareCargoTarget,
               spotlightExclude: w.spotlightExclude,
             }),
-          spawnPty,
+          spawnPty: spawnPtyWithAccount,
         },
       );
 
+      const effectiveRoot = repoRoot ?? config.workingDir;
       const label = CLI_LABELS[finalConfig.cliType] ?? finalConfig.cliType;
       const title = worktree?.branch
         ? worktree.branch
@@ -261,14 +275,14 @@ function App() {
         status: "waiting",
         cliConfig: finalConfig,
         worktree: worktree
-          ? { path: worktree.path, branch: worktree.branch, headSha: worktree.headSha, repoRoot: repoRoot ?? config.workingDir }
+          ? { path: worktree.path, branch: worktree.branch, headSha: worktree.headSha, repoRoot: effectiveRoot }
           : undefined,
       };
       tabStore.openTab(tab);
       if (options?.splitIntoNewPane && tabStore.focusedGroupId && tabStore.layout) {
         tabStore.splitGroup(tabStore.focusedGroupId, "horizontal", paneId, "after");
       }
-      sidebarStore.setWorkingDir(finalConfig.workingDir);
+      sidebarStore.setWorkingDir(effectiveRoot);
       return paneId;
     } finally {
       spawningCount--;
@@ -313,7 +327,7 @@ function App() {
           killPty,
           removeWorktree,
           createWorktree,
-          spawnPty,
+          spawnPty: spawnPtyWithAccount,
           isTabAlive: (id) => !!tabStore.getTab(id),
         },
       );
@@ -376,25 +390,34 @@ function App() {
     }
   }
 
+  function collectActivePtyIds(): string[] {
+    return [
+      ...tabStore.tabs.map(t => effectivePtyId(t)),
+      ...bottomTerminal.termTabs().map(t => effectivePtyId(t)),
+    ];
+  }
+
   async function checkSessionHealth() {
     if (spawningCount > 0) return;
     try {
-      const backendIds = await listSessionIds();
-      const frontendIds = tabStore.tabs.map(t => effectivePtyId(t));
-      setZombieCount(countZombies(backendIds, frontendIds));
+      const frontendIds = collectActivePtyIds();
+      const [zombieInfos, backendIds] = await Promise.all([
+        listZombieSessions(frontendIds),
+        listSessionIds(),
+      ]);
+      setZombieSessions(zombieInfos);
 
       const activeTab = tabStore.activeTab;
-      if (activeTab && activeTab.cliConfig.cliType !== "file-viewer") {
-        setIsActiveTabStale(isSessionStale(backendIds, effectivePtyId(activeTab)));
-      } else {
-        setIsActiveTabStale(false);
-      }
+      const activePtyId = activeTab && activeTab.cliConfig.cliType !== "file-viewer"
+        ? effectivePtyId(activeTab)
+        : null;
+      const { isActiveStale } = analyzeSessionHealth(backendIds, frontendIds, activePtyId);
+      setIsActiveTabStale(isActiveStale);
     } catch {
-      setZombieCount(0);
+      setZombieSessions([]);
       setIsActiveTabStale(false);
     }
   }
-
 
   createEffect(() => {
     // Re-check session health when the active tab changes
@@ -414,7 +437,7 @@ function App() {
     const oldPtyId = effectivePtyId(tab);
     try { await killPty(oldPtyId); } catch { /* already dead */ }
     try {
-      const newPtyId = await spawnPty(tab.cliConfig);
+      const newPtyId = await spawnPtyWithAccount(tab.cliConfig);
       if (!tabStore.getTab(tab.id)) {
         await killPty(newPtyId).catch(() => {});
         return;
@@ -433,10 +456,16 @@ function App() {
     }
   }
 
-  async function handleKillZombies() {
-    const keepIds = tabStore.tabs.map(t => effectivePtyId(t));
+  async function handleKillZombie(id: string) {
     try {
-      await killZombieSessions(keepIds);
+      await killSessionById(id);
+    } catch { /* best effort */ }
+    void checkSessionHealth();
+  }
+
+  async function handleKillAllZombies() {
+    try {
+      await killZombieSessions(collectActivePtyIds());
     } catch { /* best effort */ }
     void checkSessionHealth();
   }
@@ -494,7 +523,7 @@ function App() {
   onCleanup(() => window.removeEventListener("mlm-open-content", contentOpenHandler));
 
   async function quickLaunch(cliType: "claude-code" | "codex") {
-    const config: CliConfig = { cliType, mode: quickLaunchMode(), workingDir: sidebarStore.workingDir || "~" };
+    const config: CliConfig = { cliType, mode: quickLaunchMode(), workingDir: resolveLaunchDir(tabStore.activeTab, sidebarStore.workingDir) };
     setLastSpawnRequest(config);
     try { await spawnAndOpenTab(config, { splitIntoNewPane: true }); } catch (e) {
       console.error("Failed to quick-launch pane:", e);
@@ -571,12 +600,13 @@ function App() {
           fontSize={fontSize()}
           onFontSizeChange={applyFontSize}
           onOpenWorktreeSettings={() => setIsWorktreeSettingsOpen(true)}
-          zombieCount={zombieCount()}
-          onKillZombies={handleKillZombies}
+          zombieSessions={zombieSessions()}
+          onKillZombie={handleKillZombie}
+          onKillAllZombies={handleKillAllZombies}
           hasActiveTab={!!tabStore.activeTab && tabStore.activeTab.cliConfig.cliType !== "file-viewer"}
           isActiveTabStale={isActiveTabStale()}
           onRefreshActiveTab={handleRefreshActiveTab}
-          usageSummary={usageStore.summary}
+          rateLimits={usageStore.rateLimits}
           onViewUsage={() => setShowUsageModal(true)}
         />
       </div>
@@ -676,7 +706,7 @@ function App() {
 
       <Show when={showUsageModal()}>
         <UsageModal
-          summary={usageStore.summary}
+          rateLimits={usageStore.rateLimits}
           onClose={() => setShowUsageModal(false)}
         />
       </Show>

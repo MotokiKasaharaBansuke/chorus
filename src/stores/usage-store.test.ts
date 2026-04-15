@@ -8,6 +8,7 @@ describe("usage-store", () => {
     for (const tab of store.tabs) {
       store.removeTab(tab.tabId);
     }
+    store.clearRateLimits();
   });
 
   it("starts with empty summary", () => {
@@ -112,6 +113,39 @@ describe("usage-store", () => {
     store.removeTab("non-existent");
     expect(store.summary.tabs).toHaveLength(0);
   });
+
+  describe("rate limits", () => {
+    it("starts with empty rateLimits", () => {
+      expect(store.rateLimits).toHaveLength(0);
+    });
+
+    it("stores a rate limit entry by type", () => {
+      store.updateRateLimits([{ type: "five_hour", label: "Session (5hr)", utilization: 0.97, resetsAt: 1713200000000 }]);
+      expect(store.rateLimits).toHaveLength(1);
+      expect(store.rateLimits[0]).toMatchObject({ type: "five_hour", utilization: 0.97 });
+    });
+
+    it("overwrites entry with same type (last-write wins)", () => {
+      store.updateRateLimits([{ type: "five_hour", label: "Session (5hr)", utilization: 0.5, resetsAt: 1713200000000 }]);
+      store.updateRateLimits([{ type: "five_hour", label: "Session (5hr)", utilization: 0.9, resetsAt: 1713200000000 }]);
+      expect(store.rateLimits).toHaveLength(1);
+      expect(store.rateLimits[0].utilization).toBe(0.9);
+    });
+
+    it("merges multiple types", () => {
+      store.updateRateLimits([
+        { type: "five_hour", label: "Session (5hr)", utilization: 0.97, resetsAt: 1713200000000 },
+        { type: "seven_day", label: "Weekly (7 day)", utilization: 0.6, resetsAt: 1713500000000 },
+      ]);
+      expect(store.rateLimits).toHaveLength(2);
+    });
+
+    it("accepts empty array without error", () => {
+      store.updateRateLimits([]);
+      expect(store.rateLimits).toHaveLength(0);
+    });
+  });
+
 
   it("rounds accumulated costs to avoid floating-point artifacts", () => {
     store.updateTabUsage({

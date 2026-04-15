@@ -108,6 +108,27 @@ describe("spawnPaneWithWorktree", () => {
     expect(result.worktree).not.toBeNull();
   });
 
+  it("repoRoot differs from finalConfig.workingDir so callers can resolve the original root", async () => {
+    const deps = makeDeps();
+    const settings = { ...DEFAULT_WORKTREE_SETTINGS, autoCreate: true };
+
+    const result = await spawnPaneWithWorktree(baseConfig, settings, deps);
+
+    expect(result.repoRoot).toBe("/repo");
+    expect(result.finalConfig.workingDir).toBe(`/worktrees/${EXPECTED_BRANCH}`);
+    expect(result.repoRoot).not.toBe(result.finalConfig.workingDir);
+  });
+
+  it("repoRoot is null when autoCreate is off, so fallback to config.workingDir is safe", async () => {
+    const deps = makeDeps();
+    const settings = { ...DEFAULT_WORKTREE_SETTINGS, autoCreate: false };
+
+    const result = await spawnPaneWithWorktree(baseConfig, settings, deps);
+
+    expect(result.repoRoot).toBeNull();
+    expect(result.finalConfig.workingDir).toBe(baseConfig.workingDir);
+  });
+
   it("createWorktree rejection propagates and PTY is not spawned", async () => {
     const deps = makeDeps({
       createWorktree: vi.fn(async () => {
