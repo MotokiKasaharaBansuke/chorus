@@ -15,6 +15,7 @@ import type { Tab, ChatMessage, AttachedImage } from "../../types";
 import { effectivePtyId, isTabStreaming } from "../../types";
 import { useTabStore } from "../../stores/tab-store";
 import { useSettingsStore } from "../../stores/settings-store";
+import { useUsageStore } from "../../stores/usage-store";
 import { classifyStreamError } from "../../lib/classify-error";
 import { isValidTempImagePath } from "../../lib/validate-path";
 import { submitWithBusyRetry } from "../../lib/submit-with-busy-retry";
@@ -46,12 +47,30 @@ export function ChatPanel(props: ChatPanelProps) {
   const DROP_DEDUP_WINDOW_MS = 500;
   let dropHandledAt = 0;
 
+  const usageStore = useUsageStore();
+
   const parser = new StreamParser();
   parser.onUpdate((msgs) => {
     setMessages([...msgs]);
     requestAnimationFrame(() => {
       if (scrollRef) scrollRef.scrollTop = scrollRef.scrollHeight;
     });
+
+    let costUsd = 0;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let turnCount = 0;
+    for (const m of msgs) {
+      if (m.role !== "assistant") continue;
+      turnCount++;
+      costUsd += m.costUsd ?? 0;
+      inputTokens += m.inputTokens ?? 0;
+      outputTokens += m.outputTokens ?? 0;
+    }
+    const cliType = props.tab.cliConfig.cliType;
+    if (cliType === "claude-code" || cliType === "codex") {
+      usageStore.updateTabUsage({ tabId: props.tab.id, tabTitle: props.tab.title, cliType, costUsd, inputTokens, outputTokens, turnCount });
+    }
   });
   // Status transitions delegated to StreamParser (avoids re-parsing the same JSON line)
   parser.onStatusChange((status) => {

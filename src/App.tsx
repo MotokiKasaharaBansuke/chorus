@@ -18,8 +18,10 @@ import { CliSettingsModal } from "./components/settings/cli-settings-modal";
 import { WorktreeSettingsModal } from "./components/worktree/worktree-settings-modal";
 import { WorktreeErrorDialog } from "./components/worktree/worktree-error-dialog";
 import { WorktreeRemoveConfirm } from "./components/worktree/worktree-remove-confirm";
+import { UsageModal } from "./components/usage/usage-modal";
 import { classifyWorktreeError, type WorktreeErrorInfo } from "./lib/worktree/classify-error";
 import { countZombies, isSessionStale } from "./lib/zombie-sessions";
+import { useUsageStore } from "./stores/usage-store";
 import type { TabWorktree } from "./types";
 import { TopBar } from "./components/top-bar/top-bar";
 import { useBottomTerminal } from "./hooks/use-bottom-terminal";
@@ -34,7 +36,9 @@ function App() {
   const tabStore = useTabStore();
   const sidebarStore = useSidebarStore();
   const settingsStore = useSettingsStore();
+  const usageStore = useUsageStore();
   const [isModalOpen, setIsModalOpen] = createSignal(false);
+  const [showUsageModal, setShowUsageModal] = createSignal(false);
   const [quickLaunchMode, setQuickLaunchMode] = createSignal<CliMode>("dangerously-skip-permissions");
   const [fontSize, setFontSize] = createSignal(11);
   const [zoom, setZoom] = createSignal(100);
@@ -287,6 +291,7 @@ function App() {
       try { await killPty(tab ? effectivePtyId(tab) : id); } catch { /* */ }
     }
     tabStore.closeTab(id);
+    usageStore.removeTab(id);
     void checkSessionHealth();
 
     const wt = tab?.worktree;
@@ -513,6 +518,8 @@ function App() {
           hasActiveTab={!!tabStore.activeTab && tabStore.activeTab.cliConfig.cliType !== "file-viewer"}
           isActiveTabStale={isActiveTabStale()}
           onRefreshActiveTab={handleRefreshActiveTab}
+          usageSummary={usageStore.summary}
+          onViewUsage={() => setShowUsageModal(true)}
         />
       </div>
 
@@ -608,6 +615,13 @@ function App() {
         onKeep={() => setRemoveConfirm(null)}
         onRemove={() => { void performWorktreeRemove(); }}
       />
+
+      <Show when={showUsageModal()}>
+        <UsageModal
+          summary={usageStore.summary}
+          onClose={() => setShowUsageModal(false)}
+        />
+      </Show>
     </div>
   );
 }
