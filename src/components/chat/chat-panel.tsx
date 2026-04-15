@@ -17,6 +17,7 @@ import { useTabStore } from "../../stores/tab-store";
 import { useSettingsStore } from "../../stores/settings-store";
 import { classifyStreamError } from "../../lib/classify-error";
 import { isValidTempImagePath } from "../../lib/validate-path";
+import { submitWithBusyRetry } from "../../lib/submit-with-busy-retry";
 import styles from "./chat-panel.module.css";
 
 
@@ -130,27 +131,39 @@ export function ChatPanel(props: ChatPanelProps) {
   // Throttle PTY respawns: at most once per 5 seconds
   let lastRespawnAt = 0;
 
+  // Cancellation signals for in-flight submit-with-retry loops. Set on
+  // component unmount (tab closed) or when the user interrupts, so the retry
+  // helper and respawn path exit without touching a disposed store or
+  // reviving a killed PTY.
+  let unmounted = false;
+  let interrupted = false;
+  const isCancelled = () => unmounted || interrupted;
+  onCleanup(() => { unmounted = true; });
+
   type SendResult = "sent" | "busy" | "error";
 
-  /** Send a message to the PTY, respawning it once if the session is gone. */
+  /** Send a message to the PTY, respawning it once if the session is gone.
+   *  Spinner lifecycle is managed by the caller (submitMessage) — this
+   *  function only reports the outcome. */
   async function sendWithRespawn(message: string, images?: ReadonlyArray<ImageAttachmentPayload>): Promise<SendResult> {
     try {
       await sendMessageCmd(ptyId(), message, images);
+      if (isCancelled()) return "error";
       store.updateStatus(props.tab.id, "running");
       return "sent";
     } catch (error: unknown) {
       const kind = classifyStreamError(error);
 
-      // Session is busy — keep spinner visible since the CLI is still processing
+      // Session is busy — keep spinner visible. Caller (submitWithBusyRetry)
+      // decides whether to retry; no user-visible message here so retries
+      // don't spam the chat.
       if (kind === "busy") {
         store.updateStatus(props.tab.id, "running");
-        parser.addUserMessage("[Waiting for current response to complete...]");
         return "busy";
       }
 
       // Session not found — respawn (e.g. after app restart with restored tabs)
       if (kind !== "not_found") {
-        setIsStreaming(false);
         store.updateStatus(props.tab.id, "error");
         parser.addUserMessage("[Error: Failed to send message.]");
         return "error";
@@ -158,7 +171,6 @@ export function ChatPanel(props: ChatPanelProps) {
 
       const now = Date.now();
       if (now - lastRespawnAt < 5_000) {
-        setIsStreaming(false);
         store.updateStatus(props.tab.id, "error");
         parser.addUserMessage("[Error: PTY respawn failed. Please restart the tab.]");
         return "error";
@@ -167,23 +179,48 @@ export function ChatPanel(props: ChatPanelProps) {
         lastRespawnAt = now;
         // Kill old session first to prevent orphaned sessions leaking in PtyManager
         await killPty(ptyId()).catch(() => {});
+        if (isCancelled()) return "error";
         const newId = await spawnPty(props.tab.cliConfig);
-        if (!store.getTab(props.tab.id)) {
+        // Bail if the tab was closed mid-respawn (cleanup the new PTY we
+        // just spawned to avoid an orphan).
+        if (isCancelled() || !store.getTab(props.tab.id)) {
           await killPty(newId).catch(() => {});
           return "error";
         }
         store.updatePtyId(props.tab.id, newId);
         await sendMessageCmd(newId, message, images);
+        if (isCancelled()) return "error";
         store.updateStatus(props.tab.id, "running");
         return "sent";
       } catch (retryError: unknown) {
-        setIsStreaming(false);
         store.updateStatus(props.tab.id, "error");
         const errorMessage = retryError instanceof Error ? retryError.message : String(retryError);
         parser.addUserMessage(`[Error: Failed to send message. ${errorMessage}]`);
         return "error";
       }
     }
+  }
+
+  const sleep = (ms: number): Promise<void> =>
+    new Promise(resolve => setTimeout(resolve, ms));
+
+  async function submitMessage(
+    message: string,
+    images?: ReadonlyArray<ImageAttachmentPayload>,
+  ): Promise<void> {
+    interrupted = false;
+    const outcome = await submitWithBusyRetry({
+      send: () => sendWithRespawn(message, images),
+      forceReset: async () => { await killPty(ptyId()).catch(() => {}); },
+      sleep,
+      isCancelled,
+      onForceReset: () =>
+        parser.addUserMessage("[Session unresponsive; resetting and retrying...]"),
+      onResetFailed: () =>
+        parser.addUserMessage("[Error: Session reset failed. Please restart the tab.]"),
+    });
+    if (unmounted) return;
+    if (outcome !== "sent") setIsStreaming(false);
   }
 
   async function handleSubmitFromInput(text: string) {
@@ -197,9 +234,7 @@ export function ChatPanel(props: ChatPanelProps) {
     setAttachedImages([]);
     setIsStreaming(true);
 
-    const result = await sendWithRespawn(text, imagePayloads.length > 0 ? imagePayloads : undefined);
-    // Reset spinner on error, but keep it visible on "busy" (CLI is still processing)
-    if (result === "error") setIsStreaming(false);
+    await submitMessage(text, imagePayloads.length > 0 ? imagePayloads : undefined);
     for (const img of images) {
       deleteTempImage(img.path).catch(() => {});
     }
@@ -296,8 +331,7 @@ export function ChatPanel(props: ChatPanelProps) {
     const command = `/${id}`;
     parser.addUserMessage(command);
     setIsStreaming(true);
-    const result = await sendWithRespawn(command);
-    if (result === "error") setIsStreaming(false);
+    await submitMessage(command);
   }
 
 
@@ -325,6 +359,9 @@ export function ChatPanel(props: ChatPanelProps) {
   }
 
   async function handleInterrupt() {
+    // Abort any in-flight busy-retry loop so it doesn't respawn the session
+    // we're about to kill.
+    interrupted = true;
     try {
       await killPty(ptyId());
     } catch { /* already stopped */ }
