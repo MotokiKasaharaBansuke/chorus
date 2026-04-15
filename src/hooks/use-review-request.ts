@@ -43,7 +43,7 @@ export function useReviewRequest({ tab, reviewCliType, addMessage }: UseReviewRe
     const newTab: Tab = {
       id: newId,
       title: `${label} ${store.tabs.length + 1}`,
-      status: "running",
+      status: "waiting",
       cliConfig: config,
       sourceTabId: tab.id,
     };
