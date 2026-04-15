@@ -69,6 +69,8 @@ pub fn run() {
             pty_commands::kill_pty,
             pty_commands::list_session_ids,
             pty_commands::kill_zombie_sessions,
+            pty_commands::list_zombie_sessions,
+            pty_commands::kill_session_by_id,
             fs_commands::list_directory,
             fs_commands::read_file,
             fs_commands::watch_directory,

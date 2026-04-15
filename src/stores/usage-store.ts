@@ -1,5 +1,13 @@
 import { createStore, produce } from "solid-js/store";
-import type { TabUsage, UsageSummary, RateLimitEntry } from "../types/usage";
+import type { TabUsage, UsageSummary, RateLimitEntry, RateLimitInfo } from "../types/usage";
+
+const RATE_LIMIT_TYPE_LABELS: Record<string, string> = {
+  five_hour: "Session (5hr)",
+  seven_day: "Weekly (7 day)",
+  seven_day_opus: "Weekly Opus",
+  seven_day_sonnet: "Weekly Sonnet",
+  overage: "Overage",
+};
 
 interface UsageState {
   tabs: Record<string, TabUsage>;
@@ -28,6 +36,16 @@ function updateRateLimits(entries: RateLimitEntry[]) {
   }));
 }
 
+function updateRateLimit(info: RateLimitInfo) {
+  const entry: RateLimitEntry = {
+    type: info.rateLimitType,
+    label: RATE_LIMIT_TYPE_LABELS[info.rateLimitType] ?? info.rateLimitType,
+    utilization: info.utilization,
+    resetsAt: info.resetsAt,
+  };
+  setStore(produce((s) => { s.rateLimits[entry.type] = entry; }));
+}
+
 function clearRateLimits() {
   setStore(produce((s) => { s.rateLimits = {}; }));
 }
@@ -53,6 +71,7 @@ export function useUsageStore() {
     updateTabUsage,
     removeTab,
     updateRateLimits,
+    updateRateLimit,
     clearRateLimits,
     get summary() { return getSummary(); },
     get tabs() { return Object.values(store.tabs); },

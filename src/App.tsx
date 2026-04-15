@@ -7,7 +7,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTabStore } from "./stores/tab-store";
 import { useSidebarStore } from "./stores/sidebar-store";
 import { useSettingsStore } from "./stores/settings-store";
-import { spawnPty, killPty, findGitRepoRoot, createWorktree, listWorktrees, removeWorktree, gitHasTrackedChanges, listSessionIds, killZombieSessions } from "./lib/commands";
+import { spawnPty, killPty, findGitRepoRoot, createWorktree, listWorktrees, removeWorktree, gitHasTrackedChanges, listSessionIds, killZombieSessions, listZombieSessions, killSessionById } from "./lib/commands";
+import type { ZombieSessionInfo } from "./lib/commands";
 import { buildSavedSession, persistSession, restoreSession, tryLoadSession } from "./lib/session";
 import { spawnPaneWithWorktree } from "./lib/worktree/spawn-pane";
 import { decideCloseAction } from "./lib/worktree/decide-close-action";
@@ -52,9 +53,18 @@ function App() {
     { worktree: TabWorktree; isDirty: boolean } | null
   >(null);
   const [activeRepoRoot, setActiveRepoRoot] = createSignal<string | null>(null);
-  const [zombieCount, setZombieCount] = createSignal(0);
+  const [zombieSessions, setZombieSessions] = createSignal<ZombieSessionInfo[]>([]);
   const [isActiveTabStale, setIsActiveTabStale] = createSignal(false);
   let spawningCount = 0;
+
+  function resolveClaudeConfigDir(accountId?: string): string | undefined {
+    if (!accountId) return undefined;
+    return settingsStore.findAccount(accountId)?.claudeConfigDir;
+  }
+
+  function spawnPtyWithAccount(config: CliConfig): Promise<string> {
+    return spawnPty(config, undefined, undefined, resolveClaudeConfigDir(config.accountId));
+  }
 
   // Track the repo root of the currently active pane so the worktree
   // settings list can display that repo's worktrees.
@@ -132,7 +142,9 @@ function App() {
     // Restore previous session
     const savedSession = await tryLoadSession();
     if (savedSession) {
-      const workspace = await restoreSession(JSON.stringify(savedSession));
+      const workspace = await restoreSession(JSON.stringify(savedSession), {
+        resolveClaudeConfigDir,
+      });
       if (workspace) {
         tabStore.restore(workspace.tabMap, workspace.layout, workspace.focusedGroupId);
         sidebarStore.setWorkingDir(workspace.workingDir);
@@ -247,7 +259,7 @@ function App() {
               shareCargoTarget: w.shareCargoTarget,
               spotlightExclude: w.spotlightExclude,
             }),
-          spawnPty,
+          spawnPty: spawnPtyWithAccount,
         },
       );
 
@@ -314,7 +326,7 @@ function App() {
           killPty,
           removeWorktree,
           createWorktree,
-          spawnPty,
+          spawnPty: spawnPtyWithAccount,
           isTabAlive: (id) => !!tabStore.getTab(id),
         },
       );
@@ -386,17 +398,21 @@ function App() {
   async function checkSessionHealth() {
     if (spawningCount > 0) return;
     try {
-      const backendIds = await listSessionIds();
-      const activePtyIds = collectActivePtyIds();
+      const frontendIds = collectActivePtyIds();
+      const [zombieInfos, backendIds] = await Promise.all([
+        listZombieSessions(frontendIds),
+        listSessionIds(),
+      ]);
+      setZombieSessions(zombieInfos);
+
       const activeTab = tabStore.activeTab;
       const activePtyId = activeTab && activeTab.cliConfig.cliType !== "file-viewer"
         ? effectivePtyId(activeTab)
         : null;
-      const { zombieCount, isActiveStale } = analyzeSessionHealth(backendIds, activePtyIds, activePtyId);
-      setZombieCount(zombieCount);
+      const { isActiveStale } = analyzeSessionHealth(backendIds, frontendIds, activePtyId);
       setIsActiveTabStale(isActiveStale);
     } catch {
-      setZombieCount(0);
+      setZombieSessions([]);
       setIsActiveTabStale(false);
     }
   }
@@ -419,7 +435,7 @@ function App() {
     const oldPtyId = effectivePtyId(tab);
     try { await killPty(oldPtyId); } catch { /* already dead */ }
     try {
-      const newPtyId = await spawnPty(tab.cliConfig);
+      const newPtyId = await spawnPtyWithAccount(tab.cliConfig);
       if (!tabStore.getTab(tab.id)) {
         await killPty(newPtyId).catch(() => {});
         return;
@@ -438,7 +454,14 @@ function App() {
     }
   }
 
-  async function handleKillZombies() {
+  async function handleKillZombie(id: string) {
+    try {
+      await killSessionById(id);
+    } catch { /* best effort */ }
+    void checkSessionHealth();
+  }
+
+  async function handleKillAllZombies() {
     try {
       await killZombieSessions(collectActivePtyIds());
     } catch { /* best effort */ }
@@ -574,8 +597,9 @@ function App() {
           fontSize={fontSize()}
           onFontSizeChange={applyFontSize}
           onOpenWorktreeSettings={() => setIsWorktreeSettingsOpen(true)}
-          zombieCount={zombieCount()}
-          onKillZombies={handleKillZombies}
+          zombieSessions={zombieSessions()}
+          onKillZombie={handleKillZombie}
+          onKillAllZombies={handleKillAllZombies}
           hasActiveTab={!!tabStore.activeTab && tabStore.activeTab.cliConfig.cliType !== "file-viewer"}
           isActiveTabStale={isActiveTabStale()}
           onRefreshActiveTab={handleRefreshActiveTab}

@@ -137,7 +137,7 @@ function buildLayout(
   }
   const tabIds = saved.tabIndices
     .map(i => newIds[i])
-    .filter((id): id is string => id !== undefined);
+    .filter((id): id is string => !!id);
   const activeTabId = newIds[saved.activeTabIdx] ?? tabIds[0] ?? null;
   const groupId = crypto.randomUUID();
   if (saved.focused) focusedGroupId.value = groupId;
@@ -149,7 +149,11 @@ function buildLayout(
   } as PaneGroupNode;
 }
 
-export async function restoreSession(data: string): Promise<RestoredWorkspace | null> {
+export interface RestoreOptions {
+  resolveClaudeConfigDir?: (accountId?: string) => string | undefined;
+}
+
+export async function restoreSession(data: string, options?: RestoreOptions): Promise<RestoredWorkspace | null> {
   let session: SavedSession;
   try {
     session = JSON.parse(data) as SavedSession;
@@ -160,7 +164,12 @@ export async function restoreSession(data: string): Promise<RestoredWorkspace | 
 
   // Spawn PTYs for all tabs in parallel
   const spawnResults = await Promise.allSettled(
-    session.tabs.map(t => spawnPty(t.cliConfig))
+    session.tabs.map(t => spawnPty(
+      t.cliConfig,
+      undefined,
+      undefined,
+      options?.resolveClaudeConfigDir?.(t.cliConfig.accountId),
+    ))
   );
 
   const newIds: string[] = [];

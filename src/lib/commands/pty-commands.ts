@@ -8,9 +8,15 @@ interface PtySpawnConfig {
   workingDir: string;
   cols?: number;
   rows?: number;
+  claudeConfigDir?: string;
 }
 
-export async function spawnPty(config: CliConfig, cols?: number, rows?: number): Promise<string> {
+export async function spawnPty(
+  config: CliConfig,
+  cols?: number,
+  rows?: number,
+  claudeConfigDir?: string,
+): Promise<string> {
   return invoke<string>("spawn_pty", {
     config: {
       cliType: config.cliType,
@@ -19,6 +25,7 @@ export async function spawnPty(config: CliConfig, cols?: number, rows?: number):
       workingDir: config.workingDir,
       cols,
       rows,
+      claudeConfigDir,
     } satisfies PtySpawnConfig,
   });
 }
@@ -58,4 +65,17 @@ export async function listSessionIds(): Promise<string[]> {
 
 export async function killZombieSessions(keepIds: string[]): Promise<number> {
   return invoke<number>("kill_zombie_sessions", { keepIds });
+}
+
+export interface ZombieSessionInfo {
+  id: string;
+  cliType: string;
+}
+
+export async function listZombieSessions(keepIds: string[]): Promise<ZombieSessionInfo[]> {
+  return invoke<ZombieSessionInfo[]>("list_zombie_sessions", { keepIds });
+}
+
+export async function killSessionById(id: string): Promise<boolean> {
+  return invoke<boolean>("kill_session_by_id", { id });
 }

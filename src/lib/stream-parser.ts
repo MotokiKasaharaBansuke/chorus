@@ -1,15 +1,25 @@
 import type { ChatMessage, ChatBlock } from "../types";
-import type { RateLimitEntry } from "../types/usage";
-import { parseRateLimitEvent } from "./parsers/parse-rate-limit";
+import type { RateLimitInfo } from "../types/usage";
 
 type StreamingStatus = "streaming" | "idle";
+
+const VALID_RATE_LIMIT_STATUSES: ReadonlySet<string> = new Set<RateLimitInfo["status"]>(["allowed", "allowed_warning", "rejected"]);
+const VALID_RATE_LIMIT_TYPES: ReadonlySet<string> = new Set<RateLimitInfo["rateLimitType"]>(["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "overage"]);
+
+function isRateLimitStatus(s: string): s is RateLimitInfo["status"] {
+  return VALID_RATE_LIMIT_STATUSES.has(s);
+}
+
+function isRateLimitType(s: string): s is RateLimitInfo["rateLimitType"] {
+  return VALID_RATE_LIMIT_TYPES.has(s);
+}
 
 /** Manages streaming state for a single chat session (Claude Code or Codex) */
 export class StreamParser {
   private messages: ChatMessage[] = [];
   private listeners: Array<(messages: ChatMessage[]) => void> = [];
   private statusListeners: Array<(status: StreamingStatus) => void> = [];
-  private rateLimitListeners: Array<(entries: RateLimitEntry[]) => void> = [];
+  private rateLimitListeners: Array<(info: RateLimitInfo) => void> = [];
   private isRafScheduled = false;
 
   onUpdate(fn: (messages: ChatMessage[]) => void): () => void {
@@ -25,7 +35,7 @@ export class StreamParser {
     return () => { this.statusListeners = this.statusListeners.filter(l => l !== fn); };
   }
 
-  onRateLimit(fn: (entries: RateLimitEntry[]) => void): () => void {
+  onRateLimit(fn: (info: RateLimitInfo) => void): () => void {
     this.rateLimitListeners.push(fn);
     return () => { this.rateLimitListeners = this.rateLimitListeners.filter(l => l !== fn); };
   }
@@ -364,10 +374,21 @@ export class StreamParser {
   }
 
   private handleRateLimit(data: Record<string, unknown>) {
-    const entries = parseRateLimitEvent(data);
-    if (entries.length > 0) {
-      for (const fn of this.rateLimitListeners) fn(entries);
-    }
+    const raw = this.toRecord(data.rate_limit_info);
+    if (!raw) return;
+
+    const status = typeof raw.status === "string" ? raw.status : "";
+    const rateLimitType = typeof raw.rateLimitType === "string" ? raw.rateLimitType : "";
+    if (!isRateLimitStatus(status) || !isRateLimitType(rateLimitType)) return;
+
+    const info: RateLimitInfo = {
+      status,
+      rateLimitType,
+      utilization: typeof raw.utilization === "number" ? raw.utilization : 0,
+      resetsAt: typeof raw.resetsAt === "number" ? raw.resetsAt : 0,
+      isUsingOverage: raw.isUsingOverage === true,
+    };
+    for (const fn of this.rateLimitListeners) fn(info);
   }
 
   private handleStderr(data: Record<string, unknown>) {

@@ -139,6 +139,56 @@
   line-height: 1;
 }
 
+.zombieDropdown {
+  min-width: 240px;
+}
+.zombieRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+}
+.zombieCliType {
+  font-size: 11px;
+  font-weight: 600;
+  color: #c74e39;
+  min-width: 70px;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.zombieId {
+  font-size: 11px;
+  color: #888;
+  font-family: monospace;
+  flex: 1;
+  min-width: 0;
+}
+.zombieKillBtn {
+  -webkit-app-region: no-drag;
+  background: transparent;
+  border: 1px solid #c74e39;
+  border-radius: 3px;
+  color: #c74e39;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.1s, color 0.1s;
+}
+.zombieKillBtn:hover {
+  background: #c74e39;
+  color: #fff;
+}
+.zombieKillAll {
+  color: #c74e39;
+  font-weight: 600;
+}
+.zombieKillAll:hover {
+  background: #3a2020;
+  color: #e86550;
+}
 
 .usageBanner {
   -webkit-app-region: no-drag;
