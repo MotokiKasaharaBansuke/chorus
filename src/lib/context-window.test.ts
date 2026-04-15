@@ -21,8 +21,8 @@ describe("contextColor", () => {
   });
 
   it("returns orange at the CONTEXT_WARN_THRESHOLD boundary", () => {
-    expect(contextColor(CONTEXT_WARN_THRESHOLD)).toBe("#d97757");
-    expect(contextColor(AUTO_COMPACT_THRESHOLD - 0.001)).toBe("#d97757");
+    expect(contextColor(CONTEXT_WARN_THRESHOLD)).toBe("#e8587a");
+    expect(contextColor(AUTO_COMPACT_THRESHOLD - 0.001)).toBe("#e8587a");
   });
 
   it("returns red at the AUTO_COMPACT_THRESHOLD boundary", () => {
@@ -33,7 +33,7 @@ describe("contextColor", () => {
 
   it("color threshold matches AUTO_COMPACT_THRESHOLD constant", () => {
     // Just below threshold → orange, at threshold → red
-    expect(contextColor(AUTO_COMPACT_THRESHOLD - 0.001)).toBe("#d97757");
+    expect(contextColor(AUTO_COMPACT_THRESHOLD - 0.001)).toBe("#e8587a");
     expect(contextColor(AUTO_COMPACT_THRESHOLD)).toBe("#c74e39");
   });
 });

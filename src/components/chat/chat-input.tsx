@@ -172,7 +172,29 @@ export function ChatInput(props: ChatInputProps) {
       />
       <div class={styles.inputFooter}>
         <div class={styles.inputLeft}>
-          <span class={styles.modeChevron}>»</span>
+          <Show when={props.onRequestReview}>
+            <button
+              class={styles.reviewBtn}
+              onClick={() => props.onRequestReview?.()}
+              disabled={props.isStreaming || props.isReviewInProgress}
+              title="Send changed files for review"
+            >
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
+                <path d="M1 3h14v1H1zM1 7h10v1H1zM1 11h12v1H1z" fill="currentColor"/>
+                <path d="M12 6l4 4-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </Show>
+          <span class={styles.inputHint} onClick={() => {
+            setShowSlash(!showSlash());
+            setSlashFilter("");
+            if (!inputText().startsWith("/")) setInputText("/");
+          }}>/</span>
+        </div>
+        <div class={styles.inputRight}>
+          <span class={styles.inputProject}>
+            ◇ {props.workingDir.split("/").pop() || "project"}
+          </span>
           <span
             class={styles.modeBadge}
             classList={{
@@ -185,29 +207,6 @@ export function ChatInput(props: ChatInputProps) {
           >
             {MODE_LABELS[props.mode]}
           </span>
-          <span class={styles.inputProject}>
-            ◇ {props.workingDir.split("/").pop() || "project"}
-          </span>
-        </div>
-        <div class={styles.inputRight}>
-          <Show when={props.onRequestReview}>
-            <button
-              class={styles.reviewBtn}
-              onClick={() => props.onRequestReview?.()}
-              disabled={props.isStreaming || props.isReviewInProgress}
-              title="Send changed files for review"
-            >
-              <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-                <path d="M1 3h14v1H1zM1 7h10v1H1zM1 11h12v1H1z" fill="currentColor"/>
-                <path d="M12 6l4 4-4 4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </button>
-          </Show>
-          <span class={styles.inputHint} onClick={() => {
-            setShowSlash(!showSlash());
-            setSlashFilter("");
-            if (!inputText().startsWith("/")) setInputText("/");
-          }}>/</span>
           <button
             class={styles.sendBtn}
             classList={{

@@ -30,7 +30,7 @@
 }
 .item:last-child { border-bottom: none; }
 .item:hover { background: #2e2e2e; }
-.itemSelected { background: #333; color: #d97757; }
+.itemSelected { background: #333; color: #e8587a; }
 .itemFocused { background: #2e2e2e; }
 .itemSelected.itemFocused { background: #3a3a3a; }
 .itemLabel { font-size: 14px; font-weight: 600; color: #ccc; margin-bottom: 2px; }
@@ -92,9 +92,9 @@
 .cancelBtn:hover { background: #2a2a2a; color: #999; }
 
 .confirmBtn {
-  padding: 5px 14px; background: #d97757; border: none;
+  padding: 5px 14px; background: #e8587a; border: none;
   border-radius: 5px; color: white; cursor: pointer; font-size: 13px;
   transition: background 0.1s;
 }
-.confirmBtn:hover:not(:disabled) { background: #e8896a; }
+.confirmBtn:hover:not(:disabled) { background: #ed6f8e; }
 .confirmBtn:disabled { opacity: 0.4; cursor: not-allowed; }
