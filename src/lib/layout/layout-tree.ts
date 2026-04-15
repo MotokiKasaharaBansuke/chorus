@@ -15,6 +15,12 @@ export function createPaneGroup(tabIds: string[] = [], activeTabId?: string): Pa
 
 // ── Helpers: reduce duplicated recursion patterns ──
 
+/** Shallow-clone a PaneGroupNode so that SolidJS store setter-proxies
+ *  never leak into the raw store state via `produce`. */
+function clonePaneGroup(group: PaneGroupNode): PaneGroupNode {
+  return { type: "pane-group", id: group.id, tabIds: [...group.tabIds], activeTabId: group.activeTabId };
+}
+
 /** Apply a transform to the PaneGroup matching groupId, recurse through splits. */
 function mapPaneGroup(
   root: LayoutNode,
@@ -22,7 +28,7 @@ function mapPaneGroup(
   transform: (group: PaneGroupNode) => LayoutNode,
 ): LayoutNode {
   if (root.type === "pane-group") {
-    return root.id === groupId ? transform(root) : root;
+    return root.id === groupId ? transform(root) : clonePaneGroup(root);
   }
   return mapSplitChildren(root, (child) => mapPaneGroup(child, groupId, transform));
 }
@@ -33,7 +39,10 @@ function mapSplitChildren(
   mapper: (child: LayoutNode) => LayoutNode,
 ): SplitNode {
   return {
-    ...split,
+    type: "split",
+    id: split.id,
+    direction: split.direction,
+    ratio: split.ratio,
     children: [mapper(split.children[0]), mapper(split.children[1])],
   };
 }
@@ -73,7 +82,7 @@ export function getAllPaneGroups(root: LayoutNode): PaneGroupNode[] {
 /** Add a tab to a pane group. Returns a new tree. */
 export function addTabToPaneGroup(root: LayoutNode, groupId: string, tabId: string): LayoutNode {
   return mapPaneGroup(root, groupId, (group) => ({
-    ...group,
+    type: "pane-group" as const, id: group.id,
     tabIds: [...group.tabIds, tabId],
     activeTabId: tabId,
   }));
@@ -81,19 +90,23 @@ export function addTabToPaneGroup(root: LayoutNode, groupId: string, tabId: stri
 
 /** Update the active tab within a pane group. */
 export function setActiveTab(root: LayoutNode, groupId: string, tabId: string): LayoutNode {
-  return mapPaneGroup(root, groupId, (group) => ({ ...group, activeTabId: tabId }));
+  return mapPaneGroup(root, groupId, (group) => ({
+    type: "pane-group" as const, id: group.id,
+    tabIds: [...group.tabIds],
+    activeTabId: tabId,
+  }));
 }
 
 /** Remove a tab from its pane group. If the group becomes empty, collapse the tree. */
 export function removeTabFromTree(root: LayoutNode, tabId: string): LayoutNode | null {
   if (root.type === "pane-group") {
-    if (!root.tabIds.includes(tabId)) return root;
+    if (!root.tabIds.includes(tabId)) return clonePaneGroup(root);
     const newTabIds = root.tabIds.filter(id => id !== tabId);
     if (newTabIds.length === 0) return null;
     const newActive = root.activeTabId === tabId
       ? newTabIds[Math.min(root.tabIds.indexOf(tabId), newTabIds.length - 1)]
       : root.activeTabId;
-    return { ...root, tabIds: newTabIds, activeTabId: newActive ?? null };
+    return { type: "pane-group", id: root.id, tabIds: newTabIds, activeTabId: newActive ?? null };
   }
 
   const left = removeTabFromTree(root.children[0], tabId);
@@ -102,7 +115,10 @@ export function removeTabFromTree(root: LayoutNode, tabId: string): LayoutNode |
   if (!left) return right;
   if (!right) return left;
 
-  return { ...root, children: [left, right] };
+  return {
+    type: "split", id: root.id, direction: root.direction, ratio: root.ratio,
+    children: [left, right],
+  };
 }
 
 /** Split a pane group: insert a new SplitNode with the tab moved to a new PaneGroup. */
@@ -119,8 +135,8 @@ export function splitPaneGroup(
       ? (originalTabIds[0] ?? null)
       : group.activeTabId;
     const originalGroup: PaneGroupNode = originalTabIds.length > 0
-      ? { ...group, tabIds: originalTabIds, activeTabId: originalActive }
-      : group;
+      ? { type: "pane-group", id: group.id, tabIds: originalTabIds, activeTabId: originalActive }
+      : clonePaneGroup(group);
 
     const newGroup = createPaneGroup([tabId], tabId);
     const children: [LayoutNode, LayoutNode] = side === "before"
@@ -133,9 +149,9 @@ export function splitPaneGroup(
 
 /** Update split ratio */
 export function updateSplitRatio(root: LayoutNode, splitId: string, ratio: number): LayoutNode {
-  if (root.type === "pane-group") return root;
-  if (root.id === splitId) return { ...root, ratio };
-  return mapSplitChildren(root, (child) => updateSplitRatio(child, splitId, ratio));
+  if (root.type === "pane-group") return clonePaneGroup(root);
+  const updated = root.id === splitId ? { ...root, ratio } : root;
+  return mapSplitChildren(updated, (child) => updateSplitRatio(child, splitId, ratio));
 }
 
 // ── Equalize ──
@@ -148,11 +164,13 @@ export function countLeaves(root: LayoutNode): number {
 
 /** Equalize sizes: set each split ratio to leftLeaves/totalLeaves */
 export function equalizeSplits(root: LayoutNode): LayoutNode {
-  if (root.type === "pane-group") return root;
+  if (root.type === "pane-group") return clonePaneGroup(root);
   const leftLeaves = countLeaves(root.children[0]);
   const totalLeaves = leftLeaves + countLeaves(root.children[1]);
   return {
-    ...root,
+    type: "split",
+    id: root.id,
+    direction: root.direction,
     ratio: leftLeaves / totalLeaves,
     children: [
       equalizeSplits(root.children[0]),
