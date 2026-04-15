@@ -46,6 +46,20 @@ export function TopBar(props: TopBarProps) {
 
   return (
     <div class={styles.topBar}>
+      <Show when={top()}>
+        {(entry) => (
+          <button
+            class={`${styles.usageBanner} ${entry().utilization >= USAGE_WARNING_THRESHOLD ? styles.usageBannerWarn : ""}`}
+            onClick={props.onViewUsage}
+            title="View subscription usage"
+          >
+            <span class={styles.usagePct}>{formatUtilization(entry().utilization)}</span>
+            <span class={styles.usageSep}>·</span>
+            <span class={styles.usageResets}>resets in {formatResetsIn(entry().resetsAt)}</span>
+            <span class={styles.usageLink}>View usage</span>
+          </button>
+        )}
+      </Show>
       <div class={styles.right}>
         <button class={styles.btn} onClick={props.onToggleSidebar} title="Toggle Sidebar (⌘B)">
           <SidebarIcon isOpen={props.isSidebarOpen} size={14} />
@@ -156,20 +170,6 @@ export function TopBar(props: TopBarProps) {
               </div>
             </Show>
           </div>
-        </Show>
-        <Show when={top()}>
-          {(entry) => (
-            <button
-              class={`${styles.usageBanner} ${entry().utilization >= USAGE_WARNING_THRESHOLD ? styles.usageBannerWarn : ""}`}
-              onClick={props.onViewUsage}
-              title="View subscription usage"
-            >
-              <span class={styles.usagePct}>{formatUtilization(entry().utilization)}</span>
-              <span class={styles.usageSep}>·</span>
-              <span class={styles.usageResets}>resets in {formatResetsIn(entry().resetsAt)}</span>
-              <span class={styles.usageLink}>View usage</span>
-            </button>
-          )}
         </Show>
         <button class={styles.btn} onClick={() => setShowHelp(true)} title="Keyboard shortcuts & CLI commands">
           ?
