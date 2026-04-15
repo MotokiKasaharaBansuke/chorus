@@ -235,11 +235,13 @@ function App() {
       );
 
       const label = CLI_LABELS[finalConfig.cliType] ?? finalConfig.cliType;
-      const suffix = worktree ? ` · ${worktree.branch}` : "";
+      const title = worktree?.branch
+        ? worktree.branch
+        : `${label} ${tabStore.tabs.length + 1}`;
       const tab: Tab = {
         id: paneId,
-        title: `${label} ${tabStore.tabs.length + 1}${suffix}`,
-        status: "running",
+        title,
+        status: "waiting",
         cliConfig: finalConfig,
         worktree: worktree
           ? { path: worktree.path, branch: worktree.branch, headSha: worktree.headSha }
