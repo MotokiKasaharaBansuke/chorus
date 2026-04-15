@@ -111,6 +111,30 @@ describe("removeTabFromTree", () => {
   });
 });
 
+describe("removeTabFromTree — proxy safety", () => {
+  it("returns a new object for unchanged pane-groups (never the input reference)", () => {
+    const a = createPaneGroup(["t1"]);
+    const b = createPaneGroup(["t2"]);
+    const split: SplitNode = { type: "split", id: "s1", direction: "horizontal", children: [a, b], ratio: 0.5 };
+    const result = removeTabFromTree(split, "t1") as PaneGroupNode;
+    expect(result).not.toBe(b);
+    expect(result).toEqual(b);
+  });
+
+  it("returns new objects for all surviving nodes in a deep tree", () => {
+    const a = createPaneGroup(["t1"]);
+    const b = createPaneGroup(["t2"]);
+    const c = createPaneGroup(["t3"]);
+    const inner: SplitNode = { type: "split", id: "s2", direction: "horizontal", children: [b, c], ratio: 0.5 };
+    const outer: SplitNode = { type: "split", id: "s1", direction: "horizontal", children: [a, inner], ratio: 0.5 };
+    const result = removeTabFromTree(outer, "t2") as SplitNode;
+    expect(result.children[0]).not.toBe(a);
+    expect(result.children[1]).not.toBe(c);
+    expect((result.children[0] as PaneGroupNode).tabIds).toEqual(["t1"]);
+    expect((result.children[1] as PaneGroupNode).tabIds).toEqual(["t3"]);
+  });
+});
+
 describe("splitPaneGroup", () => {
   it("splits a group into two", () => {
     const g = createPaneGroup(["t1", "t2"]);
@@ -182,6 +206,77 @@ describe("equalizeSplits", () => {
     expect(result.ratio).toBeCloseTo(0.25);
     expect((result.children[1] as SplitNode).ratio).toBeCloseTo(1 / 3);
     expect(((result.children[1] as SplitNode).children[1] as SplitNode).ratio).toBe(0.5);
+  });
+});
+
+describe("setActiveTab — proxy safety", () => {
+  it("returns new objects for non-target groups", () => {
+    const a = createPaneGroup(["t1", "t2"]);
+    const b = createPaneGroup(["t3"]);
+    const split: SplitNode = { type: "split", id: "s1", direction: "horizontal", children: [a, b], ratio: 0.5 };
+    const result = setActiveTab(split, a.id, "t2") as SplitNode;
+    expect(result.children[1]).not.toBe(b);
+    expect((result.children[1] as PaneGroupNode).tabIds).toEqual(["t3"]);
+  });
+});
+
+describe("equalizeSplits — proxy safety", () => {
+  it("returns new objects for all leaf groups", () => {
+    const a = createPaneGroup(["t1"]);
+    const b = createPaneGroup(["t2"]);
+    const split: SplitNode = { type: "split", id: "s1", direction: "horizontal", children: [a, b], ratio: 0.7 };
+    const result = equalizeSplits(split) as SplitNode;
+    expect(result.children[0]).not.toBe(a);
+    expect(result.children[1]).not.toBe(b);
+  });
+});
+
+describe("splitPaneGroup — proxy safety", () => {
+  it("returns new objects for non-target groups in a split tree", () => {
+    const a = createPaneGroup(["t1", "t2"]);
+    const b = createPaneGroup(["t3"]);
+    const split: SplitNode = { type: "split", id: "s1", direction: "horizontal", children: [a, b], ratio: 0.5 };
+    const result = splitPaneGroup(split, a.id, "horizontal", "t2") as SplitNode;
+    const innerSplit = result.children[0] as SplitNode;
+    expect(innerSplit.type).toBe("split");
+    expect(result.children[1]).not.toBe(b);
+    expect((result.children[1] as PaneGroupNode).tabIds).toEqual(["t3"]);
+  });
+});
+
+describe("removeTabFromTree — edge case", () => {
+  it("returns structurally equal but referentially distinct tree for nonexistent tab", () => {
+    const a = createPaneGroup(["t1"]);
+    const b = createPaneGroup(["t2"]);
+    const split: SplitNode = { type: "split", id: "s1", direction: "horizontal", children: [a, b], ratio: 0.5 };
+    const result = removeTabFromTree(split, "nonexistent") as SplitNode;
+    expect(result).not.toBe(split);
+    expect(result.children[0]).not.toBe(a);
+    expect(result.children[1]).not.toBe(b);
+    expect((result.children[0] as PaneGroupNode).tabIds).toEqual(["t1"]);
+    expect((result.children[1] as PaneGroupNode).tabIds).toEqual(["t2"]);
+  });
+});
+
+describe("addTabToPaneGroup — proxy safety", () => {
+  it("returns new objects for non-target groups", () => {
+    const a = createPaneGroup(["t1"]);
+    const b = createPaneGroup(["t2"]);
+    const split: SplitNode = { type: "split", id: "s1", direction: "horizontal", children: [a, b], ratio: 0.5 };
+    const result = addTabToPaneGroup(split, a.id, "t3") as SplitNode;
+    expect(result.children[1]).not.toBe(b);
+    expect((result.children[1] as PaneGroupNode).tabIds).toEqual(["t2"]);
+  });
+});
+
+describe("updateSplitRatio — proxy safety", () => {
+  it("returns new objects for leaf pane-groups", () => {
+    const a = createPaneGroup(["t1"]);
+    const b = createPaneGroup(["t2"]);
+    const split: SplitNode = { type: "split", id: "s1", direction: "horizontal", children: [a, b], ratio: 0.5 };
+    const result = updateSplitRatio(split, "s1", 0.3) as SplitNode;
+    expect(result.children[0]).not.toBe(a);
+    expect(result.children[1]).not.toBe(b);
   });
 });
 
