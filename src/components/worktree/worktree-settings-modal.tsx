@@ -1,6 +1,7 @@
-import { createSignal, createEffect, Show, For } from "solid-js";
+import { createSignal, createEffect, onCleanup, Show, For } from "solid-js";
 import type { WorktreeSettings } from "../../types/settings";
 import type { WorktreeInfo } from "../../types/worktree";
+import { isShareCargoTarget } from "../../lib/worktree/share-cargo-target";
 import styles from "./worktree-settings-modal.module.css";
 
 export interface WorktreeSettingsModalProps {
@@ -31,6 +32,11 @@ const RECOMMENDED_PRESET: Partial<WorktreeSettings> = {
 export function WorktreeSettingsModal(props: WorktreeSettingsModalProps) {
   const [worktrees, setWorktrees] = createSignal<WorktreeInfo[]>([]);
   const [listError, setListError] = createSignal<string | null>(null);
+  const [isPresetApplied, setIsPresetApplied] = createSignal(false);
+  let presetTimerId: ReturnType<typeof setTimeout> | undefined;
+  onCleanup(() => {
+    if (presetTimerId) clearTimeout(presetTimerId);
+  });
 
   async function refreshList() {
     if (!props.repoRoot) {
@@ -74,10 +80,16 @@ export function WorktreeSettingsModal(props: WorktreeSettingsModalProps) {
             </div>
             <button
               class={styles.presetBtn}
-              onClick={() => props.onChange(RECOMMENDED_PRESET)}
+              disabled={isPresetApplied()}
+              onClick={() => {
+                props.onChange(RECOMMENDED_PRESET);
+                setIsPresetApplied(true);
+                if (presetTimerId) clearTimeout(presetTimerId);
+                presetTimerId = setTimeout(() => setIsPresetApplied(false), 2000);
+              }}
               type="button"
             >
-              Apply
+              {isPresetApplied() ? "Applied \u2713" : "Apply"}
             </button>
           </div>
 
@@ -170,6 +182,27 @@ export function WorktreeSettingsModal(props: WorktreeSettingsModalProps) {
               class={`${styles.toggle} ${props.settings.watchLockfiles ? styles.toggleOn : ""}`}
               onClick={() => props.onChange({ watchLockfiles: !props.settings.watchLockfiles })}
             />
+          </div>
+
+          <div class={styles.row}>
+            <div class={styles.rowLabel}>
+              Share Cargo target directory
+              <div class={styles.rowHint}>Symlink <code>target/</code> to the main repo to save disk space and rebuild time.</div>
+            </div>
+            <select
+              class={styles.select}
+              value={props.settings.shareCargoTarget}
+              onChange={(e) => {
+                const v = e.currentTarget.value;
+                if (isShareCargoTarget(v)) {
+                  props.onChange({ shareCargoTarget: v });
+                }
+              }}
+            >
+              <option value="auto">Auto</option>
+              <option value="always">Always</option>
+              <option value="never">Never</option>
+            </select>
           </div>
 
           <div class={styles.row}>
