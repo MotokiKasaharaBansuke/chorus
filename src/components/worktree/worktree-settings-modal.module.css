@@ -97,6 +97,12 @@
   border-radius: 5px;
   color: #cccccc;
   font-size: 12px;
+  cursor: pointer;
+}
+
+.select:focus {
+  outline: none;
+  border-color: #555;
 }
 
 /* Toggle switch */
@@ -166,6 +172,11 @@
 
 .presetBtn:hover {
   background: #3fb950;
+}
+
+.presetBtn:disabled {
+  background: #1a7f37;
+  cursor: default;
 }
 
 .worktreeList {
