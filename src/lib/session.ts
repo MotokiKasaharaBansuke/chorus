@@ -1,4 +1,4 @@
-import type { CliConfig, CliMode, ReviewCliType, LayoutNode, PaneGroupNode, SplitNode, Tab } from "../types";
+import type { CliConfig, CliMode, ReviewCliType, TabWorktree, LayoutNode, PaneGroupNode, SplitNode, Tab } from "../types";
 import { saveSession, loadSession } from "./commands/session-commands";
 import { spawnPty } from "./commands";
 
@@ -10,6 +10,7 @@ interface SavedTab {
   title: string;
   cliConfig: CliConfig;
   lastSessionId?: string;
+  worktree?: TabWorktree;
 }
 
 type SavedLayout = SavedSplit | SavedPaneGroup;
@@ -101,7 +102,7 @@ export function buildSavedSession(
 
   return {
     version: SESSION_VERSION,
-    tabs: tabs.map(t => ({ title: t.title, cliConfig: { ...t.cliConfig }, lastSessionId: t.lastSessionId })),
+    tabs: tabs.map(t => ({ title: t.title, cliConfig: { ...t.cliConfig }, lastSessionId: t.lastSessionId, worktree: t.worktree })),
     layout: savedLayout,
     sidebarOpen,
     sidebarWidth,
@@ -176,6 +177,7 @@ export async function restoreSession(data: string): Promise<RestoredWorkspace | 
         status: "idle",
         cliConfig: { ...saved.cliConfig },
         lastSessionId: saved.lastSessionId,
+        worktree: saved.worktree,
       };
     } else {
       newIds.push(""); // placeholder for failed spawns
