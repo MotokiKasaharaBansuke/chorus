@@ -3,6 +3,7 @@
   height: 100%;
   display: flex;
   align-items: center;
+  gap: 8px;
   user-select: none;
   flex-shrink: 0;
 }
@@ -85,7 +86,7 @@
   align-items: center;
 }
 .dropdownItem:hover { background: #333; color: #ccc; }
-.dropdownActive { color: #d97757; font-weight: 600; }
+.dropdownActive { color: #e8587a; font-weight: 600; }
 
 .divider { height: 1px; background: #333; margin: 4px 0; }
 
@@ -139,39 +140,108 @@
   line-height: 1;
 }
 
+.zombieDropdown {
+  min-width: 240px;
+}
+.zombieRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+}
+.zombieCliType {
+  font-size: 11px;
+  font-weight: 600;
+  color: #c74e39;
+  min-width: 70px;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.zombieId {
+  font-size: 11px;
+  color: #888;
+  font-family: monospace;
+  flex: 1;
+  min-width: 0;
+}
+.zombieKillBtn {
+  -webkit-app-region: no-drag;
+  background: transparent;
+  border: 1px solid #c74e39;
+  border-radius: 3px;
+  color: #c74e39;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.1s, color 0.1s;
+}
+.zombieKillBtn:hover {
+  background: #c74e39;
+  color: #fff;
+}
+.zombieKillAll {
+  color: #c74e39;
+  font-weight: 600;
+}
+.zombieKillAll:hover {
+  background: #3a2020;
+  color: #e86550;
+}
+
 .usageBanner {
   -webkit-app-region: no-drag;
   display: flex;
   align-items: center;
   gap: 5px;
-  background: #2a2518;
-  border: 1px solid #4a3a20;
+  background: #1e2a1e;
+  border: 1px solid #2a4a2a;
   border-radius: 5px;
   padding: 3px 10px;
   cursor: pointer;
   font-size: 11px;
-  color: #c9a84c;
+  color: #6abf6a;
   transition: background 0.1s, border-color 0.1s;
   white-space: nowrap;
 }
 .usageBanner:hover {
+  background: #243024;
+  border-color: #3a6a3a;
+}
+.usageBannerWarn {
+  background: #2a2518;
+  border-color: #4a3a20;
+  color: #c9a84c;
+}
+.usageBannerWarn:hover {
   background: #332e1e;
   border-color: #5a4a2a;
 }
-.usageCost {
+.usagePct {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 .usageSep {
+  color: #3a6a3a;
+}
+.usageBannerWarn .usageSep {
   color: #6a5a30;
 }
-.usageTokens {
-  color: #a08840;
+.usageResets {
+  color: #4a9a4a;
   font-variant-numeric: tabular-nums;
 }
+.usageBannerWarn .usageResets {
+  color: #a08840;
+}
 .usageLink {
-  color: #8a7a3a;
+  color: #3a8a3a;
   text-decoration: underline;
   text-underline-offset: 2px;
   margin-left: 2px;
+}
+.usageBannerWarn .usageLink {
+  color: #8a7a3a;
 }

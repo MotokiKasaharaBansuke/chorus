@@ -1,6 +1,8 @@
 use portable_pty::{CommandBuilder, NativePtySystem, PtyPair, PtySize, PtySystem};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -115,6 +117,8 @@ pub struct StreamSession {
     pub base_args: Vec<String>,
     pub working_dir: String,
     pub session_id: String,
+    /// Extra environment variables to set when spawning the CLI (e.g. CLAUDE_CONFIG_DIR).
+    pub extra_env: HashMap<String, String>,
     /// Tracks when the current message started processing. None = idle.
     /// Used to detect stale locks (e.g. process crash without cleanup).
     pub running_since: Arc<Mutex<Option<Instant>>>,
@@ -130,6 +134,7 @@ impl StreamSession {
         command: String,
         base_args: Vec<String>,
         working_dir: String,
+        extra_env: HashMap<String, String>,
     ) -> Self {
         Self {
             cli_type,
@@ -138,6 +143,7 @@ impl StreamSession {
             base_args,
             working_dir,
             session_id: uuid::Uuid::new_v4().to_string(),
+            extra_env,
             running_since: Arc::new(Mutex::new(None)),
             has_session: Arc::new(AtomicBool::new(false)),
         }
@@ -157,6 +163,21 @@ impl StreamSession {
         let cmd_end = rest.iter().position(|&b| b == b' ').unwrap_or(rest.len());
         let cmd = &rest[..cmd_end];
         !cmd.is_empty() && cmd.iter().all(|&b| b.is_ascii_lowercase() || b == b'-')
+    }
+
+    /// Expand `~` at the start of a path to the user's home directory.
+    /// Handles both `~` alone and `~/rest` forms.
+    fn expand_tilde(path: &str) -> String {
+        if path == "~" {
+            if let Ok(home) = std::env::var("HOME") {
+                return home;
+            }
+        } else if let Some(rest) = path.strip_prefix("~/") {
+            if let Ok(home) = std::env::var("HOME") {
+                return PathBuf::from(home).join(rest).to_string_lossy().into_owned();
+            }
+        }
+        path.to_string()
     }
 
     /// Build CLI arguments for the current message.
@@ -292,6 +313,9 @@ impl StreamSession {
             .stderr(Stdio::piped());
 
         Self::configure_env(&mut cmd);
+        for (key, value) in &self.extra_env {
+            cmd.env(key, Self::expand_tilde(value));
+        }
 
         let cli_label = match self.cli_type {
             CliType::ClaudeCode => "Claude Code",
@@ -737,8 +761,7 @@ fn is_sensitive_env_key(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_sensitive_env_key;
-    use super::StreamSession;
+    use super::{is_sensitive_env_key, StreamSession};
 
     // ---- is_slash_command ----
 
@@ -763,6 +786,35 @@ mod tests {
         assert!(!StreamSession::is_slash_command(""));
         assert!(!StreamSession::is_slash_command("/"));
         assert!(!StreamSession::is_slash_command("/123"));
+    }
+
+    // ---- expand_tilde ----
+
+    #[test]
+    fn expand_tilde_replaces_tilde_alone() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        if home.is_empty() { return; } // skip if HOME not set
+        assert_eq!(StreamSession::expand_tilde("~"), home);
+    }
+
+    #[test]
+    fn expand_tilde_replaces_tilde_slash_prefix() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        if home.is_empty() { return; }
+        let result = StreamSession::expand_tilde("~/.claude-work");
+        assert!(result.starts_with(&home));
+        assert!(result.ends_with(".claude-work"));
+        assert!(!result.contains('~'));
+    }
+
+    #[test]
+    fn expand_tilde_passthrough_absolute() {
+        assert_eq!(StreamSession::expand_tilde("/absolute/path"), "/absolute/path");
+    }
+
+    #[test]
+    fn expand_tilde_passthrough_relative() {
+        assert_eq!(StreamSession::expand_tilde("relative/path"), "relative/path");
     }
 
     // ---- is_sensitive_env_key ----

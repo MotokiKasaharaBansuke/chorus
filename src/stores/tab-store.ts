@@ -209,6 +209,10 @@ export function useTabStore() {
       updateTab(id, (tab) => { tab.cliConfig.workingDir = workingDir; });
     },
 
+    updateAccount(id: string, accountId: string | undefined) {
+      updateTab(id, (tab) => { tab.cliConfig.accountId = accountId; });
+    },
+
     /** Get all pane groups (for rendering) */
     getAllGroups(): import("../types").PaneGroupNode[] {
       if (!store.layout) return [];

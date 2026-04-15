@@ -1,0 +1,100 @@
+/* ======== Overlay / Modal (self-contained, no dependency on chat-panel.module.css) ======== */
+.overlay {
+  position: fixed; inset: 0;
+  z-index: 200; background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center;
+  animation: fadeIn 0.1s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.modal {
+  background: #252525; border: 1px solid #333; border-radius: 10px;
+  width: 380px; max-width: 90%; max-height: 60%; overflow-y: auto;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+
+.title {
+  padding: 12px 16px; font-size: 13px; color: #888;
+  border-bottom: 1px solid #333;
+}
+
+/* ======== Account items ======== */
+.item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 16px; cursor: pointer; transition: background 0.08s;
+  border-bottom: 1px solid #2a2a2a; color: #888;
+}
+.item:last-child { border-bottom: none; }
+.item:hover { background: #2e2e2e; }
+.itemSelected { background: #333; color: #e8587a; }
+.itemFocused { background: #2e2e2e; }
+.itemSelected.itemFocused { background: #3a3a3a; }
+.itemLabel { font-size: 14px; font-weight: 600; color: #ccc; margin-bottom: 2px; }
+.itemDesc { font-size: 12px; color: #666; }
+
+.itemActions {
+  display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+}
+
+.deleteBtn {
+  background: transparent; border: none; color: #555; cursor: pointer;
+  padding: 2px; border-radius: 3px; line-height: 0;
+  transition: color 0.1s, background 0.1s;
+  opacity: 0;
+}
+.deleteBtn:hover { color: #e06c6c; background: rgba(224,108,108,0.1); }
+/* Show delete button when this item row is hovered */
+.item:hover .deleteBtn { opacity: 1; }
+
+/* ======== Add account button ======== */
+.addBtn {
+  display: flex; align-items: center; gap: 6px;
+  width: 100%; padding: 10px 16px; background: transparent; border: none;
+  border-top: 1px solid #2a2a2a; color: #666; cursor: pointer;
+  font-size: 13px; text-align: left;
+  transition: color 0.1s, background 0.1s;
+}
+.addBtn:hover { color: #999; background: #2a2a2a; }
+
+/* ======== Add account form ======== */
+.addForm {
+  padding: 12px 16px 14px;
+  border-top: 1px solid #2a2a2a;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.addFormTitle {
+  font-size: 12px; color: #666; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.input {
+  width: 100%; padding: 6px 10px;
+  background: #1a1a1a; border: 1px solid #333; border-radius: 5px;
+  color: #ccc; font-size: 13px; outline: none; box-sizing: border-box;
+  transition: border-color 0.1s;
+}
+.input:focus { border-color: #555; }
+.input::placeholder { color: #444; }
+
+.addFormHint { font-size: 11px; color: #555; }
+
+.addFormActions {
+  display: flex; gap: 8px; justify-content: flex-end; margin-top: 2px;
+}
+.cancelBtn {
+  padding: 5px 12px; background: transparent; border: 1px solid #333;
+  border-radius: 5px; color: #666; cursor: pointer; font-size: 13px;
+  transition: color 0.1s, background 0.1s;
+}
+.cancelBtn:hover { background: #2a2a2a; color: #999; }
+
+.confirmBtn {
+  padding: 5px 14px; background: #e8587a; border: none;
+  border-radius: 5px; color: white; cursor: pointer; font-size: 13px;
+  transition: background 0.1s;
+}
+.confirmBtn:hover:not(:disabled) { background: #ed6f8e; }
+.confirmBtn:disabled { opacity: 0.4; cursor: not-allowed; }

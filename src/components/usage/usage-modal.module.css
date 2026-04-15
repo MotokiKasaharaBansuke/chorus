@@ -145,8 +145,8 @@
 }
 
 .cliBadgeClaude {
-  background: #3a2a20;
-  color: #d97757;
+  background: #3a2020;
+  color: #e8587a;
 }
 
 .cliBadgeCodex {
@@ -159,5 +159,56 @@
   padding: 24px;
   color: #555;
   font-size: 12px;
+}
+
+.limitRow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 0;
+  border-bottom: 1px solid #282828;
+}
+.limitRow:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.limitRow:first-child {
+  padding-top: 0;
+}
+
+.limitHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.limitLabel {
+  font-size: 12px;
+  font-weight: 500;
+  color: #bbb;
+}
+
+.limitPct {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.progressTrack {
+  height: 6px;
+  background: #333;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progressBar {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.limitResets {
+  font-size: 10px;
+  color: #555;
 }
 

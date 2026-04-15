@@ -2,6 +2,7 @@ import { For } from "solid-js";
 import { useTabStore } from "../../stores/tab-store";
 import { killPty } from "../../lib/commands";
 import { effectivePtyId } from "../../types";
+import { removeParser } from "../../lib/stream-parser-registry";
 import { TabItem } from "./tab-item";
 import styles from "./tab-bar.module.css";
 
@@ -20,6 +21,7 @@ export function TabBar(props: TabBarProps) {
       // PTY might already be dead
     }
     store.closeTab(id);
+    removeParser(id);
   }
 
   return (
