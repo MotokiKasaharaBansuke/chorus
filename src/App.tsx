@@ -22,7 +22,7 @@ import { UsageModal } from "./components/usage/usage-modal";
 import { classifyWorktreeError, type WorktreeErrorInfo } from "./lib/worktree/classify-error";
 import { resolveLaunchDir } from "./lib/worktree/resolve-launch-dir";
 import { resetWorktree } from "./lib/worktree/reset-worktree";
-import { countZombies, isSessionStale } from "./lib/zombie-sessions";
+import { analyzeSessionHealth } from "./lib/zombie-sessions";
 import { useUsageStore } from "./stores/usage-store";
 import type { TabWorktree } from "./types";
 import { TopBar } from "./components/top-bar/top-bar";
@@ -379,7 +379,7 @@ function App() {
   function collectActivePtyIds(): string[] {
     return [
       ...tabStore.tabs.map(t => effectivePtyId(t)),
-      ...bottomTerminal.termTabs().map(t => t.id),
+      ...bottomTerminal.termTabs().map(t => effectivePtyId(t)),
     ];
   }
 
@@ -387,20 +387,19 @@ function App() {
     if (spawningCount > 0) return;
     try {
       const backendIds = await listSessionIds();
-      setZombieCount(countZombies(backendIds, collectActivePtyIds()));
-
+      const activePtyIds = collectActivePtyIds();
       const activeTab = tabStore.activeTab;
-      if (activeTab && activeTab.cliConfig.cliType !== "file-viewer") {
-        setIsActiveTabStale(isSessionStale(backendIds, effectivePtyId(activeTab)));
-      } else {
-        setIsActiveTabStale(false);
-      }
+      const activePtyId = activeTab && activeTab.cliConfig.cliType !== "file-viewer"
+        ? effectivePtyId(activeTab)
+        : null;
+      const { zombieCount, isActiveStale } = analyzeSessionHealth(backendIds, activePtyIds, activePtyId);
+      setZombieCount(zombieCount);
+      setIsActiveTabStale(isActiveStale);
     } catch {
       setZombieCount(0);
       setIsActiveTabStale(false);
     }
   }
-
 
   createEffect(() => {
     // Re-check session health when the active tab changes
