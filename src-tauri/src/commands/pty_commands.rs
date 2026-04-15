@@ -21,9 +21,11 @@ fn validate_config_dir(path: &str) -> Result<(), AppError> {
     if path.contains('\0') {
         return Err(AppError::PtySpawnFailed("claude_config_dir contains NUL byte".into()));
     }
-    // Reject path-traversal components (bare ".." or "/../" style segments)
-    for component in path.split('/') {
-        if component == ".." {
+    // Use OS-native path parsing so encoded variants (e.g. on future cross-platform builds)
+    // are handled correctly. std::path::Component::ParentDir matches ".." components only.
+    use std::path::{Component, Path};
+    for component in Path::new(path).components() {
+        if component == Component::ParentDir {
             return Err(AppError::PtySpawnFailed("claude_config_dir must not contain '..'".into()));
         }
     }

@@ -94,6 +94,7 @@ export function ChatPanel(props: ChatPanelProps) {
       // contextPct() is already updated synchronously by setContextInputTokens above
       const pct = contextPct();
       if (pct < AUTO_COMPACT_RESET_THRESHOLD) {
+        // Reset after a successful compact has brought context back down
         autoCompactTriggered = false;
       } else if (shouldAutoCompact(pct, isStreaming(), autoCompactTriggered)) {
         autoCompactTriggered = true;
@@ -520,7 +521,7 @@ export function ChatPanel(props: ChatPanelProps) {
           currentAccountId={props.tab.cliConfig.accountId}
           onSelect={handleAccountSelect}
           onDelete={(deletedId) => {
-            if (props.tab.cliConfig.accountId === deletedId) handleAccountSelect(undefined);
+            if (!isStreaming() && props.tab.cliConfig.accountId === deletedId) handleAccountSelect(undefined);
           }}
           onClose={() => setShowAccountPicker(false)}
         />
