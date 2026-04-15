@@ -12,7 +12,7 @@ import { ChatInput } from "./chat-input";
 import { SessionPicker } from "./session-picker";
 import { ClawdIcon, CodexIcon } from "../icons";
 import type { Tab, ChatMessage, AttachedImage } from "../../types";
-import { effectivePtyId } from "../../types";
+import { effectivePtyId, isTabStreaming } from "../../types";
 import { useTabStore } from "../../stores/tab-store";
 import { useSettingsStore } from "../../stores/settings-store";
 import { classifyStreamError } from "../../lib/classify-error";
@@ -31,7 +31,7 @@ export function ChatPanel(props: ChatPanelProps) {
   /** Effective PTY ID (differs from tab.id after PTY respawn) */
   const ptyId = () => effectivePtyId(props.tab);
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
-  const [isStreaming, setIsStreaming] = createSignal(false);
+  const [isStreaming, setIsStreaming] = createSignal(isTabStreaming(props.tab.status));
   const [attachedImages, setAttachedImages] = createSignal<AttachedImage[]>([]);
   const [isDragOver, setIsDragOver] = createSignal(false);
   const [pastSessions, setPastSessions] = createSignal<SessionInfo[]>([]);
@@ -57,6 +57,13 @@ export function ChatPanel(props: ChatPanelProps) {
   parser.onStatusChange((status) => {
     setIsStreaming(status === "streaming");
     store.updateStatus(props.tab.id, status === "streaming" ? "running" : "waiting");
+  });
+
+  // Safety net: sync isStreaming if store status is externally cleared (e.g. final PTY event lost during remount)
+  createEffect(() => {
+    if (!isTabStreaming(props.tab.status) && isStreaming()) {
+      setIsStreaming(false);
+    }
   });
 
   // Reactive subscriptions — re-subscribe automatically when ptyId changes (e.g. after respawn)
