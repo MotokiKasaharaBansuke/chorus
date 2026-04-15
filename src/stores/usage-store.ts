@@ -1,12 +1,12 @@
 import { createStore, produce } from "solid-js/store";
-import type { TabUsage, UsageSummary, RateLimitInfo } from "../types/usage";
+import type { TabUsage, UsageSummary, RateLimitEntry } from "../types/usage";
 
 interface UsageState {
   tabs: Record<string, TabUsage>;
-  rateLimit: RateLimitInfo | null;
+  rateLimits: Record<string, RateLimitEntry>;
 }
 
-const [store, setStore] = createStore<UsageState>({ tabs: {}, rateLimit: null });
+const [store, setStore] = createStore<UsageState>({ tabs: {}, rateLimits: {} });
 
 function updateTabUsage(usage: TabUsage) {
   setStore(produce((s) => {
@@ -20,8 +20,16 @@ function removeTab(tabId: string) {
   }));
 }
 
-function updateRateLimit(info: RateLimitInfo) {
-  setStore("rateLimit", info);
+function updateRateLimits(entries: RateLimitEntry[]) {
+  setStore(produce((s) => {
+    for (const entry of entries) {
+      s.rateLimits[entry.type] = entry;
+    }
+  }));
+}
+
+function clearRateLimits() {
+  setStore(produce((s) => { s.rateLimits = {}; }));
 }
 
 function getSummary(): UsageSummary {
@@ -44,9 +52,10 @@ export function useUsageStore() {
   return {
     updateTabUsage,
     removeTab,
-    updateRateLimit,
+    updateRateLimits,
+    clearRateLimits,
     get summary() { return getSummary(); },
     get tabs() { return Object.values(store.tabs); },
-    get rateLimit() { return store.rateLimit; },
+    get rateLimits() { return Object.values(store.rateLimits); },
   } as const;
 }

@@ -73,6 +73,10 @@ export function ChatPanel(props: ChatPanelProps) {
       usageStore.updateTabUsage({ tabId: props.tab.id, tabTitle: props.tab.title, cliType, costUsd, inputTokens, outputTokens, turnCount });
     }
   });
+  parser.onRateLimit((entries) => {
+    usageStore.updateRateLimits(entries);
+  });
+
   // Status transitions delegated to StreamParser (avoids re-parsing the same JSON line)
   parser.onStatusChange((status) => {
     setIsStreaming(status === "streaming");
