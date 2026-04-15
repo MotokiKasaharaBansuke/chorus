@@ -1,6 +1,6 @@
 import { batch } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
-import type { Tab, TabStatus, CliMode, LayoutNode, SplitDirection } from "../types";
+import type { Tab, TabStatus, TabWorktree, CliMode, LayoutNode, SplitDirection } from "../types";
 import {
   createPaneGroup,
   findPaneGroup,
@@ -199,6 +199,14 @@ export function useTabStore() {
     /** Update PTY ID for a tab (used when re-spawning PTY for restored sessions) */
     updatePtyId(tabId: string, ptyId: string) {
       updateTab(tabId, (tab) => { tab.ptyId = ptyId; });
+    },
+
+    updateWorktree(id: string, worktree: TabWorktree | undefined) {
+      updateTab(id, (tab) => { tab.worktree = worktree; });
+    },
+
+    updateWorkingDir(id: string, workingDir: string) {
+      updateTab(id, (tab) => { tab.cliConfig.workingDir = workingDir; });
     },
 
     /** Get all pane groups (for rendering) */
