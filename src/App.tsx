@@ -28,6 +28,7 @@ import { TopBar } from "./components/top-bar/top-bar";
 import { useBottomTerminal } from "./hooks/use-bottom-terminal";
 import { useKeyboardShortcuts } from "./hooks/use-keyboard-shortcuts";
 import { useResizeHandle } from "./hooks/use-resize-handle";
+import { removeParser } from "./lib/stream-parser-registry";
 import { effectivePtyId, isTabStreaming } from "./types";
 import type { CliConfig, CliMode, Tab } from "./types";
 import chorusIcon from "./assets/chorus-icon.png";
@@ -346,6 +347,7 @@ function App() {
       try { await killPty(tab ? effectivePtyId(tab) : id); } catch { /* */ }
     }
     tabStore.closeTab(id);
+    removeParser(id);
     usageStore.removeTab(id);
     void checkSessionHealth();
 
@@ -454,6 +456,7 @@ function App() {
     if (tab.cliConfig.cliType === "file-viewer") return;
     try { await killPty(effectivePtyId(tab)); } catch {}
     tabStore.closeTab(tab.id);
+    removeParser(tab.id);
     await handleNewTab(tab.cliConfig);
   }
 

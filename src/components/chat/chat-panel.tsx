@@ -4,7 +4,7 @@ import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispat
 import { sendMessage as sendMessageCmd, killPty, spawnPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
 import { useReviewRequest } from "../../hooks/use-review-request";
 import { useSendReview } from "../../hooks/use-send-review";
-import { StreamParser } from "../../lib/stream-parser";
+import { getOrCreateParser } from "../../lib/stream-parser-registry";
 import { MessageBubble } from "./message-bubble";
 import { BusySpinner } from "./busy-spinner";
 import { ModelPicker } from "./model-picker";
@@ -50,8 +50,19 @@ export function ChatPanel(props: ChatPanelProps) {
 
   const usageStore = useUsageStore();
 
-  const parser = new StreamParser();
-  parser.onUpdate((msgs) => {
+  const parser = getOrCreateParser(props.tab.id);
+
+  // Restore messages from a surviving parser (e.g. after layout-triggered remount)
+  const existing = parser.getMessages();
+  if (existing.length > 0) {
+    setMessages(existing);
+    // Scroll to bottom after restoring
+    requestAnimationFrame(() => {
+      if (scrollRef) scrollRef.scrollTop = scrollRef.scrollHeight;
+    });
+  }
+
+  const unsubUpdate = parser.onUpdate((msgs) => {
     setMessages([...msgs]);
     requestAnimationFrame(() => {
       if (scrollRef) scrollRef.scrollTop = scrollRef.scrollHeight;
@@ -73,11 +84,13 @@ export function ChatPanel(props: ChatPanelProps) {
       usageStore.updateTabUsage({ tabId: props.tab.id, tabTitle: props.tab.title, cliType, costUsd, inputTokens, outputTokens, turnCount });
     }
   });
+  onCleanup(unsubUpdate);
   // Status transitions delegated to StreamParser (avoids re-parsing the same JSON line)
-  parser.onStatusChange((status) => {
+  const unsubStatus = parser.onStatusChange((status) => {
     setIsStreaming(status === "streaming");
     store.updateStatus(props.tab.id, status === "streaming" ? "running" : "waiting");
   });
+  onCleanup(unsubStatus);
 
   // Safety net: sync isStreaming if store status is externally cleared (e.g. final PTY event lost during remount)
   createEffect(() => {
