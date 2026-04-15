@@ -347,3 +347,42 @@ describe("StreamParser.addUserMessage with images", () => {
     expect(blocks[0]).toEqual({ kind: "text", text: "hello" });
   });
 });
+
+// ---- system events ----
+
+describe("StreamParser system events", () => {
+  it("renders non-init system events with a message as system messages", () => {
+    const parser = new StreamParser();
+    parser.processLine(JSON.stringify({
+      type: "system",
+      subtype: "compact",
+      message: "Conversation compacted: 45k → 12k tokens",
+    }));
+    const msgs = parser.getMessages();
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].role).toBe("system");
+    expect(msgs[0].blocks[0]).toMatchObject({ kind: "text", text: "Conversation compacted: 45k → 12k tokens" });
+  });
+
+  it("ignores non-init system events without a message field", () => {
+    const parser = new StreamParser();
+    parser.processLine(JSON.stringify({ type: "system", subtype: "unknown" }));
+    expect(parser.getMessages()).toHaveLength(0);
+  });
+
+  it("ignores non-init system events with non-string message", () => {
+    const parser = new StreamParser();
+    parser.processLine(JSON.stringify({ type: "system", subtype: "other", message: 42 }));
+    parser.processLine(JSON.stringify({ type: "system", subtype: "other", message: { text: "hi" } }));
+    expect(parser.getMessages()).toHaveLength(0);
+  });
+
+  it("still triggers streaming status on system.init", () => {
+    const parser = new StreamParser();
+    const statuses: string[] = [];
+    parser.onStatusChange((s) => statuses.push(s));
+    parser.processLine(JSON.stringify({ type: "system", subtype: "init" }));
+    expect(statuses).toContain("streaming");
+    expect(parser.getMessages()).toHaveLength(0);
+  });
+});

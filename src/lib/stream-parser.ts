@@ -197,6 +197,7 @@ export class StreamParser {
     switch (type) {
       case "system":
         if (data.subtype === "init") this.notifyStatus("streaming");
+        else this.handleSystemMessage(data);
         break;
       case "assistant":
         this.handleAssistant(data);
@@ -353,6 +354,19 @@ export class StreamParser {
       };
       this.notifyBatched();
     }
+  }
+
+  /** Handle non-init system events (e.g. compact notifications). */
+  private handleSystemMessage(data: Record<string, unknown>) {
+    const message = typeof data.message === "string" ? data.message : "";
+    if (!message) return;
+
+    this.messages.push({
+      role: "system",
+      blocks: [{ kind: "text", text: message }],
+      isStreaming: false,
+    });
+    this.notifyBatched();
   }
 
   private handleStderr(data: Record<string, unknown>) {
