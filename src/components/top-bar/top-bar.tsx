@@ -2,7 +2,9 @@ import { createSignal, Show } from "solid-js";
 import { useTabStore } from "../../stores/tab-store";
 import { HelpModal } from "../help/help-modal";
 import { SidebarIcon, TerminalIcon, RefreshIcon } from "../icons";
+import { formatCost, formatTokens } from "../../lib/format/usage";
 import type { CliMode, ReviewCliType } from "../../types";
+import type { UsageSummary } from "../../types";
 import styles from "./top-bar.module.css";
 
 interface TopBarProps {
@@ -23,6 +25,8 @@ interface TopBarProps {
   hasActiveTab: boolean;
   isActiveTabStale: boolean;
   onRefreshActiveTab: () => void;
+  usageSummary: UsageSummary;
+  onViewUsage: () => void;
 }
 
 export function TopBar(props: TopBarProps) {
@@ -112,6 +116,14 @@ export function TopBar(props: TopBarProps) {
               <path d="M1 1l14 14M1 15L15 1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
             </svg>
             <span class={styles.zombieBadge}>{props.zombieCount}</span>
+          </button>
+        </Show>
+        <Show when={props.usageSummary.totalCostUsd > 0}>
+          <button class={styles.usageBanner} onClick={props.onViewUsage} title="View session usage">
+            <span class={styles.usageCost}>{formatCost(props.usageSummary.totalCostUsd)}</span>
+            <span class={styles.usageSep}>·</span>
+            <span class={styles.usageTokens}>{formatTokens(props.usageSummary.totalInputTokens + props.usageSummary.totalOutputTokens)} tokens</span>
+            <span class={styles.usageLink}>View usage</span>
           </button>
         </Show>
         <button class={styles.btn} onClick={() => setShowHelp(true)} title="Keyboard shortcuts & CLI commands">
