@@ -33,6 +33,17 @@
 .btn:hover { color: #999; background: #2d2d2d; }
 .btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
+.staleBtn {
+  color: #d4a043;
+  animation: pulse 2s ease-in-out infinite;
+}
+.staleBtn:hover { color: #f0c060; background: #3a3020; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 .dropdownWrap {
   position: relative;
   display: flex;

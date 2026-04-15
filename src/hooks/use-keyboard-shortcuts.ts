@@ -11,6 +11,7 @@ interface ShortcutHandlers {
   onZoomIn: () => void;
   onZoomOut: () => void;
   onZoomReset: () => void;
+  onRefreshActiveTab: () => void;
 }
 
 export function useKeyboardShortcuts(handlers: ShortcutHandlers) {
@@ -25,6 +26,7 @@ export function useKeyboardShortcuts(handlers: ShortcutHandlers) {
       case "e": { e.preventDefault(); handlers.onEqualize(); break; }
       case "b": { e.preventDefault(); handlers.onToggleSidebar(); break; }
       case "`": { e.preventDefault(); handlers.onToggleTerminal(); break; }
+      case "r": { if (e.shiftKey) { e.preventDefault(); handlers.onRefreshActiveTab(); } break; }
       case "=": case "+": { e.preventDefault(); handlers.onZoomIn(); break; }
       case "-": { e.preventDefault(); handlers.onZoomOut(); break; }
       case "0": { e.preventDefault(); handlers.onZoomReset(); break; }

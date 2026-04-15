@@ -1,7 +1,7 @@
 import { createSignal, Show } from "solid-js";
 import { useTabStore } from "../../stores/tab-store";
 import { HelpModal } from "../help/help-modal";
-import { SidebarIcon, TerminalIcon } from "../icons";
+import { SidebarIcon, TerminalIcon, RefreshIcon } from "../icons";
 import type { CliMode, ReviewCliType } from "../../types";
 import styles from "./top-bar.module.css";
 
@@ -20,6 +20,9 @@ interface TopBarProps {
   onOpenWorktreeSettings: () => void;
   zombieCount: number;
   onKillZombies: () => void;
+  hasActiveTab: boolean;
+  isActiveTabStale: boolean;
+  onRefreshActiveTab: () => void;
 }
 
 export function TopBar(props: TopBarProps) {
@@ -42,6 +45,15 @@ export function TopBar(props: TopBarProps) {
               <rect x="1" y="2" width="6" height="12" rx="1" stroke="currentColor" stroke-width="1.2" fill="none"/>
               <rect x="9" y="2" width="6" height="12" rx="1" stroke="currentColor" stroke-width="1.2" fill="none"/>
             </svg>
+          </button>
+        </Show>
+        <Show when={props.hasActiveTab}>
+          <button
+            class={`${styles.btn} ${props.isActiveTabStale ? styles.staleBtn : ""}`}
+            onClick={props.onRefreshActiveTab}
+            title={props.isActiveTabStale ? "Session out of sync — click to refresh" : "Refresh session (⇧⌘R)"}
+          >
+            <RefreshIcon size={14} />
           </button>
         </Show>
         <div class={styles.dropdownWrap}>

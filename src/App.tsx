@@ -19,13 +19,13 @@ import { WorktreeSettingsModal } from "./components/worktree/worktree-settings-m
 import { WorktreeErrorDialog } from "./components/worktree/worktree-error-dialog";
 import { WorktreeRemoveConfirm } from "./components/worktree/worktree-remove-confirm";
 import { classifyWorktreeError, type WorktreeErrorInfo } from "./lib/worktree/classify-error";
-import { countZombies } from "./lib/zombie-sessions";
+import { countZombies, isSessionStale } from "./lib/zombie-sessions";
 import type { TabWorktree } from "./types";
 import { TopBar } from "./components/top-bar/top-bar";
 import { useBottomTerminal } from "./hooks/use-bottom-terminal";
 import { useKeyboardShortcuts } from "./hooks/use-keyboard-shortcuts";
 import { useResizeHandle } from "./hooks/use-resize-handle";
-import { effectivePtyId } from "./types";
+import { effectivePtyId, isTabStreaming } from "./types";
 import type { CliConfig, CliMode, Tab } from "./types";
 import chorusIcon from "./assets/chorus-icon.png";
 import "./App.css";
@@ -47,6 +47,7 @@ function App() {
   >(null);
   const [activeRepoRoot, setActiveRepoRoot] = createSignal<string | null>(null);
   const [zombieCount, setZombieCount] = createSignal(0);
+  const [isActiveTabStale, setIsActiveTabStale] = createSignal(false);
   let spawningCount = 0;
 
   // Track the repo root of the currently active pane so the worktree
@@ -141,7 +142,7 @@ function App() {
       if (dir) sidebarStore.setWorkingDir(dir);
     } catch { /* ignore */ }
 
-    void checkZombies();
+    void checkSessionHealth();
 
     // Listen for IPC "open directory" events sent by the `mlm` CLI.
     // Always adds a new split pane (not a tab in the current pane), then equalizes.
@@ -258,7 +259,7 @@ function App() {
       return paneId;
     } finally {
       spawningCount--;
-      void checkZombies();
+      void checkSessionHealth();
     }
   }
 
@@ -286,7 +287,7 @@ function App() {
       try { await killPty(tab ? effectivePtyId(tab) : id); } catch { /* */ }
     }
     tabStore.closeTab(id);
-    void checkZombies();
+    void checkSessionHealth();
 
     const wt = tab?.worktree;
     if (!wt) return;
@@ -313,14 +314,60 @@ function App() {
     }
   }
 
-  async function checkZombies() {
+  async function checkSessionHealth() {
     if (spawningCount > 0) return;
     try {
       const backendIds = await listSessionIds();
       const frontendIds = tabStore.tabs.map(t => effectivePtyId(t));
       setZombieCount(countZombies(backendIds, frontendIds));
+
+      const activeTab = tabStore.activeTab;
+      if (activeTab && activeTab.cliConfig.cliType !== "file-viewer") {
+        setIsActiveTabStale(isSessionStale(backendIds, effectivePtyId(activeTab)));
+      } else {
+        setIsActiveTabStale(false);
+      }
     } catch {
       setZombieCount(0);
+      setIsActiveTabStale(false);
+    }
+  }
+
+
+  createEffect(() => {
+    // Re-check session health when the active tab changes
+    void tabStore.activeTabId;
+    void checkSessionHealth();
+  });
+
+  let isRefreshing = false;
+
+  async function handleRefreshActiveTab() {
+    const tab = tabStore.activeTab;
+    if (!tab || tab.cliConfig.cliType === "file-viewer") return;
+    if (isRefreshing) return;
+    if (isTabStreaming(tab.status)) return;
+
+    isRefreshing = true;
+    const oldPtyId = effectivePtyId(tab);
+    try { await killPty(oldPtyId); } catch { /* already dead */ }
+    try {
+      const newPtyId = await spawnPty(tab.cliConfig);
+      if (!tabStore.getTab(tab.id)) {
+        await killPty(newPtyId).catch(() => {});
+        return;
+      }
+      tabStore.updatePtyId(tab.id, newPtyId);
+      tabStore.updateStatus(tab.id, "waiting");
+      setIsActiveTabStale(false);
+      window.dispatchEvent(new CustomEvent("mlm-refresh-tab", { detail: { tabId: tab.id } }));
+    } catch {
+      if (tabStore.getTab(tab.id)) {
+        tabStore.updateStatus(tab.id, "error");
+      }
+    } finally {
+      isRefreshing = false;
+      void checkSessionHealth();
     }
   }
 
@@ -329,7 +376,7 @@ function App() {
     try {
       await killZombieSessions(keepIds);
     } catch { /* best effort */ }
-    void checkZombies();
+    void checkSessionHealth();
   }
 
   async function performWorktreeRemove() {
@@ -418,6 +465,7 @@ function App() {
     onZoomIn: () => applyZoom(zoom() + 10),
     onZoomOut: () => applyZoom(zoom() - 10),
     onZoomReset: () => applyZoom(100),
+    onRefreshActiveTab: () => handleRefreshActiveTab(),
   });
 
   // --- Dynamic window min size ---
@@ -462,6 +510,9 @@ function App() {
           onOpenWorktreeSettings={() => setIsWorktreeSettingsOpen(true)}
           zombieCount={zombieCount()}
           onKillZombies={handleKillZombies}
+          hasActiveTab={!!tabStore.activeTab && tabStore.activeTab.cliConfig.cliType !== "file-viewer"}
+          isActiveTabStale={isActiveTabStale()}
+          onRefreshActiveTab={handleRefreshActiveTab}
         />
       </div>
 
