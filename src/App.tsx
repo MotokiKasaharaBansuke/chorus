@@ -1,4 +1,4 @@
-import { createSignal, createEffect, For, Show, onMount, onCleanup } from "solid-js";
+import { batch, createSignal, createEffect, For, Show, onMount, onCleanup } from "solid-js";
 import { LogicalSize } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -20,6 +20,7 @@ import { WorktreeErrorDialog } from "./components/worktree/worktree-error-dialog
 import { WorktreeRemoveConfirm } from "./components/worktree/worktree-remove-confirm";
 import { UsageModal } from "./components/usage/usage-modal";
 import { classifyWorktreeError, type WorktreeErrorInfo } from "./lib/worktree/classify-error";
+import { resetWorktree } from "./lib/worktree/reset-worktree";
 import { countZombies, isSessionStale } from "./lib/zombie-sessions";
 import { useUsageStore } from "./stores/usage-store";
 import type { TabWorktree } from "./types";
@@ -213,6 +214,13 @@ function App() {
       isDraggingImages = false;
       emitDragState(null, false);
     });
+
+    function handleWorktreeResetEvent(e: Event) {
+      const { tabId } = (e as CustomEvent).detail as { tabId: string };
+      void performWorktreeReset(tabId);
+    }
+    window.addEventListener("mlm-worktree-reset", handleWorktreeResetEvent);
+    onCleanup(() => window.removeEventListener("mlm-worktree-reset", handleWorktreeResetEvent));
   });
 
   onCleanup(() => { dropUnlistenRef?.(); ipcUnlistenRef?.(); });
@@ -282,6 +290,53 @@ function App() {
     } catch (e) {
       console.error("Failed to remove worktree:", e);
       setWorktreeError(classifyWorktreeError(e));
+    }
+  }
+
+  const resettingTabs = new Set<string>();
+
+  async function performWorktreeReset(tabId: string) {
+    const tab = tabStore.getTab(tabId);
+    if (!tab?.worktree || resettingTabs.has(tabId)) return;
+
+    const { worktree: wt } = tab;
+    resettingTabs.add(tabId);
+    try {
+      const result = await resetWorktree(
+        tabId,
+        effectivePtyId(tab),
+        tab.cliConfig,
+        wt,
+        settingsStore.worktree,
+        {
+          killPty,
+          removeWorktree,
+          createWorktree,
+          spawnPty,
+          isTabAlive: (id) => !!tabStore.getTab(id),
+        },
+      );
+
+      batch(() => {
+        tabStore.updatePtyId(tabId, result.newPtyId);
+        tabStore.updateTitle(tabId, result.created.branch);
+        tabStore.updateWorkingDir(tabId, result.created.path);
+        tabStore.updateWorktree(tabId, {
+          path: result.created.path,
+          branch: result.created.branch,
+          headSha: result.created.headSha,
+          repoRoot: wt.repoRoot,
+        });
+        tabStore.updateStatus(tabId, "waiting");
+      });
+    } catch (e) {
+      batch(() => {
+        tabStore.updateWorktree(tabId, undefined);
+        tabStore.updateStatus(tabId, "error");
+      });
+      setWorktreeError(classifyWorktreeError(e));
+    } finally {
+      resettingTabs.delete(tabId);
     }
   }
 

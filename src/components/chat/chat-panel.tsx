@@ -1,7 +1,7 @@
 import { createSignal, createEffect, For, Show, onMount, onCleanup } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
-import { sendMessage as sendMessageCmd, killPty, spawnPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
+import { sendMessage as sendMessageCmd, killPty, spawnPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
 import { useReviewRequest } from "../../hooks/use-review-request";
 import { useSendReview } from "../../hooks/use-send-review";
 import { StreamParser } from "../../lib/stream-parser";
@@ -19,6 +19,7 @@ import { useUsageStore } from "../../stores/usage-store";
 import { classifyStreamError } from "../../lib/classify-error";
 import { isValidTempImagePath } from "../../lib/validate-path";
 import { submitWithBusyRetry } from "../../lib/submit-with-busy-retry";
+import { WorktreeResetConfirm } from "../worktree/worktree-reset-confirm";
 import styles from "./chat-panel.module.css";
 
 
@@ -338,8 +339,19 @@ export function ChatPanel(props: ChatPanelProps) {
     }
   }
 
+  const [resetConfirm, setResetConfirm] = createSignal<{ isDirty: boolean } | null>(null);
+
   const UI_COMMANDS: Record<string, () => void> = {
-    "clear-conversation": () => { parser.loadSession([]); },
+    "clear-conversation": () => {
+      if (isStreaming()) return;
+      if (!props.tab.worktree) {
+        parser.loadSession([]);
+        return;
+      }
+      gitHasTrackedChanges(props.tab.worktree.path)
+        .catch((): boolean => true)
+        .then((isDirty) => setResetConfirm({ isDirty }));
+    },
     "attach-file": () => {
       const input = document.createElement("input");
       input.type = "file";
@@ -420,8 +432,27 @@ export function ChatPanel(props: ChatPanelProps) {
     addMessage: (t) => parser.addUserMessage(t),
   });
 
+  function handleClearOnly() {
+    parser.loadSession([]);
+    setResetConfirm(null);
+  }
+
+  function handleResetWorktree() {
+    parser.loadSession([]);
+    setResetConfirm(null);
+    setIsStreaming(false);
+    window.dispatchEvent(new CustomEvent("mlm-worktree-reset", { detail: { tabId: props.tab.id } }));
+  }
+
   return (
     <div class={styles.container} ref={containerRef} data-tab-id={props.tab.id}>
+      <WorktreeResetConfirm
+        worktree={resetConfirm() ? (props.tab.worktree ?? null) : null}
+        isDirty={resetConfirm()?.isDirty ?? false}
+        onClearOnly={handleClearOnly}
+        onReset={handleResetWorktree}
+        onCancel={() => setResetConfirm(null)}
+      />
       <Show when={showSessionPicker()}>
         <SessionPicker
           sessions={pastSessions()}
