@@ -103,6 +103,10 @@ export function ChatPanel(props: ChatPanelProps) {
       }
     }
   });
+  parser.onRateLimit((info) => {
+    usageStore.updateRateLimit(info);
+  });
+
   // Status transitions delegated to StreamParser (avoids re-parsing the same JSON line)
   parser.onStatusChange((status) => {
     setIsStreaming(status === "streaming");

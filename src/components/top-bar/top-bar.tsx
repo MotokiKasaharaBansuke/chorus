@@ -2,10 +2,10 @@ import { createSignal, For, Show } from "solid-js";
 import { useTabStore } from "../../stores/tab-store";
 import { HelpModal } from "../help/help-modal";
 import { SidebarIcon, TerminalIcon, RefreshIcon } from "../icons";
-import { formatCost, formatTokens } from "../../lib/format/usage";
+import { formatResetsIn, formatUtilization, USAGE_WARNING_THRESHOLD } from "../../lib/format/usage";
 import type { ZombieSessionInfo } from "../../lib/commands";
 import type { CliMode, ReviewCliType } from "../../types";
-import type { UsageSummary } from "../../types";
+import type { RateLimitEntry } from "../../types/usage";
 import styles from "./top-bar.module.css";
 
 interface TopBarProps {
@@ -27,8 +27,13 @@ interface TopBarProps {
   hasActiveTab: boolean;
   isActiveTabStale: boolean;
   onRefreshActiveTab: () => void;
-  usageSummary: UsageSummary;
+  rateLimits: readonly RateLimitEntry[];
   onViewUsage: () => void;
+}
+
+function highestUtilizationEntry(rateLimits: readonly RateLimitEntry[]): RateLimitEntry | null {
+  if (rateLimits.length === 0) return null;
+  return [...rateLimits].sort((a, b) => b.utilization - a.utilization)[0] ?? null;
 }
 
 export function TopBar(props: TopBarProps) {
@@ -36,6 +41,8 @@ export function TopBar(props: TopBarProps) {
   const [showSettings, setShowSettings] = createSignal(false);
   const [showHelp, setShowHelp] = createSignal(false);
   const [showZombies, setShowZombies] = createSignal(false);
+
+  const top = () => highestUtilizationEntry(props.rateLimits);
 
   return (
     <div class={styles.topBar}>
@@ -150,13 +157,19 @@ export function TopBar(props: TopBarProps) {
             </Show>
           </div>
         </Show>
-        <Show when={props.usageSummary.totalCostUsd > 0}>
-          <button class={styles.usageBanner} onClick={props.onViewUsage} title="View session usage">
-            <span class={styles.usageCost}>{formatCost(props.usageSummary.totalCostUsd)}</span>
-            <span class={styles.usageSep}>·</span>
-            <span class={styles.usageTokens}>{formatTokens(props.usageSummary.totalInputTokens + props.usageSummary.totalOutputTokens)} tokens</span>
-            <span class={styles.usageLink}>View usage</span>
-          </button>
+        <Show when={top()}>
+          {(entry) => (
+            <button
+              class={`${styles.usageBanner} ${entry().utilization >= USAGE_WARNING_THRESHOLD ? styles.usageBannerWarn : ""}`}
+              onClick={props.onViewUsage}
+              title="View subscription usage"
+            >
+              <span class={styles.usagePct}>{formatUtilization(entry().utilization)}</span>
+              <span class={styles.usageSep}>·</span>
+              <span class={styles.usageResets}>resets in {formatResetsIn(entry().resetsAt)}</span>
+              <span class={styles.usageLink}>View usage</span>
+            </button>
+          )}
         </Show>
         <button class={styles.btn} onClick={() => setShowHelp(true)} title="Keyboard shortcuts & CLI commands">
           ?

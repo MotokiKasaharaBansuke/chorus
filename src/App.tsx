@@ -21,8 +21,9 @@ import { WorktreeErrorDialog } from "./components/worktree/worktree-error-dialog
 import { WorktreeRemoveConfirm } from "./components/worktree/worktree-remove-confirm";
 import { UsageModal } from "./components/usage/usage-modal";
 import { classifyWorktreeError, type WorktreeErrorInfo } from "./lib/worktree/classify-error";
+import { resolveLaunchDir } from "./lib/worktree/resolve-launch-dir";
 import { resetWorktree } from "./lib/worktree/reset-worktree";
-import { isSessionStale } from "./lib/zombie-sessions";
+import { analyzeSessionHealth } from "./lib/zombie-sessions";
 import { useUsageStore } from "./stores/usage-store";
 import type { TabWorktree } from "./types";
 import { TopBar } from "./components/top-bar/top-bar";
@@ -262,6 +263,7 @@ function App() {
         },
       );
 
+      const effectiveRoot = repoRoot ?? config.workingDir;
       const label = CLI_LABELS[finalConfig.cliType] ?? finalConfig.cliType;
       const title = worktree?.branch
         ? worktree.branch
@@ -272,14 +274,14 @@ function App() {
         status: "waiting",
         cliConfig: finalConfig,
         worktree: worktree
-          ? { path: worktree.path, branch: worktree.branch, headSha: worktree.headSha, repoRoot: repoRoot ?? config.workingDir }
+          ? { path: worktree.path, branch: worktree.branch, headSha: worktree.headSha, repoRoot: effectiveRoot }
           : undefined,
       };
       tabStore.openTab(tab);
       if (options?.splitIntoNewPane && tabStore.focusedGroupId && tabStore.layout) {
         tabStore.splitGroup(tabStore.focusedGroupId, "horizontal", paneId, "after");
       }
-      sidebarStore.setWorkingDir(finalConfig.workingDir);
+      sidebarStore.setWorkingDir(effectiveRoot);
       return paneId;
     } finally {
       spawningCount--;
@@ -386,10 +388,17 @@ function App() {
     }
   }
 
+  function collectActivePtyIds(): string[] {
+    return [
+      ...tabStore.tabs.map(t => effectivePtyId(t)),
+      ...bottomTerminal.termTabs().map(t => effectivePtyId(t)),
+    ];
+  }
+
   async function checkSessionHealth() {
     if (spawningCount > 0) return;
     try {
-      const frontendIds = tabStore.tabs.map(t => effectivePtyId(t));
+      const frontendIds = collectActivePtyIds();
       const [zombieInfos, backendIds] = await Promise.all([
         listZombieSessions(frontendIds),
         listSessionIds(),
@@ -397,17 +406,16 @@ function App() {
       setZombieSessions(zombieInfos);
 
       const activeTab = tabStore.activeTab;
-      if (activeTab && activeTab.cliConfig.cliType !== "file-viewer") {
-        setIsActiveTabStale(isSessionStale(backendIds, effectivePtyId(activeTab)));
-      } else {
-        setIsActiveTabStale(false);
-      }
+      const activePtyId = activeTab && activeTab.cliConfig.cliType !== "file-viewer"
+        ? effectivePtyId(activeTab)
+        : null;
+      const { isActiveStale } = analyzeSessionHealth(backendIds, frontendIds, activePtyId);
+      setIsActiveTabStale(isActiveStale);
     } catch {
       setZombieSessions([]);
       setIsActiveTabStale(false);
     }
   }
-
 
   createEffect(() => {
     // Re-check session health when the active tab changes
@@ -454,9 +462,8 @@ function App() {
   }
 
   async function handleKillAllZombies() {
-    const keepIds = tabStore.tabs.map(t => effectivePtyId(t));
     try {
-      await killZombieSessions(keepIds);
+      await killZombieSessions(collectActivePtyIds());
     } catch { /* best effort */ }
     void checkSessionHealth();
   }
@@ -513,7 +520,7 @@ function App() {
   onCleanup(() => window.removeEventListener("mlm-open-content", contentOpenHandler));
 
   async function quickLaunch(cliType: "claude-code" | "codex") {
-    const config: CliConfig = { cliType, mode: quickLaunchMode(), workingDir: sidebarStore.workingDir || "~" };
+    const config: CliConfig = { cliType, mode: quickLaunchMode(), workingDir: resolveLaunchDir(tabStore.activeTab, sidebarStore.workingDir) };
     setLastSpawnRequest(config);
     try { await spawnAndOpenTab(config, { splitIntoNewPane: true }); } catch (e) {
       console.error("Failed to quick-launch pane:", e);
@@ -596,7 +603,7 @@ function App() {
           hasActiveTab={!!tabStore.activeTab && tabStore.activeTab.cliConfig.cliType !== "file-viewer"}
           isActiveTabStale={isActiveTabStale()}
           onRefreshActiveTab={handleRefreshActiveTab}
-          usageSummary={usageStore.summary}
+          rateLimits={usageStore.rateLimits}
           onViewUsage={() => setShowUsageModal(true)}
         />
       </div>
@@ -696,7 +703,7 @@ function App() {
 
       <Show when={showUsageModal()}>
         <UsageModal
-          summary={usageStore.summary}
+          rateLimits={usageStore.rateLimits}
           onClose={() => setShowUsageModal(false)}
         />
       </Show>
