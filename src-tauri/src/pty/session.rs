@@ -149,6 +149,22 @@ impl StreamSession {
         }
     }
 
+    /// Returns true if `message` looks like a Claude Code slash command
+    /// (e.g. `/compact`, `/init`). Only bare `/lowercase-ascii` tokens qualify
+    /// — file paths like `/Users/foo` or multi-word text are excluded.
+    fn is_slash_command(message: &str) -> bool {
+        let bytes = message.as_bytes();
+        if bytes.first() != Some(&b'/') || bytes.len() < 2 {
+            return false;
+        }
+        // A valid slash command: `/` followed by one or more [a-z-] characters,
+        // optionally followed by a space and arguments.
+        let rest = &bytes[1..];
+        let cmd_end = rest.iter().position(|&b| b == b' ').unwrap_or(rest.len());
+        let cmd = &rest[..cmd_end];
+        !cmd.is_empty() && cmd.iter().all(|&b| b.is_ascii_lowercase() || b == b'-')
+    }
+
     /// Expand `~` at the start of a path to the user's home directory.
     /// Handles both `~` alone and `~/rest` forms.
     fn expand_tilde(path: &str) -> String {
@@ -165,13 +181,15 @@ impl StreamSession {
     }
 
     /// Build CLI arguments for the current message.
-    /// When `use_stream_input` is true (Claude Code with images), the message is sent
-    /// via stdin (stream-json) instead of as a positional argument.
+    /// When `use_stream_input` is true (Claude Code with images or slash commands),
+    /// the message is sent via stdin (stream-json) instead of as a positional argument.
     /// For Codex, images are passed via `--image <path>` flags.
     fn build_args(&self, message: &str, use_stream_input: bool, image_paths: &[String]) -> Vec<String> {
         let mut args = self.base_args.clone();
         match self.cli_type {
             CliType::ClaudeCode => {
+                // `-p` without a following value is valid when `--input-format
+                // stream-json` is present — the CLI reads the prompt from stdin.
                 args.push("-p".into());
                 if !use_stream_input {
                     args.push(message.into());
@@ -241,9 +259,12 @@ impl StreamSession {
         let guard = super::running_guard::MessageRunGuard::new(self.running_since.clone());
 
         let has_images = images.is_some_and(|imgs| !imgs.is_empty());
-        // Claude Code: images sent via stdin (stream-json)
-        // Codex: images saved to temp files and passed via --image flags
-        let use_stream_input = has_images && self.cli_type == CliType::ClaudeCode;
+        // Claude Code: images and slash commands sent via stdin (stream-json).
+        // Slash commands (e.g. /compact) must go through stdin so the CLI
+        // recognises them as interactive commands rather than literal prompts.
+        // Codex: images saved to temp files and passed via --image flags.
+        let is_claude_code = self.cli_type == CliType::ClaudeCode;
+        let use_stream_input = is_claude_code && (has_images || Self::is_slash_command(message));
         let image_paths = if has_images && self.cli_type == CliType::Codex {
             Self::save_images_to_temp(images.unwrap_or(&[]))?
         } else {
@@ -252,16 +273,17 @@ impl StreamSession {
 
         let (mut child, stdin, stdout, stderr) = self.spawn_cli_process(message, use_stream_input, &image_paths)?;
 
-        // When images are present for Claude Code, write stream-json input to stdin
+        // Write stream-json input to stdin for images and slash commands
         if use_stream_input {
-            match (stdin, images) {
-                (Some(stdin_handle), Some(imgs)) => {
+            match stdin {
+                Some(stdin_handle) => {
+                    let imgs = images.unwrap_or(&[]);
                     if let Err(e) = Self::write_stream_json_input(stdin_handle, message, imgs) {
                         let _ = child.kill();
                         return Err(e);
                     }
                 }
-                _ => {
+                None => {
                     let _ = child.kill();
                     return Err(AppError::PtyWriteFailed("stdin unavailable for stream-json input".into()));
                 }
@@ -353,8 +375,8 @@ impl StreamSession {
         Ok(paths)
     }
 
-    /// Write a stream-json user message (with image content blocks) to stdin,
-    /// then drop stdin so the CLI processes the input.
+    /// Write a stream-json user message to stdin, then drop stdin so the CLI
+    /// processes the input. Used for image attachments and slash commands.
     fn write_stream_json_input(
         stdin: std::process::ChildStdin,
         message: &str,
@@ -741,6 +763,33 @@ fn is_sensitive_env_key(key: &str) -> bool {
 mod tests {
     use super::{is_sensitive_env_key, StreamSession};
 
+    // ---- is_slash_command ----
+
+    #[test]
+    fn slash_command_recognized() {
+        assert!(StreamSession::is_slash_command("/compact"));
+        assert!(StreamSession::is_slash_command("/init"));
+        assert!(StreamSession::is_slash_command("/add-feature"));
+        assert!(StreamSession::is_slash_command("/compact extra args"));
+    }
+
+    #[test]
+    fn file_paths_not_slash_commands() {
+        assert!(!StreamSession::is_slash_command("/Users/foo/bar"));
+        assert!(!StreamSession::is_slash_command("/api/health"));
+        assert!(!StreamSession::is_slash_command("/tmp/test.txt"));
+    }
+
+    #[test]
+    fn non_slash_messages_not_slash_commands() {
+        assert!(!StreamSession::is_slash_command("hello world"));
+        assert!(!StreamSession::is_slash_command(""));
+        assert!(!StreamSession::is_slash_command("/"));
+        assert!(!StreamSession::is_slash_command("/123"));
+    }
+
+    // ---- expand_tilde ----
+
     #[test]
     fn expand_tilde_replaces_tilde_alone() {
         let home = std::env::var("HOME").unwrap_or_default();
@@ -767,6 +816,8 @@ mod tests {
     fn expand_tilde_passthrough_relative() {
         assert_eq!(StreamSession::expand_tilde("relative/path"), "relative/path");
     }
+
+    // ---- is_sensitive_env_key ----
 
     #[test]
     fn blocks_password_suffix() {
