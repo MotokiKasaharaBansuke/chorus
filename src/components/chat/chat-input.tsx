@@ -11,7 +11,7 @@ const CODEX_MODES: CliMode[] = ["default", "dangerously-skip-permissions"];
 const MODE_LABELS: Record<CliMode, string> = {
   default: "Default",
   plan: "Plan",
-  "dangerously-skip-permissions": "Bypass permissions",
+  "dangerously-skip-permissions": "Bypass",
 };
 
 interface ChatInputProps {
