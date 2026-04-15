@@ -20,6 +20,7 @@ import { WorktreeErrorDialog } from "./components/worktree/worktree-error-dialog
 import { WorktreeRemoveConfirm } from "./components/worktree/worktree-remove-confirm";
 import { UsageModal } from "./components/usage/usage-modal";
 import { classifyWorktreeError, type WorktreeErrorInfo } from "./lib/worktree/classify-error";
+import { resolveLaunchDir } from "./lib/worktree/resolve-launch-dir";
 import { resetWorktree } from "./lib/worktree/reset-worktree";
 import { countZombies, isSessionStale } from "./lib/zombie-sessions";
 import { useUsageStore } from "./stores/usage-store";
@@ -497,7 +498,7 @@ function App() {
   onCleanup(() => window.removeEventListener("mlm-open-content", contentOpenHandler));
 
   async function quickLaunch(cliType: "claude-code" | "codex") {
-    const config: CliConfig = { cliType, mode: quickLaunchMode(), workingDir: sidebarStore.workingDir || "~" };
+    const config: CliConfig = { cliType, mode: quickLaunchMode(), workingDir: resolveLaunchDir(tabStore.activeTab, sidebarStore.workingDir) };
     setLastSpawnRequest(config);
     try { await spawnAndOpenTab(config, { splitIntoNewPane: true }); } catch (e) {
       console.error("Failed to quick-launch pane:", e);
