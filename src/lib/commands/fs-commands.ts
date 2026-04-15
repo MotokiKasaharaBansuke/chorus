@@ -42,3 +42,7 @@ export async function readCodexSession(sessionPath: string): Promise<string[]> {
 export async function gitChangedFiles(workingDir: string): Promise<string[]> {
   return invoke<string[]>("git_changed_files", { workingDir });
 }
+
+export async function gitHasTrackedChanges(workingDir: string): Promise<boolean> {
+  return invoke<boolean>("git_has_tracked_changes", { workingDir });
+}

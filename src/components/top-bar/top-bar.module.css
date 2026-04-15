@@ -105,3 +105,25 @@
   min-width: 36px;
   text-align: center;
 }
+
+.zombieBtn {
+  position: relative;
+  color: #c74e39;
+}
+.zombieBtn:hover { color: #e86550; background: #3a2020; }
+.zombieBadge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  font-size: 9px;
+  font-weight: 700;
+  background: #c74e39;
+  color: #fff;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}

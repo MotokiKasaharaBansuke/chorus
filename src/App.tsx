@@ -7,12 +7,20 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTabStore } from "./stores/tab-store";
 import { useSidebarStore } from "./stores/sidebar-store";
 import { useSettingsStore } from "./stores/settings-store";
-import { spawnPty, killPty } from "./lib/commands";
+import { spawnPty, killPty, findGitRepoRoot, createWorktree, listWorktrees, removeWorktree, gitHasTrackedChanges, listSessionIds, killZombieSessions } from "./lib/commands";
 import { buildSavedSession, persistSession, restoreSession, tryLoadSession } from "./lib/session";
+import { spawnPaneWithWorktree } from "./lib/worktree/spawn-pane";
+import { decideCloseAction } from "./lib/worktree/decide-close-action";
 import { TerminalPanel } from "./components/terminal/terminal-panel";
 import { Sidebar } from "./components/sidebar/sidebar";
 import { LayoutRenderer } from "./components/layout/layout-renderer";
 import { CliSettingsModal } from "./components/settings/cli-settings-modal";
+import { WorktreeSettingsModal } from "./components/worktree/worktree-settings-modal";
+import { WorktreeErrorDialog } from "./components/worktree/worktree-error-dialog";
+import { WorktreeRemoveConfirm } from "./components/worktree/worktree-remove-confirm";
+import { classifyWorktreeError, type WorktreeErrorInfo } from "./lib/worktree/classify-error";
+import { countZombies } from "./lib/zombie-sessions";
+import type { TabWorktree } from "./types";
 import { TopBar } from "./components/top-bar/top-bar";
 import { useBottomTerminal } from "./hooks/use-bottom-terminal";
 import { useKeyboardShortcuts } from "./hooks/use-keyboard-shortcuts";
@@ -30,6 +38,24 @@ function App() {
   const [quickLaunchMode, setQuickLaunchMode] = createSignal<CliMode>("dangerously-skip-permissions");
   const [fontSize, setFontSize] = createSignal(11);
   const [zoom, setZoom] = createSignal(100);
+
+  const [isWorktreeSettingsOpen, setIsWorktreeSettingsOpen] = createSignal(false);
+  const [worktreeError, setWorktreeError] = createSignal<WorktreeErrorInfo | null>(null);
+  const [lastSpawnRequest, setLastSpawnRequest] = createSignal<CliConfig | null>(null);
+  const [removeConfirm, setRemoveConfirm] = createSignal<
+    { worktree: TabWorktree; isDirty: boolean } | null
+  >(null);
+  const [activeRepoRoot, setActiveRepoRoot] = createSignal<string | null>(null);
+  const [zombieCount, setZombieCount] = createSignal(0);
+  let spawningCount = 0;
+
+  // Track the repo root of the currently active pane so the worktree
+  // settings list can display that repo's worktrees.
+  createEffect(() => {
+    const dir = tabStore.activeTab?.cliConfig.workingDir;
+    if (!dir) { setActiveRepoRoot(null); return; }
+    findGitRepoRoot(dir).then(setActiveRepoRoot).catch(() => setActiveRepoRoot(null));
+  });
 
   const bottomTerminal = useBottomTerminal(() => sidebarStore.workingDir);
 
@@ -89,6 +115,10 @@ function App() {
   let lastDropTime = 0;
 
   onMount(async () => {
+    // Load persistent settings (settings.json) before session restore so
+    // any UI that reads settings starts from the correct values.
+    await settingsStore.initialize();
+
     // Restore previous session
     const savedSession = await tryLoadSession();
     if (savedSession) {
@@ -107,6 +137,8 @@ function App() {
       const dir = await invoke<string | null>("get_initial_directory");
       if (dir) sidebarStore.setWorkingDir(dir);
     } catch { /* ignore */ }
+
+    void checkZombies();
 
     // Listen for IPC "open directory" events sent by the `mlm` CLI.
     // Always adds a new split pane (not a tab in the current pane), then equalizes.
@@ -181,20 +213,66 @@ function App() {
   const CLI_LABELS: Record<"claude-code" | "codex" | "shell", string> = { "claude-code": "Claude", "codex": "Codex", "shell": "Shell" };
 
   async function spawnAndOpenTab(config: CliConfig, options?: { splitIntoNewPane?: boolean }) {
-    const id = await spawnPty(config);
-    const label = CLI_LABELS[config.cliType] ?? config.cliType;
-    const tab: Tab = { id, title: `${label} ${tabStore.tabs.length + 1}`, status: "running", cliConfig: config };
-    tabStore.openTab(tab);
-    if (options?.splitIntoNewPane && tabStore.focusedGroupId && tabStore.layout) {
-      tabStore.splitGroup(tabStore.focusedGroupId, "horizontal", id, "after");
+    spawningCount++;
+    try {
+      const { paneId, finalConfig, worktree } = await spawnPaneWithWorktree(
+        config,
+        settingsStore.worktree,
+        {
+          findGitRepoRoot,
+          createWorktree: async ({ repoRoot, baseBranch, newBranch, worktree: w }) =>
+            await createWorktree({
+              repoRoot,
+              baseBranch,
+              newBranch,
+              basePath: w.basePath,
+              postCreateHooks: w.postCreateHooks,
+              shareCargoTarget: w.shareCargoTarget,
+              spotlightExclude: w.spotlightExclude,
+            }),
+          spawnPty,
+        },
+      );
+
+      const label = CLI_LABELS[finalConfig.cliType] ?? finalConfig.cliType;
+      const suffix = worktree ? ` · ${worktree.branch}` : "";
+      const tab: Tab = {
+        id: paneId,
+        title: `${label} ${tabStore.tabs.length + 1}${suffix}`,
+        status: "running",
+        cliConfig: finalConfig,
+        worktree: worktree
+          ? { path: worktree.path, branch: worktree.branch, headSha: worktree.headSha }
+          : undefined,
+      };
+      tabStore.openTab(tab);
+      if (options?.splitIntoNewPane && tabStore.focusedGroupId && tabStore.layout) {
+        tabStore.splitGroup(tabStore.focusedGroupId, "horizontal", paneId, "after");
+      }
+      sidebarStore.setWorkingDir(finalConfig.workingDir);
+      return paneId;
+    } finally {
+      spawningCount--;
+      void checkZombies();
     }
-    sidebarStore.setWorkingDir(config.workingDir);
-    return id;
   }
 
   async function handleNewTab(config?: CliConfig) {
     if (!config) { setIsModalOpen(true); return; }
-    try { await spawnAndOpenTab(config); } catch (e) { console.error("Failed to open pane:", e); }
+    setLastSpawnRequest(config);
+    try { await spawnAndOpenTab(config); } catch (e) {
+      console.error("Failed to open pane:", e);
+      setWorktreeError(classifyWorktreeError(e));
+    }
+  }
+
+  async function runWorktreeRemove(wt: TabWorktree) {
+    try {
+      await removeWorktree(wt.path, true);
+    } catch (e) {
+      console.error("Failed to remove worktree:", e);
+      setWorktreeError(classifyWorktreeError(e));
+    }
   }
 
   async function handleCloseTab(id: string) {
@@ -203,6 +281,61 @@ function App() {
       try { await killPty(tab ? effectivePtyId(tab) : id); } catch { /* */ }
     }
     tabStore.closeTab(id);
+    void checkZombies();
+
+    const wt = tab?.worktree;
+    if (!wt) return;
+    const onPaneClose = settingsStore.worktree.onPaneClose;
+    if (!onPaneClose.autoRemoveOnClose && !onPaneClose.promptRemoveWorktree) return;
+
+    // "Dirty" means the user actually edited tracked files — untracked
+    // hook artifacts (e.g. copied `.cargo/config.toml`) are ignored so
+    // auto-remove can run on a pane the user never touched.
+    // Conservative: on check failure, treat as dirty so silent removal
+    // cannot proceed against an unknown state.
+    let isDirty = true;
+    try {
+      isDirty = await gitHasTrackedChanges(wt.path);
+    } catch (e) {
+      console.warn("gitHasTrackedChanges failed; treating worktree as dirty:", e);
+    }
+
+    const action = decideCloseAction(onPaneClose, isDirty);
+    if (action.kind === "silent-remove") {
+      void runWorktreeRemove(wt);
+    } else if (action.kind === "prompt") {
+      setRemoveConfirm({ worktree: wt, isDirty: action.isDirty });
+    }
+  }
+
+  async function checkZombies() {
+    if (spawningCount > 0) return;
+    try {
+      const backendIds = await listSessionIds();
+      const frontendIds = tabStore.tabs.map(t => effectivePtyId(t));
+      setZombieCount(countZombies(backendIds, frontendIds));
+    } catch {
+      setZombieCount(0);
+    }
+  }
+
+  async function handleKillZombies() {
+    const keepIds = tabStore.tabs.map(t => effectivePtyId(t));
+    try {
+      await killZombieSessions(keepIds);
+    } catch { /* best effort */ }
+    void checkZombies();
+  }
+
+  async function performWorktreeRemove() {
+    const entry = removeConfirm();
+    if (!entry) return;
+    setRemoveConfirm(null);
+    if (settingsStore.worktree.onPaneClose.backgroundDelete) {
+      void runWorktreeRemove(entry.worktree);
+    } else {
+      await runWorktreeRemove(entry.worktree);
+    }
   }
 
   async function handleRestartTab(tab: Tab) {
@@ -247,7 +380,11 @@ function App() {
 
   async function quickLaunch(cliType: "claude-code" | "codex") {
     const config: CliConfig = { cliType, mode: quickLaunchMode(), workingDir: sidebarStore.workingDir || "~" };
-    try { await spawnAndOpenTab(config, { splitIntoNewPane: true }); } catch (e) { console.error("Failed to quick-launch pane:", e); }
+    setLastSpawnRequest(config);
+    try { await spawnAndOpenTab(config, { splitIntoNewPane: true }); } catch (e) {
+      console.error("Failed to quick-launch pane:", e);
+      setWorktreeError(classifyWorktreeError(e));
+    }
   }
 
   // --- Zoom & font size ---
@@ -317,6 +454,9 @@ function App() {
           onReviewCliTypeChange={(t) => settingsStore.setReviewCliType(t)}
           fontSize={fontSize()}
           onFontSizeChange={applyFontSize}
+          onOpenWorktreeSettings={() => setIsWorktreeSettingsOpen(true)}
+          zombieCount={zombieCount()}
+          onKillZombies={handleKillZombies}
         />
       </div>
 
@@ -384,6 +524,33 @@ function App() {
         defaultWorkingDir={sidebarStore.workingDir}
         onSubmit={(config) => { setIsModalOpen(false); handleNewTab(config); }}
         onCancel={() => setIsModalOpen(false)}
+      />
+
+      <WorktreeSettingsModal
+        isOpen={isWorktreeSettingsOpen()}
+        settings={settingsStore.worktree}
+        repoRoot={activeRepoRoot()}
+        onChange={(patch) => settingsStore.patchWorktree(patch)}
+        loadWorktrees={listWorktrees}
+        removeWorktree={removeWorktree}
+        onClose={() => setIsWorktreeSettingsOpen(false)}
+      />
+
+      <WorktreeErrorDialog
+        error={worktreeError()}
+        onRetry={() => {
+          const cfg = lastSpawnRequest();
+          setWorktreeError(null);
+          if (cfg) handleNewTab(cfg);
+        }}
+        onClose={() => setWorktreeError(null)}
+      />
+
+      <WorktreeRemoveConfirm
+        worktree={removeConfirm()?.worktree ?? null}
+        isDirty={removeConfirm()?.isDirty ?? false}
+        onKeep={() => setRemoveConfirm(null)}
+        onRemove={() => { void performWorktreeRemove(); }}
       />
     </div>
   );

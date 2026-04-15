@@ -32,7 +32,10 @@ pnpm vitest run     # Run tests
   - `commands/` - Tauri commands
   - `cli/` - CLI definitions (binary path detection, arg building)
   - `fs/` - File tree traversal
+  - `settings/` - `~/.config/chorus/settings.json` persistence (atomic + flock + corrupt recovery)
+  - `worktree/` - git worktree CRUD + post-create hooks
   - `error.rs` - Shared error type
+  - `config_path.rs` - `~/.config/chorus/` path helpers
 
 ## Release
 
@@ -60,3 +63,11 @@ pnpm vitest run     # Run tests
 - VS Code-style pane groups with tab drag-and-drop
 - Layout tree as a recursive binary split (immutable pure functions)
 - Temp images stored in `/tmp/chorus-images/`, with 3-stage cleanup
+
+## Worktree Auto-Create (settings.json)
+
+- Enable via TopBar cog icon → **Worktree settings…**
+- When on, `⌘T` prompts for a branch name. Chorus runs `git worktree add -b <branch> -- <path> <baseSHA>` under `basePath` and starts the PTY inside the new worktree.
+- Branch names go through a strict ASCII allowlist; the target path is always re-derived on the backend (frontend never supplies it).
+- Post-create hooks: copy `.cargo/config.toml` (size-capped, no symlink follow), optional `.env*` symlinks (allowlist only), and `pnpm install` spawned detached (`setsid`) when a `package.json` exists.
+- Closing a pane that owns an auto-worktree prompts for removal; dirty trees trigger an extra warning.

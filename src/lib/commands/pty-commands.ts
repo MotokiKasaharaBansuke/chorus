@@ -51,3 +51,11 @@ export async function resizePty(ptyId: string, cols: number, rows: number): Prom
 export async function killPty(ptyId: string): Promise<void> {
   return invoke("kill_pty", { ptyId });
 }
+
+export async function listSessionIds(): Promise<string[]> {
+  return invoke<string[]>("list_session_ids");
+}
+
+export async function killZombieSessions(keepIds: string[]): Promise<number> {
+  return invoke<number>("kill_zombie_sessions", { keepIds });
+}

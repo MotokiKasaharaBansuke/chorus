@@ -17,6 +17,9 @@ interface TopBarProps {
   onReviewCliTypeChange: (type: ReviewCliType) => void;
   fontSize: number;
   onFontSizeChange: (size: number) => void;
+  onOpenWorktreeSettings: () => void;
+  zombieCount: number;
+  onKillZombies: () => void;
 }
 
 export function TopBar(props: TopBarProps) {
@@ -66,6 +69,13 @@ export function TopBar(props: TopBarProps) {
               <div class={`${styles.dropdownItem} ${props.reviewCliType === "claude-code" ? styles.dropdownActive : ""}`}
                 onClick={() => { props.onReviewCliTypeChange("claude-code"); setShowSettings(false); }}>Claude Code</div>
               <div class={styles.divider} />
+              <div
+                class={styles.dropdownItem}
+                onClick={() => { setShowSettings(false); props.onOpenWorktreeSettings(); }}
+              >
+                Worktree settings…
+              </div>
+              <div class={styles.divider} />
               <div class={styles.dropdownTitle}>Font Size</div>
               <div class={styles.fontRow}>
                 <button class={styles.fontBtn} onClick={() => props.onFontSizeChange(props.fontSize - 1)}>−</button>
@@ -80,6 +90,18 @@ export function TopBar(props: TopBarProps) {
             <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           </svg>
         </button>
+        <Show when={props.zombieCount > 0}>
+          <button
+            class={`${styles.btn} ${styles.zombieBtn}`}
+            onClick={props.onKillZombies}
+            title={`Kill ${props.zombieCount} zombie session(s)`}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path d="M1 1l14 14M1 15L15 1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <span class={styles.zombieBadge}>{props.zombieCount}</span>
+          </button>
+        </Show>
         <button class={styles.btn} onClick={() => setShowHelp(true)} title="Keyboard shortcuts & CLI commands">
           ?
         </button>

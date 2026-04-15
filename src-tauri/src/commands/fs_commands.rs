@@ -392,3 +392,14 @@ pub fn git_changed_files(working_dir: String) -> Result<Vec<String>, AppError> {
     files.truncate(MAX_CHANGED_FILES);
     Ok(files)
 }
+
+/// Returns true when the working tree has any change relative to HEAD
+/// (modified or staged tracked files). Deliberately ignores untracked
+/// files so that post-create-hook artifacts (e.g. `.cargo/config.toml`
+/// copied into a new worktree) don't look like user edits.
+#[tauri::command]
+pub fn git_has_tracked_changes(working_dir: String) -> Result<bool, AppError> {
+    validate_path_scope(&working_dir)?;
+    let files = run_git_with_timeout(&["diff", "HEAD", "--name-only"], &working_dir)?;
+    Ok(!files.is_empty())
+}

@@ -5,9 +5,10 @@ export type {
   CliMode,
   CliConfig,
   Tab,
+  TabWorktree,
   TabStoreState,
 } from "./tab";
-export { effectivePtyId } from "./tab";
+export { effectivePtyId, isTabStreaming } from "./tab";
 
 export type { FileNode } from "./file-tree";
 export type { AttachedImage, ChatBlock, ChatMessage } from "./chat";
