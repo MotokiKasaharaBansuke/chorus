@@ -100,12 +100,20 @@ export function useTerminal(options: UseTerminalOptions) {
       terminal.write(batch);
     }
 
+    let lastStatus: ReturnType<typeof detectStatus> = null;
     unsubscribePtyOutput = ptyOutputDispatcher.subscribe(options.ptyId, (payload) => {
       if (!terminal) return;
       pendingWrites.push(payload.data);
-      const status = detectStatus(payload.data, options.cliType);
-      if (status) options.onStatusChange(status);
-      if (rafId === null) rafId = requestAnimationFrame(flushWrites);
+      lastStatus = detectStatus(payload.data, options.cliType) ?? lastStatus;
+      if (rafId === null) {
+        rafId = requestAnimationFrame(() => {
+          flushWrites();
+          if (lastStatus) {
+            options.onStatusChange(lastStatus);
+            lastStatus = null;
+          }
+        });
+      }
     });
 
     // Subscribe to PTY exit via global dispatcher

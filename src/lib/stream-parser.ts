@@ -7,6 +7,7 @@ export class StreamParser {
   private messages: ChatMessage[] = [];
   private listeners: Array<(messages: ChatMessage[]) => void> = [];
   private statusListeners: Array<(status: StreamingStatus) => void> = [];
+  private costListeners: Array<(messages: readonly ChatMessage[]) => void> = [];
   private isRafScheduled = false;
 
   onUpdate(fn: (messages: ChatMessage[]) => void): () => void {
@@ -20,6 +21,12 @@ export class StreamParser {
   onStatusChange(fn: (status: StreamingStatus) => void): () => void {
     this.statusListeners.push(fn);
     return () => { this.statusListeners = this.statusListeners.filter(l => l !== fn); };
+  }
+
+  /** Fires only when cost/token data changes (on `result` events and session load). */
+  onCostUpdate(fn: (messages: readonly ChatMessage[]) => void): () => void {
+    this.costListeners.push(fn);
+    return () => { this.costListeners = this.costListeners.filter(l => l !== fn); };
   }
 
   private buildSnapshot(): ChatMessage[] {
@@ -50,6 +57,11 @@ export class StreamParser {
 
   private notifyStatus(status: StreamingStatus) {
     for (const fn of this.statusListeners) fn(status);
+  }
+
+  private notifyCost() {
+    const snapshot = this.buildSnapshot();
+    for (const fn of this.costListeners) fn(snapshot);
   }
 
   /** Narrows `unknown` to a plain object record, or returns undefined.
@@ -153,6 +165,7 @@ export class StreamParser {
       } catch { /* skip bad lines */ }
     }
     this.notify();
+    this.notifyCost();
   }
 
   /** @param images Caller MUST validate paths via isValidTempImagePath before passing. */
@@ -306,6 +319,7 @@ export class StreamParser {
       outputTokens: typeof usageObj?.output_tokens === "number" ? usageObj.output_tokens : undefined,
     };
     this.notifyBatched();
+    this.notifyCost();
   }
 
   private handleTurnComplete(_data: Record<string, unknown>) {

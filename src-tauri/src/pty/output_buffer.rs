@@ -1,8 +1,10 @@
 use std::sync::mpsc;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use serde::Serialize;
 
 const MAX_BUFFER_BYTES: usize = 256 * 1024;
+const BATCH_FLUSH_TIMEOUT: Duration = Duration::from_millis(16);
 
 #[derive(Clone, Serialize)]
 pub struct PtyOutputPayload {
@@ -10,11 +12,63 @@ pub struct PtyOutputPayload {
     pub data: String,
 }
 
-/// Per-session output buffer.
+#[derive(Clone, Serialize)]
+pub struct PtyOutputBatchPayload {
+    pub id: String,
+    pub chunks: Vec<String>,
+}
+
+struct DecoderState {
+    pending: Vec<u8>,
+    utf8_carry: Vec<u8>,
+    overflow_warned: bool,
+}
+
+impl DecoderState {
+    fn new() -> Self {
+        Self {
+            pending: Vec::with_capacity(8192),
+            utf8_carry: Vec::new(),
+            overflow_warned: false,
+        }
+    }
+
+    fn decode_chunk(&mut self, chunk: Vec<u8>) -> Option<String> {
+        let remaining_capacity = MAX_BUFFER_BYTES.saturating_sub(self.pending.len());
+        if remaining_capacity == 0 {
+            if !self.overflow_warned {
+                tracing::warn!("PTY output buffer full — data dropped");
+                self.overflow_warned = true;
+            }
+            self.utf8_carry.clear();
+            return None;
+        }
+
+        let data = if self.utf8_carry.is_empty() {
+            chunk
+        } else {
+            let mut v = std::mem::take(&mut self.utf8_carry);
+            v.extend_from_slice(&chunk);
+            v
+        };
+
+        let bytes_to_take = data.len().min(remaining_capacity);
+        self.pending.extend_from_slice(&data[..bytes_to_take]);
+        self.overflow_warned = false;
+
+        let (text, carry) = decode_utf8_carrying(&self.pending);
+        self.utf8_carry = carry;
+        self.pending.clear();
+
+        if text.is_empty() { None } else { Some(text) }
+    }
+}
+
+/// Per-session output buffer with 16ms batching.
 ///
-/// Uses an mpsc channel instead of Mutex+sleep: the flush thread wakes up
-/// immediately when data arrives (not on a fixed 16ms timer), reducing latency
-/// for all 20 sessions running concurrently.
+/// Collects raw PTY chunks and flushes them as a single IPC batch event
+/// every 16ms (one frame at 60fps), reducing IPC overhead from N events
+/// per frame to 1 — critical when 20 sessions run concurrently.
 pub struct OutputBuffer {
     tx: mpsc::Sender<Vec<u8>>,
 }
@@ -23,76 +77,67 @@ impl OutputBuffer {
     pub fn new(pty_id: String, app: AppHandle) -> Self {
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
 
+        let id_clone = pty_id.clone();
         let thread_name = format!("pty-output-buffer[{pty_id}]");
-        let _ = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
-                let mut pending: Vec<u8> = Vec::with_capacity(8192);
-                // Carries an incomplete multi-byte UTF-8 sequence across chunk boundaries
-                let mut utf8_carry: Vec<u8> = Vec::new();
-                let mut overflow_warned = false;
+                let mut state = DecoderState::new();
+                let mut batch: Vec<String> = Vec::with_capacity(8);
 
                 loop {
-                    // Block until data arrives (zero CPU when idle)
                     match rx.recv() {
                         Ok(chunk) => {
-                            let space = MAX_BUFFER_BYTES.saturating_sub(pending.len());
-                            if space == 0 {
-                                if !overflow_warned {
-                                    tracing::warn!(id = %pty_id, "PTY output buffer full — data dropped");
-                                    overflow_warned = true;
-                                }
-                                // Continuation bytes for any carry were in the dropped data;
-                                // clear carry to avoid prepending stale bytes to the next valid chunk.
-                                utf8_carry.clear();
-                                // Drain the channel to avoid backing up the sender.
-                                while rx.try_recv().is_ok() {}
-                            } else {
-                                // Prepend carry-over from previous iteration before accepting new data
-                                let data = if utf8_carry.is_empty() {
-                                    chunk
-                                } else {
-                                    let mut v = std::mem::take(&mut utf8_carry);
-                                    v.extend_from_slice(&chunk);
-                                    v
-                                };
+                            if let Some(text) = state.decode_chunk(chunk) {
+                                batch.push(text);
+                            }
 
-                                let n = data.len().min(space);
-                                pending.extend_from_slice(&data[..n]);
-                                overflow_warned = false;
-
-                                // Drain additional queued chunks
-                                while let Ok(more) = rx.try_recv() {
-                                    let space = MAX_BUFFER_BYTES.saturating_sub(pending.len());
-                                    if space == 0 { break; }
-                                    let n = more.len().min(space);
-                                    pending.extend_from_slice(&more[..n]);
-                                }
-
-                                // Decode, carrying any incomplete trailing sequence to the next cycle
-                                let (text, carry) = decode_utf8_carrying(&pending);
-                                utf8_carry = carry;
-                                pending.clear();
-
-                                if !text.is_empty() {
-                                    let _ = app.emit("pty-output", PtyOutputPayload {
-                                        id: pty_id.clone(),
-                                        data: text,
-                                    });
+                            loop {
+                                match rx.recv_timeout(BATCH_FLUSH_TIMEOUT) {
+                                    Ok(more) => {
+                                        if let Some(text) = state.decode_chunk(more) {
+                                            batch.push(text);
+                                        }
+                                    }
+                                    Err(mpsc::RecvTimeoutError::Timeout) => break,
+                                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                        flush_batch(&app, &pty_id, &mut batch);
+                                        return;
+                                    }
                                 }
                             }
+
+                            flush_batch(&app, &pty_id, &mut batch);
                         }
-                        Err(_) => break, // sender dropped → session closed
+                        Err(_) => break,
                     }
                 }
+            })
+            .unwrap_or_else(|e| {
+                tracing::error!(pty_id = %id_clone, error = %e, "Failed to spawn output buffer thread");
+                panic!("output buffer thread spawn failed for {id_clone}: {e}");
             });
 
         Self { tx }
     }
 
     pub fn push(&self, data: &[u8]) {
-        // Non-blocking: if the channel is disconnected we silently drop
-        let _ = self.tx.send(data.to_vec());
+        if let Err(e) = self.tx.send(data.to_vec()) {
+            tracing::warn!(error = %e, "output buffer send failed (session closed?)");
+        }
+    }
+}
+
+fn flush_batch(app: &AppHandle, pty_id: &str, batch: &mut Vec<String>) {
+    if batch.is_empty() {
+        return;
+    }
+    let chunks = std::mem::take(batch);
+    if let Err(e) = app.emit("pty-output-batch", PtyOutputBatchPayload {
+        id: pty_id.to_string(),
+        chunks,
+    }) {
+        tracing::warn!(pty_id = %pty_id, error = %e, "pty output batch emit failed");
     }
 }
 
@@ -109,7 +154,6 @@ mod tests {
 
     #[test]
     fn complete_multibyte_returns_no_carry() {
-        // U+3042 HIRAGANA LETTER A = 0xE3 0x81 0x82
         let (text, carry) = decode_utf8_carrying("あ".as_bytes());
         assert_eq!(text, "あ");
         assert!(carry.is_empty());
@@ -117,7 +161,6 @@ mod tests {
 
     #[test]
     fn incomplete_multibyte_carried_over() {
-        // Send first 2 of 3 bytes for U+3042
         let partial = &"あ".as_bytes()[..2];
         let (text, carry) = decode_utf8_carrying(partial);
         assert!(text.is_empty());
@@ -137,7 +180,6 @@ mod tests {
 
     #[test]
     fn invalid_bytes_dropped_not_carried() {
-        // 0xFF is not a valid UTF-8 start byte → dropped, no carry
         let (text, carry) = decode_utf8_carrying(&[0xFF]);
         assert!(text.is_empty());
         assert!(carry.is_empty());
@@ -145,7 +187,6 @@ mod tests {
 
     #[test]
     fn mixed_valid_then_incomplete() {
-        // "hi" + 2-of-3 bytes of U+3042
         let mut bytes = b"hi".to_vec();
         bytes.extend_from_slice(&"あ".as_bytes()[..2]);
         let (text, carry) = decode_utf8_carrying(&bytes);
@@ -173,14 +214,11 @@ pub(crate) fn decode_utf8_carrying(bytes: &[u8]) -> (String, Vec<u8>) {
         Ok(s) => (s.to_string(), Vec::new()),
         Err(e) => {
             let valid_up_to = e.valid_up_to();
-            // error_len() == None  → sequence is incomplete (not enough bytes yet) → carry over
-            // error_len() == Some  → sequence is invalid (wrong bytes) → drop
             let carry = if e.error_len().is_none() {
                 bytes[valid_up_to..].to_vec()
             } else {
                 Vec::new()
             };
-            // bytes[..valid_up_to] is verified valid UTF-8 by the preceding from_utf8 call
             let text = String::from_utf8(bytes[..valid_up_to].to_vec()).unwrap_or_default();
             (text, carry)
         }

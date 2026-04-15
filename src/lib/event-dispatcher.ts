@@ -7,6 +7,20 @@ interface BatchSource<T> {
   unpack: (payload: unknown) => T[];
 }
 
+function createBatchUnpack(
+  field: string,
+): (payload: unknown) => Array<{ id: string; data: string }> {
+  return (payload) => {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+    const p = payload as Record<string, unknown>;
+    const id = typeof p.id === "string" ? p.id : "";
+    const items = Array.isArray(p[field]) ? (p[field] as unknown[]) : [];
+    return items
+      .filter((v): v is string => typeof v === "string")
+      .map((data) => ({ id, data }));
+  };
+}
+
 function createDispatcher<T extends { id: string }>(
   eventName: string,
   batchSource?: BatchSource<T>,
@@ -49,20 +63,12 @@ function createDispatcher<T extends { id: string }>(
   };
 }
 
-export const ptyOutputDispatcher = createDispatcher<{ id: string; data: string }>("pty-output");
+export const ptyOutputDispatcher = createDispatcher<{ id: string; data: string }>(
+  "pty-output",
+  { eventName: "pty-output-batch", unpack: createBatchUnpack("chunks") },
+);
 export const ptyExitDispatcher = createDispatcher<{ id: string; code: number | null }>("pty-exit");
 export const streamEventDispatcher = createDispatcher<{ id: string; data: string }>(
   "stream-event",
-  {
-    eventName: "stream-event-batch",
-    unpack: (payload) => {
-      if (!payload || typeof payload !== "object") return [];
-      const p = payload as Record<string, unknown>;
-      const id = typeof p.id === "string" ? p.id : "";
-      const lines = Array.isArray(p.lines) ? p.lines : [];
-      return lines
-        .filter((l): l is string => typeof l === "string")
-        .map((data) => ({ id, data }));
-    },
-  },
+  { eventName: "stream-event-batch", unpack: createBatchUnpack("lines") },
 );

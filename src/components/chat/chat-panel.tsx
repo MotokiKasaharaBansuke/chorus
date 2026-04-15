@@ -55,7 +55,8 @@ export function ChatPanel(props: ChatPanelProps) {
     requestAnimationFrame(() => {
       if (scrollRef) scrollRef.scrollTop = scrollRef.scrollHeight;
     });
-
+  });
+  parser.onCostUpdate((msgs) => {
     let costUsd = 0;
     let inputTokens = 0;
     let outputTokens = 0;

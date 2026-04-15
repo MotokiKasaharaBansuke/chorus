@@ -347,3 +347,92 @@ describe("StreamParser.addUserMessage with images", () => {
     expect(blocks[0]).toEqual({ kind: "text", text: "hello" });
   });
 });
+
+// ---- onCostUpdate callback ----
+
+describe("StreamParser.onCostUpdate", () => {
+  it("fires on result event", () => {
+    const parser = new StreamParser();
+    let callCount = 0;
+    parser.onCostUpdate(() => { callCount++; });
+    parser.processLine(assistantLine("hello"));
+    expect(callCount).toBe(0);
+    parser.processLine(resultLine(0.005, 1200, 100, 50));
+    expect(callCount).toBe(1);
+  });
+
+  it("fires on loadSession", () => {
+    const parser = new StreamParser();
+    let callCount = 0;
+    parser.onCostUpdate(() => { callCount++; });
+    parser.loadSession([assistantLine("hello"), resultLine(0.01, 500, 200, 100)]);
+    expect(callCount).toBe(1);
+  });
+
+  it("does not fire on assistant events", () => {
+    const parser = new StreamParser();
+    let callCount = 0;
+    parser.onCostUpdate(() => { callCount++; });
+    parser.processLine(assistantLine("hello"));
+    parser.processLine(assistantLine("world"));
+    expect(callCount).toBe(0);
+  });
+
+  it("provides messages snapshot with cost data", () => {
+    const parser = new StreamParser();
+    let receivedMsgs: readonly unknown[] = [];
+    parser.onCostUpdate((msgs) => { receivedMsgs = msgs; });
+    parser.processLine(assistantLine("hello"));
+    parser.processLine(resultLine(0.005, 1200, 100, 50));
+    expect(receivedMsgs).toHaveLength(1);
+    expect((receivedMsgs[0] as { costUsd: number }).costUsd).toBe(0.005);
+  });
+
+  it("unsubscribe stops callbacks", () => {
+    const parser = new StreamParser();
+    let callCount = 0;
+    const unsub = parser.onCostUpdate(() => { callCount++; });
+    unsub();
+    parser.processLine(assistantLine("hello"));
+    parser.processLine(resultLine(0.005, 1200, 100, 50));
+    expect(callCount).toBe(0);
+  });
+});
+
+// ---- onStatusChange callback ----
+
+describe("StreamParser.onStatusChange", () => {
+  it("fires streaming on init", () => {
+    const parser = new StreamParser();
+    const statuses: string[] = [];
+    parser.onStatusChange((s) => statuses.push(s));
+    parser.processLine(JSON.stringify({ type: "system", subtype: "init" }));
+    expect(statuses).toEqual(["streaming"]);
+  });
+
+  it("fires idle on result", () => {
+    const parser = new StreamParser();
+    const statuses: string[] = [];
+    parser.onStatusChange((s) => statuses.push(s));
+    parser.processLine(assistantLine("hello"));
+    parser.processLine(resultLine(0.005, 1200, 100, 50));
+    expect(statuses).toEqual(["idle"]);
+  });
+
+  it("fires idle on turn_complete", () => {
+    const parser = new StreamParser();
+    const statuses: string[] = [];
+    parser.onStatusChange((s) => statuses.push(s));
+    parser.processLine(JSON.stringify({ type: "turn_complete" }));
+    expect(statuses).toEqual(["idle"]);
+  });
+
+  it("unsubscribe stops callbacks", () => {
+    const parser = new StreamParser();
+    const statuses: string[] = [];
+    const unsub = parser.onStatusChange((s) => statuses.push(s));
+    unsub();
+    parser.processLine(JSON.stringify({ type: "system", subtype: "init" }));
+    expect(statuses).toEqual([]);
+  });
+});
