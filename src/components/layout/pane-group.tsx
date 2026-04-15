@@ -291,12 +291,17 @@ export function PaneGroup(props: PaneGroupProps) {
           {/* Active tab's directory */}
           {(() => {
             const activeTab = () => store.getTab(props.node.activeTabId ?? "");
+            const effectiveDir = () => {
+              const tab = activeTab();
+              if (!tab) return null;
+              return tab.worktree?.repoRoot ?? tab.cliConfig.workingDir;
+            };
             const dir = () => {
-              const wd = activeTab()?.cliConfig.workingDir;
+              const wd = effectiveDir();
               if (!wd) return null;
               return wd.split("/").filter(Boolean).pop() ?? wd;
             };
-            const fullPath = () => activeTab()?.cliConfig.workingDir ?? "";
+            const fullPath = () => effectiveDir() ?? "";
             return (
               <Show when={dir()}>
                 {(d) => (

@@ -18,6 +18,7 @@ export interface TabWorktree {
   path: string;
   branch: string;
   headSha: string;
+  repoRoot: string;
 }
 
 export interface Tab {

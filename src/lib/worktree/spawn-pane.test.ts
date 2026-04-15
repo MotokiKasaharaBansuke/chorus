@@ -35,6 +35,7 @@ describe("spawnPaneWithWorktree", () => {
     const result = await spawnPaneWithWorktree(baseConfig, settings, deps);
 
     expect(result.worktree).toBeNull();
+    expect(result.repoRoot).toBeNull();
     expect(result.finalConfig.workingDir).toBe("/repo");
     expect(deps.createWorktree).not.toHaveBeenCalled();
     expect(deps.spawnPty).toHaveBeenCalledWith(baseConfig);
@@ -47,6 +48,7 @@ describe("spawnPaneWithWorktree", () => {
     const result = await spawnPaneWithWorktree(baseConfig, settings, deps);
 
     expect(result.worktree).toBeNull();
+    expect(result.repoRoot).toBeNull();
     expect(deps.createWorktree).not.toHaveBeenCalled();
     expect(deps.spawnPty).toHaveBeenCalledWith(baseConfig);
   });
@@ -65,6 +67,7 @@ describe("spawnPaneWithWorktree", () => {
       worktree: settings,
     });
     expect(result.worktree?.path).toBe(`/worktrees/${EXPECTED_BRANCH}`);
+    expect(result.repoRoot).toBe("/repo");
     expect(result.finalConfig.workingDir).toBe(`/worktrees/${EXPECTED_BRANCH}`);
     expect(deps.spawnPty).toHaveBeenCalledWith({
       ...baseConfig,
@@ -92,6 +95,17 @@ describe("spawnPaneWithWorktree", () => {
     });
     expect(deps.createWorktree).not.toHaveBeenCalled();
     expect(deps.spawnPty).not.toHaveBeenCalled();
+  });
+
+  it("repoRoot reflects the git root when workingDir is a subdirectory", async () => {
+    const subConfig: CliConfig = { ...baseConfig, workingDir: "/repo/packages/app" };
+    const deps = makeDeps({ findGitRepoRoot: vi.fn(async () => "/repo") });
+    const settings = { ...DEFAULT_WORKTREE_SETTINGS, autoCreate: true };
+
+    const result = await spawnPaneWithWorktree(subConfig, settings, deps);
+
+    expect(result.repoRoot).toBe("/repo");
+    expect(result.worktree).not.toBeNull();
   });
 
   it("createWorktree rejection propagates and PTY is not spawned", async () => {
