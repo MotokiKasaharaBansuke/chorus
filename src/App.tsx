@@ -579,8 +579,7 @@ function App() {
           hasActiveTab={!!tabStore.activeTab && tabStore.activeTab.cliConfig.cliType !== "file-viewer"}
           isActiveTabStale={isActiveTabStale()}
           onRefreshActiveTab={handleRefreshActiveTab}
-          usageSummary={usageStore.summary}
-          rateLimit={usageStore.rateLimit}
+          rateLimits={usageStore.rateLimits}
           onViewUsage={() => setShowUsageModal(true)}
         />
       </div>
@@ -680,7 +679,7 @@ function App() {
 
       <Show when={showUsageModal()}>
         <UsageModal
-          summary={usageStore.summary}
+          rateLimits={usageStore.rateLimits}
           onClose={() => setShowUsageModal(false)}
         />
       </Show>

@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
-import { formatCost, formatTokens, formatResetsIn } from "./usage";
+import { describe, it, expect } from "vitest";
+import { formatCost, formatTokens, formatResetsIn, formatUtilization, utilizationColor } from "./usage";
 
 describe("formatCost", () => {
   it("formats zero", () => {
@@ -66,64 +66,86 @@ describe("formatTokens", () => {
 });
 
 describe("formatResetsIn", () => {
-  afterEach(() => { vi.useRealTimers(); });
+  const base = 1_700_000_000_000;
 
-  function withNow(nowMs: number, fn: () => void) {
-    vi.useFakeTimers();
-    vi.setSystemTime(nowMs);
-    fn();
-  }
-
-  const NOW = 1_700_000_000_000;
-
-  it("returns minutes for short durations", () => {
-    withNow(NOW, () => {
-      const epoch = NOW / 1000 + 300;
-      expect(formatResetsIn(epoch)).toBe("5m");
-    });
+  it("returns '—' for NaN", () => {
+    expect(formatResetsIn(NaN, base)).toBe("—");
   });
 
-  it("returns hours for medium durations", () => {
-    withNow(NOW, () => {
-      const epoch = NOW / 1000 + 7200;
-      expect(formatResetsIn(epoch)).toBe("2h");
-    });
+  it("returns '—' for Infinity", () => {
+    expect(formatResetsIn(Infinity, base)).toBe("—");
   });
 
-  it("returns days for long durations", () => {
-    withNow(NOW, () => {
-      const epoch = NOW / 1000 + 86400 * 4;
-      expect(formatResetsIn(epoch)).toBe("4d");
-    });
+  it("returns 'now' when resetsAt is in the past", () => {
+    expect(formatResetsIn(base - 1000, base)).toBe("now");
   });
 
-  it("returns 'soon' for past timestamps", () => {
-    withNow(NOW, () => {
-      const epoch = NOW / 1000 - 600;
-      expect(formatResetsIn(epoch)).toBe("soon");
-    });
+  it("returns minutes for < 60 min", () => {
+    expect(formatResetsIn(base + 30 * 60_000, base)).toBe("30m");
   });
 
-  it("returns 'soon' for less than a minute", () => {
-    withNow(NOW, () => {
-      const epoch = NOW / 1000 + 30;
-      expect(formatResetsIn(epoch)).toBe("soon");
-    });
+  it("rounds up to nearest minute", () => {
+    expect(formatResetsIn(base + 90_000, base)).toBe("2m");
   });
 
-  it("returns 'soon' for NaN", () => {
-    expect(formatResetsIn(NaN)).toBe("soon");
+  it("returns hours for >= 60 min", () => {
+    expect(formatResetsIn(base + 3 * 3600_000, base)).toBe("3h");
   });
 
-  it("returns 'soon' for 0", () => {
-    expect(formatResetsIn(0)).toBe("soon");
+  it("returns days for >= 24 hours", () => {
+    expect(formatResetsIn(base + 4 * 86400_000, base)).toBe("4d");
+  });
+});
+
+describe("formatUtilization", () => {
+  it("formats 0.97 as 97%", () => {
+    expect(formatUtilization(0.97)).toBe("97%");
   });
 
-  it("returns 'soon' for negative values", () => {
-    expect(formatResetsIn(-1000)).toBe("soon");
+  it("formats 0 as 0%", () => {
+    expect(formatUtilization(0)).toBe("0%");
   });
 
-  it("returns 'soon' for Infinity", () => {
-    expect(formatResetsIn(Infinity)).toBe("soon");
+  it("formats 1 as 100%", () => {
+    expect(formatUtilization(1)).toBe("100%");
+  });
+
+  it("returns 0% for NaN", () => {
+    expect(formatUtilization(NaN)).toBe("0%");
+  });
+
+  it("returns 0% for negative", () => {
+    expect(formatUtilization(-0.5)).toBe("0%");
+  });
+
+  it("clamps to 100% when utilization exceeds 1", () => {
+    expect(formatUtilization(1.5)).toBe("100%");
+  });
+});
+
+describe("utilizationColor", () => {
+  it("returns orange for >= 0.9", () => {
+    expect(utilizationColor(0.9)).toBe("#d4863a");
+    expect(utilizationColor(1.0)).toBe("#d4863a");
+    expect(utilizationColor(1.5)).toBe("#d4863a");
+  });
+
+  it("returns yellow for >= 0.7 and < 0.9", () => {
+    expect(utilizationColor(0.7)).toBe("#d4c43a");
+    expect(utilizationColor(0.89)).toBe("#d4c43a");
+  });
+
+  it("returns green for < 0.7", () => {
+    expect(utilizationColor(0)).toBe("#4abf4a");
+    expect(utilizationColor(0.5)).toBe("#4abf4a");
+    expect(utilizationColor(0.69)).toBe("#4abf4a");
+  });
+
+  it("returns green for NaN (treated as low utilization)", () => {
+    expect(utilizationColor(NaN)).toBe("#4abf4a");
+  });
+
+  it("returns green for negative values", () => {
+    expect(utilizationColor(-0.1)).toBe("#4abf4a");
   });
 });
