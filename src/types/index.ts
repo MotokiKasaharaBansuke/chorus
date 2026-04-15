@@ -15,4 +15,4 @@ export type { AttachedImage, ChatBlock, ChatMessage } from "./chat";
 export type { SplitDirection, SplitNode, PaneGroupNode, LayoutNode, LayoutEdges } from "./layout";
 export { ALL_EDGES } from "./layout";
 
-export type { TabUsage, UsageSummary } from "./usage";
+export type { TabUsage, UsageSummary, RateLimitInfo } from "./usage";

@@ -2,9 +2,9 @@ import { createSignal, Show } from "solid-js";
 import { useTabStore } from "../../stores/tab-store";
 import { HelpModal } from "../help/help-modal";
 import { SidebarIcon, TerminalIcon, RefreshIcon } from "../icons";
-import { formatCost, formatTokens } from "../../lib/format/usage";
+import { formatCost, formatTokens, formatResetsIn } from "../../lib/format/usage";
 import type { CliMode, ReviewCliType } from "../../types";
-import type { UsageSummary } from "../../types";
+import type { UsageSummary, RateLimitInfo } from "../../types";
 import styles from "./top-bar.module.css";
 
 interface TopBarProps {
@@ -26,7 +26,26 @@ interface TopBarProps {
   isActiveTabStale: boolean;
   onRefreshActiveTab: () => void;
   usageSummary: UsageSummary;
+  rateLimit: RateLimitInfo | null;
   onViewUsage: () => void;
+}
+
+const RATE_LIMIT_LABELS: Record<RateLimitInfo["rateLimitType"], string> = {
+  five_hour: "session limit",
+  seven_day: "weekly limit",
+  seven_day_opus: "weekly Opus limit",
+  seven_day_sonnet: "weekly Sonnet limit",
+  overage: "extra usage",
+};
+
+function rateLimitText(info: RateLimitInfo): string {
+  const pct = Math.round(info.utilization * 100);
+  const label = RATE_LIMIT_LABELS[info.rateLimitType];
+  const resets = formatResetsIn(info.resetsAt);
+  if (info.status === "rejected") {
+    return `You've hit your ${label} · resets in ${resets}`;
+  }
+  return `You've used ${pct}% of your ${label} · resets in ${resets}`;
 }
 
 export function TopBar(props: TopBarProps) {
@@ -117,6 +136,13 @@ export function TopBar(props: TopBarProps) {
             </svg>
             <span class={styles.zombieBadge}>{props.zombieCount}</span>
           </button>
+        </Show>
+        <Show when={props.rateLimit && props.rateLimit.status !== "allowed" ? props.rateLimit : undefined}>
+          {(info) => (
+            <div class={`${styles.rateLimitBanner} ${info().status === "rejected" ? styles.rateLimitRejected : ""}`}>
+              <span class={styles.rateLimitText}>{rateLimitText(info())}</span>
+            </div>
+          )}
         </Show>
         <Show when={props.usageSummary.totalCostUsd > 0}>
           <button class={styles.usageBanner} onClick={props.onViewUsage} title="View session usage">

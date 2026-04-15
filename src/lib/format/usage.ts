@@ -11,3 +11,15 @@ export function formatTokens(count: number): string {
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(n);
 }
+
+export function formatResetsIn(resetsAtEpoch: number): string {
+  if (!Number.isFinite(resetsAtEpoch) || resetsAtEpoch <= 0) return "soon";
+  const diffMs = resetsAtEpoch * 1000 - Date.now();
+  if (diffMs < 60_000) return "soon";
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d`;
+}

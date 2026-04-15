@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { formatCost, formatTokens } from "./usage";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { formatCost, formatTokens, formatResetsIn } from "./usage";
 
 describe("formatCost", () => {
   it("formats zero", () => {
@@ -62,5 +62,68 @@ describe("formatTokens", () => {
 
   it("returns 0 for Infinity", () => {
     expect(formatTokens(Infinity)).toBe("0");
+  });
+});
+
+describe("formatResetsIn", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  function withNow(nowMs: number, fn: () => void) {
+    vi.useFakeTimers();
+    vi.setSystemTime(nowMs);
+    fn();
+  }
+
+  const NOW = 1_700_000_000_000;
+
+  it("returns minutes for short durations", () => {
+    withNow(NOW, () => {
+      const epoch = NOW / 1000 + 300;
+      expect(formatResetsIn(epoch)).toBe("5m");
+    });
+  });
+
+  it("returns hours for medium durations", () => {
+    withNow(NOW, () => {
+      const epoch = NOW / 1000 + 7200;
+      expect(formatResetsIn(epoch)).toBe("2h");
+    });
+  });
+
+  it("returns days for long durations", () => {
+    withNow(NOW, () => {
+      const epoch = NOW / 1000 + 86400 * 4;
+      expect(formatResetsIn(epoch)).toBe("4d");
+    });
+  });
+
+  it("returns 'soon' for past timestamps", () => {
+    withNow(NOW, () => {
+      const epoch = NOW / 1000 - 600;
+      expect(formatResetsIn(epoch)).toBe("soon");
+    });
+  });
+
+  it("returns 'soon' for less than a minute", () => {
+    withNow(NOW, () => {
+      const epoch = NOW / 1000 + 30;
+      expect(formatResetsIn(epoch)).toBe("soon");
+    });
+  });
+
+  it("returns 'soon' for NaN", () => {
+    expect(formatResetsIn(NaN)).toBe("soon");
+  });
+
+  it("returns 'soon' for 0", () => {
+    expect(formatResetsIn(0)).toBe("soon");
+  });
+
+  it("returns 'soon' for negative values", () => {
+    expect(formatResetsIn(-1000)).toBe("soon");
+  });
+
+  it("returns 'soon' for Infinity", () => {
+    expect(formatResetsIn(Infinity)).toBe("soon");
   });
 });

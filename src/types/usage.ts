@@ -17,3 +17,14 @@ export interface UsageSummary {
   totalTurns: number;
   tabs: readonly TabUsage[];
 }
+
+type RateLimitStatus = "allowed" | "allowed_warning" | "rejected";
+type RateLimitType = "five_hour" | "seven_day" | "seven_day_opus" | "seven_day_sonnet" | "overage";
+
+export interface RateLimitInfo {
+  status: RateLimitStatus;
+  rateLimitType: RateLimitType;
+  utilization: number;
+  resetsAt: number;
+  isUsingOverage: boolean;
+}
