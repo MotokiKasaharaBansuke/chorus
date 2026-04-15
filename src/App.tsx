@@ -250,6 +250,7 @@ function App() {
         },
       );
 
+      const effectiveRoot = repoRoot ?? config.workingDir;
       const label = CLI_LABELS[finalConfig.cliType] ?? finalConfig.cliType;
       const title = worktree?.branch
         ? worktree.branch
@@ -260,14 +261,14 @@ function App() {
         status: "waiting",
         cliConfig: finalConfig,
         worktree: worktree
-          ? { path: worktree.path, branch: worktree.branch, headSha: worktree.headSha, repoRoot: repoRoot ?? config.workingDir }
+          ? { path: worktree.path, branch: worktree.branch, headSha: worktree.headSha, repoRoot: effectiveRoot }
           : undefined,
       };
       tabStore.openTab(tab);
       if (options?.splitIntoNewPane && tabStore.focusedGroupId && tabStore.layout) {
         tabStore.splitGroup(tabStore.focusedGroupId, "horizontal", paneId, "after");
       }
-      sidebarStore.setWorkingDir(finalConfig.workingDir);
+      sidebarStore.setWorkingDir(effectiveRoot);
       return paneId;
     } finally {
       spawningCount--;
