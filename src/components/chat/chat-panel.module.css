@@ -547,8 +547,9 @@
 .textarea {
   width: 100%; background: transparent; border: none; color: #ccc;
   font-size: 12px; font-family: inherit; padding: 8px 10px 4px;
-  resize: none; min-height: 22px; max-height: 200px; line-height: 1.5; outline: none; display: block;
-  overflow-y: hidden;
+  resize: none; min-height: 22px; max-height: min(200px, 35vh); line-height: 1.5; outline: none; display: block;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 .textarea::placeholder { color: #555; }
 
