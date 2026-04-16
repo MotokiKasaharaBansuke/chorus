@@ -364,6 +364,36 @@ describe("StreamParser system events", () => {
     expect(msgs[0].blocks[0]).toMatchObject({ kind: "text", text: "Conversation compacted: 45k → 12k tokens" });
   });
 
+  it("suppresses context-usage banner messages", () => {
+    const parser = new StreamParser();
+    parser.processLine(JSON.stringify({
+      type: "system",
+      message: "0% context used — click to compact",
+    }));
+    parser.processLine(JSON.stringify({
+      type: "system",
+      message: "48% context used — click to compact",
+    }));
+    parser.processLine(JSON.stringify({
+      type: "system",
+      message: "100% context used — click to compact",
+    }));
+    expect(parser.getMessages()).toHaveLength(0);
+  });
+
+  it("does not suppress non-context-usage system messages", () => {
+    const parser = new StreamParser();
+    parser.processLine(JSON.stringify({
+      type: "system",
+      message: "Conversation compacted: 45k → 12k tokens",
+    }));
+    parser.processLine(JSON.stringify({
+      type: "system",
+      message: "context used without percentage prefix",
+    }));
+    expect(parser.getMessages()).toHaveLength(2);
+  });
+
   it("ignores non-init system events without a message field", () => {
     const parser = new StreamParser();
     parser.processLine(JSON.stringify({ type: "system", subtype: "unknown" }));
