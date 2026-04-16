@@ -3,7 +3,7 @@
   flex-direction: column;
   flex: 1;
   overflow: hidden;
-  min-width: 240px;
+  min-width: 160px;
   min-height: 200px;
   background: #1a1a1a;
   position: relative;
@@ -22,11 +22,19 @@
   border-bottom: 1px solid #2d2d2d;
   height: 28px;
   flex-shrink: 0;
+  overflow: hidden;
+}
+
+.tabList {
+  display: flex;
+  align-items: stretch;
+  flex: 1;
+  min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
 }
-.tabBar::-webkit-scrollbar { display: none; }
+.tabList::-webkit-scrollbar { display: none; }
 
 /* Traffic-light padding: top-left pane when sidebar is closed */
 .tabBarLeftPad {
@@ -45,7 +53,8 @@
   white-space: nowrap;
   user-select: none;
   transition: background 0.08s, color 0.08s;
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 60px;
   height: 100%;
   position: relative;
 }

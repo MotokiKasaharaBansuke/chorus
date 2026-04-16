@@ -213,12 +213,18 @@ export function ChatInput(props: ChatInputProps) {
               [styles.sendBtnDanger]: props.mode === "dangerously-skip-permissions",
               [styles.sendBtnPlan]: props.mode === "plan",
             }}
-            onClick={handleSubmit}
-            disabled={!inputText().trim() || props.isStreaming}
+            onClick={props.isStreaming ? props.onInterrupt : handleSubmit}
+            disabled={props.isStreaming ? false : !inputText().trim()}
           >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-              <path d="M3 14l11-6L3 2v5l6 1-6 1v5z" fill="currentColor"/>
-            </svg>
+            {props.isStreaming ? (
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                <rect width="10" height="10" rx="2" fill="currentColor"/>
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <path d="M3 14l11-6L3 2v5l6 1-6 1v5z" fill="currentColor"/>
+              </svg>
+            )}
           </button>
         </div>
       </div>

@@ -12,6 +12,7 @@ import type { ZombieSessionInfo } from "./lib/commands";
 import { buildSavedSession, persistSession, restoreSession, tryLoadSession } from "./lib/session";
 import { spawnPaneWithWorktree } from "./lib/worktree/spawn-pane";
 import { decideCloseAction } from "./lib/worktree/decide-close-action";
+import { MIN_PANE_PX } from "./lib/layout/layout-tree";
 import { TerminalPanel } from "./components/terminal/terminal-panel";
 import { Sidebar } from "./components/sidebar/sidebar";
 import { LayoutRenderer } from "./components/layout/layout-renderer";
@@ -567,12 +568,11 @@ function App() {
     return Math.max(countHorizontalColumns(node.children[0]), countHorizontalColumns(node.children[1]));
   }
 
-  const MIN_PANE_WIDTH = 240;
   const SIDEBAR_WIDTH = 200;
   createEffect(() => {
     const cols = countHorizontalColumns(tabStore.layout);
     const sidebarW = sidebarStore.isOpen ? SIDEBAR_WIDTH : 0;
-    const minWidth = Math.max(600, sidebarW + cols * MIN_PANE_WIDTH);
+    const minWidth = Math.max(600, sidebarW + cols * MIN_PANE_PX);
     getCurrentWindow().setMinSize(new LogicalSize(minWidth, 400)).catch(() => {});
   });
 

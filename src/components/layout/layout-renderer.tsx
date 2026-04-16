@@ -1,7 +1,8 @@
-import { Show } from "solid-js";
+import { createMemo, Show } from "solid-js";
 import { useTabStore } from "../../stores/tab-store";
 import { ResizableSplit } from "./resizable-split";
 import { PaneGroup } from "./pane-group";
+import { countLeafPanes } from "../../lib/layout/layout-tree";
 import type { LayoutNode, SplitNode, PaneGroupNode, Tab, LayoutEdges } from "../../types";
 import { ALL_EDGES } from "../../types";
 
@@ -40,6 +41,8 @@ export function LayoutRenderer(props: LayoutRendererProps) {
       <Show when={splitNode()}>
         {(split) => {
           const isH = () => split().direction === "horizontal";
+          const firstLeafCount = createMemo(() => countLeafPanes(split().children[0], split().direction));
+          const secondLeafCount = createMemo(() => countLeafPanes(split().children[1], split().direction));
           const firstEdges = (): LayoutEdges => {
             const e = edges();
             return isH() ? { ...e, right: false } : { ...e, bottom: false };
@@ -52,6 +55,8 @@ export function LayoutRenderer(props: LayoutRendererProps) {
             <ResizableSplit
               direction={split().direction}
               ratio={split().ratio}
+              firstLeafCount={firstLeafCount()}
+              secondLeafCount={secondLeafCount()}
               first={
                 <LayoutRenderer
                   nodeOverride={split().children[0]}

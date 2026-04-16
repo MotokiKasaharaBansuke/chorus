@@ -1,5 +1,7 @@
 import type { LayoutNode, PaneGroupNode, SplitNode, SplitDirection } from "../../types";
 
+export const MIN_PANE_PX = 160;
+
 export function generateId(prefix = "pg"): string {
   return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -155,6 +157,15 @@ export function updateSplitRatio(root: LayoutNode, splitId: string, ratio: numbe
 }
 
 // ── Equalize ──
+
+/** Count leaf panes along a specific axis.
+ *  Splits matching the direction sum their children; cross-axis splits take the max. */
+export function countLeafPanes(root: LayoutNode, direction: SplitDirection): number {
+  if (root.type === "pane-group") return 1;
+  const a = countLeafPanes(root.children[0], direction);
+  const b = countLeafPanes(root.children[1], direction);
+  return root.direction === direction ? a + b : Math.max(a, b);
+}
 
 /** Count leaf nodes (pane groups) in a subtree */
 export function countLeaves(root: LayoutNode): number {

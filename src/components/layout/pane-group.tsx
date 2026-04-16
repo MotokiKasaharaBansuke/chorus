@@ -244,6 +244,7 @@ export function PaneGroup(props: PaneGroupProps) {
         ref={tabBarRef}
         class={`${styles.tabBar} ${tabBarDragOver() ? styles.tabBarDragOver : ""} ${needsTrafficLightPad() ? styles.tabBarLeftPad : ""}`}
       >
+        <div class={styles.tabList}>
           <For each={props.node.tabIds}>
             {(tabId) => {
               const tab = () => store.getTab(tabId);
@@ -255,6 +256,7 @@ export function PaneGroup(props: PaneGroupProps) {
                       class={`${styles.tab} ${isActive() ? styles.tabActive : ""} ${
                         t().cliConfig.mode === "dangerously-skip-permissions" ? styles.tabDanger : ""
                       }`}
+                      title={t().title}
                       onClick={(e) => {
                         e.stopPropagation();
                         if (wasRecentDrag) return;
@@ -287,34 +289,35 @@ export function PaneGroup(props: PaneGroupProps) {
               );
             }}
           </For>
+        </div>
 
-          {/* Active tab's directory */}
-          {(() => {
-            const activeTab = () => store.getTab(props.node.activeTabId ?? "");
-            const effectiveDir = () => {
-              const tab = activeTab();
-              if (!tab) return null;
-              return tab.worktree?.repoRoot ?? tab.cliConfig.workingDir;
-            };
-            const dir = () => {
-              const wd = effectiveDir();
-              if (!wd) return null;
-              return wd.split("/").filter(Boolean).pop() ?? wd;
-            };
-            const fullPath = () => effectiveDir() ?? "";
-            return (
-              <Show when={dir()}>
-                {(d) => (
-                  <div class={styles.dirBadge} title={fullPath()}>
-                    <svg width="9" height="9" viewBox="0 0 12 12" fill="none" style={{ "flex-shrink": 0 }}>
-                      <path d="M1 3.5A1.5 1.5 0 012.5 2h2l1 1.5H9.5A1.5 1.5 0 0111 5v4A1.5 1.5 0 019.5 10.5h-7A1.5 1.5 0 011 9V3.5z" fill="currentColor" opacity=".7"/>
-                    </svg>
-                    {d()}
-                  </div>
-                )}
-              </Show>
-            );
-          })()}
+        {/* Active tab's directory */}
+        {(() => {
+          const activeTab = () => store.getTab(props.node.activeTabId ?? "");
+          const effectiveDir = () => {
+            const tab = activeTab();
+            if (!tab) return null;
+            return tab.worktree?.repoRoot ?? tab.cliConfig.workingDir;
+          };
+          const dir = () => {
+            const wd = effectiveDir();
+            if (!wd) return null;
+            return wd.split("/").filter(Boolean).pop() ?? wd;
+          };
+          const fullPath = () => effectiveDir() ?? "";
+          return (
+            <Show when={dir()}>
+              {(d) => (
+                <div class={styles.dirBadge} title={fullPath()}>
+                  <svg width="9" height="9" viewBox="0 0 12 12" fill="none" style={{ "flex-shrink": 0 }}>
+                    <path d="M1 3.5A1.5 1.5 0 012.5 2h2l1 1.5H9.5A1.5 1.5 0 0111 5v4A1.5 1.5 0 019.5 10.5h-7A1.5 1.5 0 011 9V3.5z" fill="currentColor" opacity=".7"/>
+                  </svg>
+                  {d()}
+                </div>
+              )}
+            </Show>
+          );
+        })()}
       </div>
 
       {/* Content area with VS Code-style drop indicators */}
