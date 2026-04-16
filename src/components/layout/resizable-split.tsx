@@ -1,4 +1,5 @@
 import { createSignal, onCleanup, type JSX } from "solid-js";
+import { MIN_PANE_PX } from "../../lib/layout/layout-tree";
 import type { SplitDirection } from "../../types";
 import styles from "./resizable-split.module.css";
 
@@ -7,6 +8,8 @@ interface ResizableSplitProps {
   ratio: number;
   first: JSX.Element;
   second: JSX.Element;
+  firstLeafCount?: number;
+  secondLeafCount?: number;
   onRatioChange?: (ratio: number) => void;
 }
 
@@ -33,15 +36,17 @@ export function ResizableSplit(props: ResizableSplitProps) {
     setIsDragging(true);
 
     const isHorizontal = props.direction === "horizontal";
-    const MIN_PX = 240;
 
     activeMoveHandler = (e: MouseEvent) => {
       if (!containerRef) return;
       const rect = containerRef.getBoundingClientRect();
       const pos = isHorizontal ? e.clientX - rect.left : e.clientY - rect.top;
       const total = isHorizontal ? rect.width : rect.height;
-      const minRatio = Math.min(0.3, MIN_PX / total);
-      const maxRatio = Math.max(0.7, 1 - MIN_PX / total);
+      const firstMin = (props.firstLeafCount ?? 1) * MIN_PANE_PX;
+      const secondMin = (props.secondLeafCount ?? 1) * MIN_PANE_PX;
+      const minRatio = firstMin / total;
+      const maxRatio = 1 - secondMin / total;
+      if (minRatio >= maxRatio) return;
       const newRatio = Math.max(minRatio, Math.min(maxRatio, pos / total));
       props.onRatioChange?.(newRatio);
     };
@@ -70,6 +75,8 @@ export function ResizableSplit(props: ResizableSplitProps) {
   // Use getter functions so SolidJS tracks props.ratio reactively
   const firstFlex = () => `${props.ratio} 0 0%`;
   const secondFlex = () => `${1 - props.ratio} 0 0%`;
+  const firstMinSize = () => `${(props.firstLeafCount ?? 1) * MIN_PANE_PX}px`;
+  const secondMinSize = () => `${(props.secondLeafCount ?? 1) * MIN_PANE_PX}px`;
 
   return (
     <div
@@ -78,7 +85,7 @@ export function ResizableSplit(props: ResizableSplitProps) {
     >
       <div
         class={styles.first}
-        style={{ flex: firstFlex() }}
+        style={{ flex: firstFlex(), "min-width": isH() ? firstMinSize() : undefined, "min-height": isH() ? undefined : firstMinSize() }}
       >
         {props.first}
       </div>
@@ -88,7 +95,7 @@ export function ResizableSplit(props: ResizableSplitProps) {
       />
       <div
         class={styles.second}
-        style={{ flex: secondFlex() }}
+        style={{ flex: secondFlex(), "min-width": isH() ? secondMinSize() : undefined, "min-height": isH() ? undefined : secondMinSize() }}
       >
         {props.second}
       </div>

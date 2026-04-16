@@ -537,20 +537,20 @@
 .textarea::placeholder { color: #555; }
 
 .inputFooter {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center;
   border-top: 0.5px solid #333; padding: 3px 5px 3px 8px; gap: 4px;
   min-height: 24px;
 }
 
 .inputLeft {
   display: flex; align-items: center; gap: 3px; font-size: 11px;
-  min-width: 0; overflow: hidden; flex-shrink: 0;
+  flex-shrink: 0;
 }
 
 .modeBadge {
   padding: 1px 4px; border-radius: 3px; font-size: 10px; font-weight: 500;
   cursor: pointer; user-select: none; transition: all 0.1s;
-  white-space: nowrap; flex-shrink: 0;
+  white-space: nowrap; flex: 0 0 auto;
 }
 .modeDefault { color: #666; }
 .modeDefault:hover { color: #999; }
@@ -560,10 +560,10 @@
 .inputProject {
   color: #444; font-size: 10px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  min-width: 0;
+  min-width: 0; flex: 1 1 0;
 }
 
-.inputRight { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.inputRight { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 1 1 0; }
 .reviewBtn {
   width: 16px; height: 16px; border-radius: 3px; background: transparent;
   border: none; color: #999; cursor: pointer;

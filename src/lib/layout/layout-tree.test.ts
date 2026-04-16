@@ -11,8 +11,9 @@ import {
   setActiveTab,
   updateSplitRatio,
   equalizeSplits,
+  countLeafPanes,
 } from "./layout-tree";
-import type { LayoutNode, PaneGroupNode, SplitNode } from "../../types";
+import type { PaneGroupNode, SplitNode } from "../../types";
 
 describe("createPaneGroup", () => {
   it("creates a group with given tabs", () => {
@@ -302,5 +303,64 @@ describe("findFirstPaneGroup", () => {
     const b = createPaneGroup(["t2"]);
     const split: SplitNode = { type: "split", id: "s1", direction: "horizontal", children: [a, b], ratio: 0.5 };
     expect(findFirstPaneGroup(split).id).toBe(a.id);
+  });
+});
+
+describe("countLeafPanes", () => {
+  it("returns 1 for a single pane group", () => {
+    const g = createPaneGroup(["t1"]);
+    expect(countLeafPanes(g, "horizontal")).toBe(1);
+    expect(countLeafPanes(g, "vertical")).toBe(1);
+  });
+
+  it("sums children when split direction matches query direction", () => {
+    const a = createPaneGroup(["t1"]);
+    const b = createPaneGroup(["t2"]);
+    const split: SplitNode = { type: "split", id: "s1", direction: "horizontal", children: [a, b], ratio: 0.5 };
+    expect(countLeafPanes(split, "horizontal")).toBe(2);
+  });
+
+  it("takes max when split direction differs from query direction", () => {
+    const a = createPaneGroup(["t1"]);
+    const b = createPaneGroup(["t2"]);
+    const split: SplitNode = { type: "split", id: "s1", direction: "horizontal", children: [a, b], ratio: 0.5 };
+    expect(countLeafPanes(split, "vertical")).toBe(1);
+  });
+
+  it("counts correctly in a mixed-direction tree", () => {
+    // Layout: (a | b) / c  (horizontal split inside vertical split)
+    // Horizontal leaf count: top row has 2 (a|b), bottom has 1 (c) → max(2, 1) = 2
+    // Vertical leaf count: top has 1 (max of a,b), bottom has 1 → 1 + 1 = 2
+    const a = createPaneGroup(["t1"]);
+    const b = createPaneGroup(["t2"]);
+    const c = createPaneGroup(["t3"]);
+    const hSplit: SplitNode = { type: "split", id: "s1", direction: "horizontal", children: [a, b], ratio: 0.5 };
+    const vSplit: SplitNode = { type: "split", id: "s2", direction: "vertical", children: [hSplit, c], ratio: 0.5 };
+    expect(countLeafPanes(vSplit, "horizontal")).toBe(2);
+    expect(countLeafPanes(vSplit, "vertical")).toBe(2);
+  });
+
+  it("counts deeply nested same-direction splits", () => {
+    // a | b | c (chained horizontal splits)
+    const a = createPaneGroup(["t1"]);
+    const b = createPaneGroup(["t2"]);
+    const c = createPaneGroup(["t3"]);
+    const inner: SplitNode = { type: "split", id: "s2", direction: "horizontal", children: [b, c], ratio: 0.5 };
+    const outer: SplitNode = { type: "split", id: "s1", direction: "horizontal", children: [a, inner], ratio: 0.5 };
+    expect(countLeafPanes(outer, "horizontal")).toBe(3);
+    expect(countLeafPanes(outer, "vertical")).toBe(1);
+  });
+
+  it("handles 4-pane grid (2x2)", () => {
+    // (a | b) / (c | d)
+    const a = createPaneGroup(["t1"]);
+    const b = createPaneGroup(["t2"]);
+    const c = createPaneGroup(["t3"]);
+    const d = createPaneGroup(["t4"]);
+    const top: SplitNode = { type: "split", id: "s1", direction: "horizontal", children: [a, b], ratio: 0.5 };
+    const bottom: SplitNode = { type: "split", id: "s2", direction: "horizontal", children: [c, d], ratio: 0.5 };
+    const root: SplitNode = { type: "split", id: "s3", direction: "vertical", children: [top, bottom], ratio: 0.5 };
+    expect(countLeafPanes(root, "horizontal")).toBe(2);
+    expect(countLeafPanes(root, "vertical")).toBe(2);
   });
 });

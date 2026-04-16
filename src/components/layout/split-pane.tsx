@@ -1,4 +1,5 @@
 import { createSignal, type JSX } from "solid-js";
+import { MIN_PANE_PX } from "../../lib/layout/layout-tree";
 import styles from "./split-pane.module.css";
 
 interface SplitPaneProps {
@@ -12,8 +13,8 @@ interface SplitPaneProps {
 export function SplitPane(props: SplitPaneProps) {
   const [leftWidth, setLeftWidth] = createSignal(props.initialLeftWidth ?? 250);
   const [isDragging, setIsDragging] = createSignal(false);
-  const minLeft = props.minLeft ?? 150;
-  const minRight = props.minRight ?? 200;
+  const minLeft = props.minLeft ?? MIN_PANE_PX;
+  const minRight = props.minRight ?? MIN_PANE_PX;
 
   function handleMouseDown(e: MouseEvent) {
     e.preventDefault();
