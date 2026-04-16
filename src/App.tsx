@@ -59,13 +59,8 @@ function App() {
   const [isActiveTabStale, setIsActiveTabStale] = createSignal(false);
   let spawningCount = 0;
 
-  function resolveClaudeConfigDir(accountId?: string): string | undefined {
-    if (!accountId) return undefined;
-    return settingsStore.findAccount(accountId)?.claudeConfigDir;
-  }
-
-  function spawnPtyWithAccount(config: CliConfig): Promise<string> {
-    return spawnPty(config, undefined, undefined, resolveClaudeConfigDir(config.accountId));
+  function spawnPtyForTab(config: CliConfig): Promise<string> {
+    return spawnPty(config);
   }
 
   // Track the repo root of the currently active pane so the worktree
@@ -144,9 +139,7 @@ function App() {
     // Restore previous session
     const savedSession = await tryLoadSession();
     if (savedSession) {
-      const workspace = await restoreSession(JSON.stringify(savedSession), {
-        resolveClaudeConfigDir,
-      });
+      const workspace = await restoreSession(JSON.stringify(savedSession));
       if (workspace) {
         tabStore.restore(workspace.tabMap, workspace.layout, workspace.focusedGroupId);
         sidebarStore.setWorkingDir(workspace.workingDir);
@@ -261,7 +254,7 @@ function App() {
               shareCargoTarget: w.shareCargoTarget,
               spotlightExclude: w.spotlightExclude,
             }),
-          spawnPty: spawnPtyWithAccount,
+          spawnPty: spawnPtyForTab,
         },
       );
 
@@ -328,7 +321,7 @@ function App() {
           killPty,
           removeWorktree,
           createWorktree,
-          spawnPty: spawnPtyWithAccount,
+          spawnPty: spawnPtyForTab,
           isTabAlive: (id) => !!tabStore.getTab(id),
         },
       );
@@ -438,7 +431,7 @@ function App() {
     const oldPtyId = effectivePtyId(tab);
     try { await killPty(oldPtyId); } catch { /* already dead */ }
     try {
-      const newPtyId = await spawnPtyWithAccount(tab.cliConfig);
+      const newPtyId = await spawnPtyForTab(tab.cliConfig);
       if (!tabStore.getTab(tab.id)) {
         await killPty(newPtyId).catch(() => {});
         return;

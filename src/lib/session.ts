@@ -149,11 +149,7 @@ function buildLayout(
   } as PaneGroupNode;
 }
 
-export interface RestoreOptions {
-  resolveClaudeConfigDir?: (accountId?: string) => string | undefined;
-}
-
-export async function restoreSession(data: string, options?: RestoreOptions): Promise<RestoredWorkspace | null> {
+export async function restoreSession(data: string): Promise<RestoredWorkspace | null> {
   let session: SavedSession;
   try {
     session = JSON.parse(data) as SavedSession;
@@ -164,12 +160,7 @@ export async function restoreSession(data: string, options?: RestoreOptions): Pr
 
   // Spawn PTYs for all tabs in parallel
   const spawnResults = await Promise.allSettled(
-    session.tabs.map(t => spawnPty(
-      t.cliConfig,
-      undefined,
-      undefined,
-      options?.resolveClaudeConfigDir?.(t.cliConfig.accountId),
-    ))
+    session.tabs.map(t => spawnPty(t.cliConfig))
   );
 
   const newIds: string[] = [];

@@ -8,14 +8,12 @@ interface PtySpawnConfig {
   workingDir: string;
   cols?: number;
   rows?: number;
-  claudeConfigDir?: string;
 }
 
 export async function spawnPty(
   config: CliConfig,
   cols?: number,
   rows?: number,
-  claudeConfigDir?: string,
 ): Promise<string> {
   return invoke<string>("spawn_pty", {
     config: {
@@ -25,7 +23,6 @@ export async function spawnPty(
       workingDir: config.workingDir,
       cols,
       rows,
-      claudeConfigDir,
     } satisfies PtySpawnConfig,
   });
 }

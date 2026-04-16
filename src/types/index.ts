@@ -16,5 +16,3 @@ export type { SplitDirection, SplitNode, PaneGroupNode, LayoutNode, LayoutEdges 
 export { ALL_EDGES } from "./layout";
 
 export type { TabUsage, UsageSummary, RateLimitInfo } from "./usage";
-
-export type { AccountProfile } from "./settings";

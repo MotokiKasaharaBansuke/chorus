@@ -2,13 +2,6 @@ import type { ReviewCliType } from "./tab";
 
 export type ShareCargoTarget = "auto" | "always" | "never";
 
-export interface AccountProfile {
-  id: string;
-  name: string;
-  /** CLAUDE_CONFIG_DIR override for this account (e.g. "~/.claude-work"). Tilde expanded on backend. */
-  claudeConfigDir?: string;
-}
-
 export interface PostCreateHooks {
   pnpmInstall: boolean;
   copyCargoConfig: boolean;
@@ -40,7 +33,6 @@ export interface WorktreeSettings {
 export interface Settings {
   reviewCliType: ReviewCliType;
   worktree: WorktreeSettings;
-  accounts: AccountProfile[];
 }
 
 export const DEFAULT_POST_CREATE_HOOKS: PostCreateHooks = {
@@ -74,5 +66,4 @@ export const DEFAULT_WORKTREE_SETTINGS: WorktreeSettings = {
 export const DEFAULT_SETTINGS: Settings = {
   reviewCliType: "codex",
   worktree: DEFAULT_WORKTREE_SETTINGS,
-  accounts: [],
 };
