@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal, Index } from "solid-js";
+import { For, Show, createMemo, createSignal, createEffect, onCleanup, Index } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { ChatMessage, ChatBlock } from "../../types";
 import { escapeHtml, highlightDiffLine } from "../../lib/format/html";
@@ -329,6 +329,16 @@ function TextBlock(props: { text: string; isLast: boolean; isStreaming: boolean 
 
 export function MessageBubble(props: MessageBubbleProps) {
   const msg = () => props.message;
+  const [previewSrc, setPreviewSrc] = createSignal<string | null>(null);
+
+  createEffect(() => {
+    if (!previewSrc()) return;
+    const dismissOnEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPreviewSrc(null);
+    };
+    document.addEventListener("keydown", dismissOnEscape);
+    onCleanup(() => document.removeEventListener("keydown", dismissOnEscape));
+  });
 
   return (
     <div class={`${styles.message} ${styles[msg().role]}`}>
@@ -340,13 +350,17 @@ export function MessageBubble(props: MessageBubbleProps) {
                 if (!isValidTempImagePath(block.path)) return null;
                 const [hasError, setHasError] = createSignal(false);
                 const truncatedName = truncate(block.name, 64);
+                const src = convertFileSrc(block.path);
                 return (
                   <Show when={!hasError()} fallback={
                     <span class={styles.userImageFallback}>{truncatedName}</span>
                   }>
-                    <div class={styles.imageThumbnail}>
+                    <div
+                      class={`${styles.imageThumbnail} ${styles.imageThumbnailClickable}`}
+                      onClick={() => setPreviewSrc(src)}
+                    >
                       <img
-                        src={convertFileSrc(block.path)}
+                        src={src}
                         alt={truncatedName}
                         class={styles.thumbnailImg}
                         onError={() => setHasError(true)}
@@ -362,6 +376,31 @@ export function MessageBubble(props: MessageBubbleProps) {
             }}
           </For>
         </div>
+        <Show when={previewSrc()}>
+          {(src) => (
+            <div
+              class={styles.imagePreviewOverlay}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Image preview"
+              onClick={() => setPreviewSrc(null)}
+            >
+              <div class={styles.imagePreviewContent} onClick={(e) => e.stopPropagation()}>
+                <img
+                  src={src()}
+                  class={styles.imagePreviewImg}
+                  alt="Preview"
+                  onError={() => setPreviewSrc(null)}
+                />
+                <button
+                  class={styles.imagePreviewClose}
+                  aria-label="Close preview"
+                  onClick={() => setPreviewSrc(null)}
+                >×</button>
+              </div>
+            </div>
+          )}
+        </Show>
       </Show>
 
       <Show when={msg().role === "assistant"}>
