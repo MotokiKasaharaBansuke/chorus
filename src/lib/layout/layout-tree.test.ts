@@ -152,6 +152,22 @@ describe("splitPaneGroup", () => {
     expect((result.children[0] as PaneGroupNode).tabIds).toEqual(["t1"]);
     expect((result.children[1] as PaneGroupNode).tabIds).toEqual(["t2"]);
   });
+
+  it("returns the group unchanged when it has only the tab being split", () => {
+    const g = createPaneGroup(["t1"]);
+    const result = splitPaneGroup(g, g.id, "horizontal", "t1", "after");
+    expect(result.type).toBe("pane-group");
+    expect((result as PaneGroupNode).tabIds).toEqual(["t1"]);
+    expect(result).not.toBe(g);
+  });
+
+  it("splits normally when tabId does not exist in the group", () => {
+    const g = createPaneGroup(["t1", "t2"]);
+    const result = splitPaneGroup(g, g.id, "horizontal", "nonexistent", "after") as SplitNode;
+    expect(result.type).toBe("split");
+    expect((result.children[0] as PaneGroupNode).tabIds).toEqual(["t1", "t2"]);
+    expect((result.children[1] as PaneGroupNode).tabIds).toEqual(["nonexistent"]);
+  });
 });
 
 describe("setActiveTab", () => {
