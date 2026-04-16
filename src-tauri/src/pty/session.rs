@@ -149,22 +149,6 @@ impl StreamSession {
         }
     }
 
-    /// Returns true if `message` looks like a Claude Code slash command
-    /// (e.g. `/compact`, `/init`). Only bare `/lowercase-ascii` tokens qualify
-    /// — file paths like `/Users/foo` or multi-word text are excluded.
-    fn is_slash_command(message: &str) -> bool {
-        let bytes = message.as_bytes();
-        if bytes.first() != Some(&b'/') || bytes.len() < 2 {
-            return false;
-        }
-        // A valid slash command: `/` followed by one or more [a-z-] characters,
-        // optionally followed by a space and arguments.
-        let rest = &bytes[1..];
-        let cmd_end = rest.iter().position(|&b| b == b' ').unwrap_or(rest.len());
-        let cmd = &rest[..cmd_end];
-        !cmd.is_empty() && cmd.iter().all(|&b| b.is_ascii_lowercase() || b == b'-')
-    }
-
     /// Expand `~` at the start of a path to the user's home directory.
     /// Handles both `~` alone and `~/rest` forms.
     fn expand_tilde(path: &str) -> String {
@@ -181,7 +165,7 @@ impl StreamSession {
     }
 
     /// Build CLI arguments for the current message.
-    /// When `use_stream_input` is true (Claude Code with images or slash commands),
+    /// When `use_stream_input` is true (Claude Code with image attachments),
     /// the message is sent via stdin (stream-json) instead of as a positional argument.
     /// For Codex, images are passed via `--image <path>` flags.
     fn build_args(&self, message: &str, use_stream_input: bool, image_paths: &[String]) -> Vec<String> {
@@ -259,12 +243,11 @@ impl StreamSession {
         let guard = super::running_guard::MessageRunGuard::new(self.running_since.clone());
 
         let has_images = images.is_some_and(|imgs| !imgs.is_empty());
-        // Claude Code: images and slash commands sent via stdin (stream-json).
-        // Slash commands (e.g. /compact) must go through stdin so the CLI
-        // recognises them as interactive commands rather than literal prompts.
+        // Claude Code: images sent via stdin (stream-json).
+        // Slash commands (e.g. /compact) are passed directly as the `-p`
+        // argument so the CLI recognises them as commands, not prompt text.
         // Codex: images saved to temp files and passed via --image flags.
-        let is_claude_code = self.cli_type == CliType::ClaudeCode;
-        let use_stream_input = is_claude_code && (has_images || Self::is_slash_command(message));
+        let use_stream_input = has_images && self.cli_type == CliType::ClaudeCode;
         let image_paths = if has_images && self.cli_type == CliType::Codex {
             Self::save_images_to_temp(images.unwrap_or(&[]))?
         } else {
@@ -273,7 +256,7 @@ impl StreamSession {
 
         let (mut child, stdin, stdout, stderr) = self.spawn_cli_process(message, use_stream_input, &image_paths)?;
 
-        // Write stream-json input to stdin for images and slash commands
+        // Write stream-json input to stdin for image attachments
         if use_stream_input {
             match stdin {
                 Some(stdin_handle) => {
@@ -376,7 +359,7 @@ impl StreamSession {
     }
 
     /// Write a stream-json user message to stdin, then drop stdin so the CLI
-    /// processes the input. Used for image attachments and slash commands.
+    /// processes the input. Used for image attachments.
     fn write_stream_json_input(
         stdin: std::process::ChildStdin,
         message: &str,
@@ -762,30 +745,60 @@ fn is_sensitive_env_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{is_sensitive_env_key, StreamSession};
+    use crate::cli::registry::CliType;
+    use std::sync::atomic::Ordering;
 
-    // ---- is_slash_command ----
+    // ---- build_args ----
 
-    #[test]
-    fn slash_command_recognized() {
-        assert!(StreamSession::is_slash_command("/compact"));
-        assert!(StreamSession::is_slash_command("/init"));
-        assert!(StreamSession::is_slash_command("/add-feature"));
-        assert!(StreamSession::is_slash_command("/compact extra args"));
+    fn make_session(cli_type: CliType) -> StreamSession {
+        StreamSession::new(cli_type, "claude".into(), vec![], "/tmp".into(), Default::default())
     }
 
     #[test]
-    fn file_paths_not_slash_commands() {
-        assert!(!StreamSession::is_slash_command("/Users/foo/bar"));
-        assert!(!StreamSession::is_slash_command("/api/health"));
-        assert!(!StreamSession::is_slash_command("/tmp/test.txt"));
+    fn build_args_normal_message_uses_p_arg() {
+        let session = make_session(CliType::ClaudeCode);
+        let args = session.build_args("hello world", false, &[]);
+        // -p should be followed by the message
+        let p_idx = args.iter().position(|a| a == "-p").unwrap();
+        assert_eq!(args[p_idx + 1], "hello world");
+        assert!(!args.contains(&"--input-format".to_string()));
     }
 
     #[test]
-    fn non_slash_messages_not_slash_commands() {
-        assert!(!StreamSession::is_slash_command("hello world"));
-        assert!(!StreamSession::is_slash_command(""));
-        assert!(!StreamSession::is_slash_command("/"));
-        assert!(!StreamSession::is_slash_command("/123"));
+    fn build_args_slash_command_uses_p_arg() {
+        let session = make_session(CliType::ClaudeCode);
+        let args = session.build_args("/compact", false, &[]);
+        let p_idx = args.iter().position(|a| a == "-p").unwrap();
+        assert_eq!(args[p_idx + 1], "/compact");
+        assert!(!args.contains(&"--input-format".to_string()));
+    }
+
+    #[test]
+    fn build_args_stream_input_omits_message_after_p() {
+        let session = make_session(CliType::ClaudeCode);
+        let args = session.build_args("msg with image", true, &[]);
+        let p_idx = args.iter().position(|a| a == "-p").unwrap();
+        // Next arg after -p should be a flag, not the message
+        assert!(args[p_idx + 1].starts_with("--"));
+        assert!(args.contains(&"--input-format".to_string()));
+        assert!(args.contains(&"stream-json".to_string()));
+    }
+
+    #[test]
+    fn build_args_first_message_uses_session_id() {
+        let session = make_session(CliType::ClaudeCode);
+        let args = session.build_args("hello", false, &[]);
+        assert!(args.contains(&"--session-id".to_string()));
+        assert!(!args.contains(&"--resume".to_string()));
+    }
+
+    #[test]
+    fn build_args_subsequent_message_uses_resume() {
+        let session = make_session(CliType::ClaudeCode);
+        session.has_session.store(true, Ordering::Release);
+        let args = session.build_args("hello", false, &[]);
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
     }
 
     // ---- expand_tilde ----
