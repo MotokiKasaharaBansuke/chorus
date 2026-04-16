@@ -192,10 +192,16 @@
   padding: 10px 12px;
   background: #1f1f1f;
   border-bottom: 1px solid #2d2d2d;
+  border-left: 2px solid transparent;
 }
 
 .worktreeRow:last-child {
   border-bottom: none;
+}
+
+.worktreeRowActive {
+  background: #1a2a1a;
+  border-left: 2px solid #2ea043;
 }
 
 .worktreeInfo {
@@ -229,6 +235,8 @@
   margin-right: 4px;
 }
 
+.badgeActive { background: #1a3a1a; color: #3fb950; }
+.badgeOpen { background: #1a2a3a; color: #79c0ff; }
 .badgeLocked { background: #3a2a15; color: #d9a05a; }
 .badgePrunable { background: #3a1515; color: #f85149; }
 .badgeDetached { background: #15263a; color: #58a6ff; }
