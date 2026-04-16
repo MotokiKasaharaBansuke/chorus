@@ -19,7 +19,7 @@ const COMMANDS: CommandDef[] = [
   { id: "resume-conversation", label: "Resume conversation", desc: "Continue a previous conversation", section: "Context", cliTypes: ["claude-code"] },
   // --- Model ---
   { id: "model", label: "Switch model…", desc: "Change the AI model", section: "Model" },
-  { id: "switch-account", label: "Switch account…", desc: "Change subscription account for this pane", section: "Model", cliTypes: ["claude-code"] },
+  { id: "login", label: "Switch account…", desc: "Log in to a different Anthropic account", section: "Model", cliTypes: ["claude-code"] },
   { id: "effort", label: "Effort", desc: "Set effort level", section: "Model", cliTypes: ["claude-code"] },
   { id: "thinking", label: "Thinking", desc: "Toggle extended thinking", section: "Model", cliTypes: ["claude-code"] },
   { id: "account", label: "Account & usage…", desc: "View account info", section: "Model", cliTypes: ["claude-code"] },

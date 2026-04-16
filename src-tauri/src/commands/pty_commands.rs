@@ -9,29 +9,6 @@ use crate::pty::session::ImageAttachment;
 
 const MAX_WRITE_SIZE: usize = 1_048_576;
 const MAX_IMAGE_ATTACHMENTS: usize = 10;
-const MAX_CONFIG_DIR_LEN: usize = 512;
-
-/// Validate a user-supplied config-dir path: no NUL bytes, no path traversal, length-bounded.
-fn validate_config_dir(path: &str) -> Result<(), AppError> {
-    if path.len() > MAX_CONFIG_DIR_LEN {
-        return Err(AppError::PtySpawnFailed(format!(
-            "claude_config_dir too long (max {MAX_CONFIG_DIR_LEN} chars)"
-        )));
-    }
-    if path.contains('\0') {
-        return Err(AppError::PtySpawnFailed("claude_config_dir contains NUL byte".into()));
-    }
-    // Use OS-native path parsing so encoded variants (e.g. on future cross-platform builds)
-    // are handled correctly. std::path::Component::ParentDir matches ".." components only.
-    use std::path::{Component, Path};
-    for component in Path::new(path).components() {
-        if component == Component::ParentDir {
-            return Err(AppError::PtySpawnFailed("claude_config_dir must not contain '..'".into()));
-        }
-    }
-    Ok(())
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PtySpawnConfig {
@@ -41,8 +18,6 @@ pub struct PtySpawnConfig {
     pub working_dir: String,
     pub cols: Option<u16>,
     pub rows: Option<u16>,
-    /// Optional CLAUDE_CONFIG_DIR override for account switching.
-    pub claude_config_dir: Option<String>,
 }
 
 #[tauri::command]
@@ -55,13 +30,7 @@ pub fn spawn_pty(
     let (command, args) = resolve_command(&config.cli_type, &config.mode, &config.model)?;
 
     if config.cli_type.uses_stream_session() {
-        let mut extra_env: HashMap<String, String> = HashMap::new();
-        if let Some(dir) = config.claude_config_dir {
-            if !dir.is_empty() {
-                validate_config_dir(&dir)?;
-                extra_env.insert("CLAUDE_CONFIG_DIR".to_string(), dir);
-            }
-        }
+        let extra_env: HashMap<String, String> = HashMap::new();
         // Claude Code / Codex: create stream session (no process yet, spawned per message)
         state.create_stream(&id, config.cli_type, command, args, config.working_dir, extra_env)?;
     } else {
@@ -169,40 +138,3 @@ pub fn kill_session_by_id(
     state.kill_one(&id)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::validate_config_dir;
-
-    #[test]
-    fn allows_tilde_home_path() {
-        assert!(validate_config_dir("~/.claude-work").is_ok());
-    }
-
-    #[test]
-    fn allows_absolute_path() {
-        assert!(validate_config_dir("/Users/foo/.claude-work").is_ok());
-    }
-
-    #[test]
-    fn rejects_path_traversal() {
-        assert!(validate_config_dir("../../etc/passwd").is_err());
-        assert!(validate_config_dir("/valid/path/../etc/passwd").is_err());
-    }
-
-    #[test]
-    fn rejects_nul_byte() {
-        assert!(validate_config_dir("/path/with\0nul").is_err());
-    }
-
-    #[test]
-    fn rejects_path_exceeding_max_length() {
-        let long = "a".repeat(513);
-        assert!(validate_config_dir(&long).is_err());
-    }
-
-    #[test]
-    fn accepts_path_at_max_length() {
-        let at_limit = "a".repeat(512);
-        assert!(validate_config_dir(&at_limit).is_ok());
-    }
-}

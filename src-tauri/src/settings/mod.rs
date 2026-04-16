@@ -96,21 +96,10 @@ impl Default for WorktreeSettings {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AccountProfile {
-    pub id: String,
-    pub name: String,
-    /// Path to a custom CLAUDE_CONFIG_DIR for this account (e.g. ~/.claude-work).
-    /// Tilde is expanded at spawn time.
-    pub claude_config_dir: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub review_cli_type: ReviewCliType,
     pub worktree: WorktreeSettings,
-    pub accounts: Vec<AccountProfile>,
 }
 
 impl Default for Settings {
@@ -118,7 +107,6 @@ impl Default for Settings {
         Self {
             review_cli_type: ReviewCliType::default(),
             worktree: WorktreeSettings::default(),
-            accounts: Vec::new(),
         }
     }
 }
@@ -180,49 +168,4 @@ mod tests {
         assert_eq!(s, Settings::default());
     }
 
-    #[test]
-    fn default_accounts_is_empty() {
-        let s = Settings::default();
-        assert!(s.accounts.is_empty());
-    }
-
-    #[test]
-    fn accounts_field_serializes_to_camel_case_array() {
-        let s = Settings::default();
-        let json = serde_json::to_string(&s).unwrap();
-        assert!(json.contains("\"accounts\""));
-    }
-
-    #[test]
-    fn account_profile_roundtrips_with_config_dir() {
-        let json = r#"{
-            "reviewCliType":"codex",
-            "worktree":{},
-            "accounts":[
-                {"id":"acc-1","name":"Work","claudeConfigDir":"~/.claude-work"}
-            ]
-        }"#;
-        let s: Settings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.accounts.len(), 1);
-        let p = &s.accounts[0];
-        assert_eq!(p.id, "acc-1");
-        assert_eq!(p.name, "Work");
-        assert_eq!(p.claude_config_dir.as_deref(), Some("~/.claude-work"));
-    }
-
-    #[test]
-    fn account_profile_roundtrips_without_config_dir() {
-        let json = r#"{"reviewCliType":"codex","worktree":{},"accounts":[{"id":"acc-2","name":"Personal"}]}"#;
-        let s: Settings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.accounts.len(), 1);
-        assert!(s.accounts[0].claude_config_dir.is_none());
-    }
-
-    #[test]
-    fn missing_accounts_field_falls_back_to_empty_vec() {
-        // Old settings.json without the accounts field should still deserialize successfully
-        let json = r#"{"reviewCliType":"codex","worktree":{}}"#;
-        let s: Settings = serde_json::from_str(json).unwrap();
-        assert!(s.accounts.is_empty());
-    }
 }

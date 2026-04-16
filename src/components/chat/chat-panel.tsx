@@ -8,7 +8,6 @@ import { getOrCreateParser } from "../../lib/stream-parser-registry";
 import { MessageBubble } from "./message-bubble";
 import { BusySpinner } from "./busy-spinner";
 import { ModelPicker } from "./model-picker";
-import { AccountPicker } from "./account-picker";
 import { ChatInput } from "./chat-input";
 import { SessionPicker } from "./session-picker";
 import { ClawdIcon, CodexIcon } from "../icons";
@@ -41,7 +40,6 @@ export function ChatPanel(props: ChatPanelProps) {
   const [pastSessions, setPastSessions] = createSignal<SessionInfo[]>([]);
   const [showSessionPicker, setShowSessionPicker] = createSignal(false);
   const [showModelPicker, setShowModelPicker] = createSignal(false);
-  const [showAccountPicker, setShowAccountPicker] = createSignal(false);
   const [contextInputTokens, setContextInputTokens] = createSignal(0);
   const contextPct = createMemo(() => contextInputTokens() / CONTEXT_WINDOW_SIZE);
   const contextBarColor = createMemo(() => contextColor(contextPct()));
@@ -266,10 +264,7 @@ export function ChatPanel(props: ChatPanelProps) {
         // Kill old session first to prevent orphaned sessions leaking in PtyManager
         await killPty(ptyId()).catch(() => {});
         if (isCancelled()) return "error";
-        const accountProfile = props.tab.cliConfig.accountId
-          ? settings.findAccount(props.tab.cliConfig.accountId)
-          : undefined;
-        const newId = await spawnPty(props.tab.cliConfig, undefined, undefined, accountProfile?.claudeConfigDir);
+        const newId = await spawnPty(props.tab.cliConfig);
         // Bail if the tab was closed mid-respawn (cleanup the new PTY we
         // just spawned to avoid an orphan).
         if (isCancelled() || !store.getTab(props.tab.id)) {
@@ -417,7 +412,6 @@ export function ChatPanel(props: ChatPanelProps) {
       if (messages().length > 0) { setMessages([]); parser.loadSession([]); }
     },
     "model": () => setShowModelPicker(true),
-    "switch-account": () => setShowAccountPicker(true),
   };
 
   function selectSlashCommand(id: string) {
@@ -459,16 +453,6 @@ export function ChatPanel(props: ChatPanelProps) {
     sendAsSlashCommand(`model ${modelId || "default"}`);
   }
 
-  async function handleAccountSelect(accountId: string | undefined) {
-    if (isStreaming()) return;
-    store.updateAccount(props.tab.id, accountId);
-    parser.loadSession([]);
-    // Kill the existing PTY so the next message respawns with the new account's env vars.
-    // sendWithRespawn detects "not found" and calls spawnPty(tab.cliConfig) which picks
-    // up the updated accountId and passes the correct CLAUDE_CONFIG_DIR.
-    await killPty(ptyId()).catch(() => {});
-    store.updateStatus(props.tab.id, "waiting");
-  }
 
   async function handleInterrupt() {
     // Abort any in-flight busy-retry loop so it doesn't respawn the session
@@ -531,16 +515,6 @@ export function ChatPanel(props: ChatPanelProps) {
           containerEl={containerRef}
           onSelect={handleModelSelect}
           onClose={() => setShowModelPicker(false)}
-        />
-      </Show>
-      <Show when={showAccountPicker()}>
-        <AccountPicker
-          currentAccountId={props.tab.cliConfig.accountId}
-          onSelect={handleAccountSelect}
-          onDelete={(deletedId) => {
-            if (!isStreaming() && props.tab.cliConfig.accountId === deletedId) handleAccountSelect(undefined);
-          }}
-          onClose={() => setShowAccountPicker(false)}
         />
       </Show>
       <Show when={isDragOver()}>

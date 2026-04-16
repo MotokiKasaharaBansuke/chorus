@@ -11,8 +11,6 @@ export interface CliConfig {
   mode: CliMode;
   model?: string;
   workingDir: string;
-  /** ID of the AccountProfile to use for this pane. Undefined = default system account. */
-  accountId?: string;
 }
 
 /** Auto-created worktree metadata attached to a Tab by the auto-worktree flow. */
