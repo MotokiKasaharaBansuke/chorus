@@ -437,6 +437,7 @@
   opacity: 0; transition: opacity 0.1s;
   line-height: 1;
 }
+.imageThumbnailClickable { cursor: pointer; }
 .imageThumbnail:hover .thumbnailRemove { opacity: 1; }
 .thumbnailRemove:hover { background: rgba(199,78,57,0.9); color: #fff; }
 
