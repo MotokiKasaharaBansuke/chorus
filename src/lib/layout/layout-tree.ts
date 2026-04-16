@@ -133,12 +133,14 @@ export function splitPaneGroup(
 ): LayoutNode {
   return mapPaneGroup(root, groupId, (group) => {
     const originalTabIds = group.tabIds.filter(id => id !== tabId);
+    if (originalTabIds.length === 0) return clonePaneGroup(group);
+
     const originalActive = group.activeTabId === tabId
       ? (originalTabIds[0] ?? null)
       : group.activeTabId;
-    const originalGroup: PaneGroupNode = originalTabIds.length > 0
-      ? { type: "pane-group", id: group.id, tabIds: originalTabIds, activeTabId: originalActive }
-      : clonePaneGroup(group);
+    const originalGroup: PaneGroupNode = {
+      type: "pane-group", id: group.id, tabIds: originalTabIds, activeTabId: originalActive,
+    };
 
     const newGroup = createPaneGroup([tabId], tabId);
     const children: [LayoutNode, LayoutNode] = side === "before"
