@@ -1,4 +1,4 @@
-import { batch, createSignal, createEffect, For, Show, onMount, onCleanup } from "solid-js";
+import { batch, createSignal, createEffect, createMemo, For, Show, onMount, onCleanup } from "solid-js";
 import { LogicalSize } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -77,6 +77,10 @@ function App() {
     if (!dir) { setActiveRepoRoot(null); return; }
     findGitRepoRoot(dir).then(setActiveRepoRoot).catch(() => setActiveRepoRoot(null));
   });
+
+  const openWorktreePaths = createMemo(() =>
+    new Set(tabStore.tabs.map((t) => t.worktree?.path).filter((p): p is string => p != null))
+  );
 
   const bottomTerminal = useBottomTerminal(() => sidebarStore.workingDir);
 
@@ -681,6 +685,8 @@ function App() {
         isOpen={isWorktreeSettingsOpen()}
         settings={settingsStore.worktree}
         repoRoot={activeRepoRoot()}
+        openWorktreePaths={openWorktreePaths()}
+        activeWorktreePath={tabStore.activeTab?.worktree?.path ?? null}
         onChange={(patch) => settingsStore.patchWorktree(patch)}
         loadWorktrees={listWorktrees}
         removeWorktree={removeWorktree}

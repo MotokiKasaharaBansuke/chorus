@@ -9,6 +9,10 @@ export interface WorktreeSettingsModalProps {
   settings: WorktreeSettings;
   /** The repo root the currently active pane is rooted in, if any. */
   repoRoot: string | null;
+  /** Worktree paths currently open in any pane. */
+  openWorktreePaths: ReadonlySet<string>;
+  /** Worktree path of the currently focused pane, if any. */
+  activeWorktreePath: string | null;
   onChange: (patch: Partial<WorktreeSettings>) => void;
   loadWorktrees: (repoRoot: string) => Promise<WorktreeInfo[]>;
   removeWorktree: (path: string, force: boolean) => Promise<void>;
@@ -37,6 +41,10 @@ export function WorktreeSettingsModal(props: WorktreeSettingsModalProps) {
   onCleanup(() => {
     if (presetTimerId) clearTimeout(presetTimerId);
   });
+
+  function normalizePath(p: string): string {
+    return p.replace(/\/+$/, "");
+  }
 
   async function refreshList() {
     if (!props.repoRoot) {
@@ -287,20 +295,32 @@ export function WorktreeSettingsModal(props: WorktreeSettingsModalProps) {
             >
               <div class={styles.worktreeList}>
                 <For each={worktrees()}>
-                  {(wt) => (
-                    <div class={styles.worktreeRow}>
-                      <div class={styles.worktreeInfo}>
-                        <div class={styles.worktreePath}>{wt.path}</div>
-                        <div class={styles.worktreeMeta}>
-                          <Show when={wt.locked}><span class={`${styles.badge} ${styles.badgeLocked}`}>locked</span></Show>
-                          <Show when={wt.prunable}><span class={`${styles.badge} ${styles.badgePrunable}`}>prunable</span></Show>
-                          <Show when={wt.detached}><span class={`${styles.badge} ${styles.badgeDetached}`}>detached</span></Show>
-                          <span>{wt.branch ?? "(no branch)"} · {wt.headSha.slice(0, 7)}</span>
+                  {(wt) => {
+                    const normalized = normalizePath(wt.path);
+                    const isActive = () => props.activeWorktreePath != null && normalizePath(props.activeWorktreePath) === normalized;
+                    const isOpen = () => {
+                      for (const p of props.openWorktreePaths) {
+                        if (normalizePath(p) === normalized) return true;
+                      }
+                      return false;
+                    };
+                    return (
+                      <div class={`${styles.worktreeRow} ${isActive() ? styles.worktreeRowActive : ""}`}>
+                        <div class={styles.worktreeInfo}>
+                          <div class={styles.worktreePath}>{wt.path}</div>
+                          <div class={styles.worktreeMeta}>
+                            <Show when={isActive()}><span class={`${styles.badge} ${styles.badgeActive}`}>current</span></Show>
+                            <Show when={!isActive() && isOpen()}><span class={`${styles.badge} ${styles.badgeOpen}`}>open</span></Show>
+                            <Show when={wt.locked}><span class={`${styles.badge} ${styles.badgeLocked}`}>locked</span></Show>
+                            <Show when={wt.prunable}><span class={`${styles.badge} ${styles.badgePrunable}`}>prunable</span></Show>
+                            <Show when={wt.detached}><span class={`${styles.badge} ${styles.badgeDetached}`}>detached</span></Show>
+                            <span>{wt.branch ?? "(no branch)"} · {wt.headSha.slice(0, 7)}</span>
+                          </div>
                         </div>
+                        <button class={styles.removeBtn} onClick={() => handleRemove(wt.path)}>Remove</button>
                       </div>
-                      <button class={styles.removeBtn} onClick={() => handleRemove(wt.path)}>Remove</button>
-                    </div>
-                  )}
+                    );
+                  }}
                 </For>
               </div>
             </Show>
