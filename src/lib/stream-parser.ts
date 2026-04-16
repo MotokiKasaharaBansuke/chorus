@@ -5,6 +5,7 @@ type StreamingStatus = "streaming" | "idle";
 
 const VALID_RATE_LIMIT_STATUSES: ReadonlySet<string> = new Set<RateLimitInfo["status"]>(["allowed", "allowed_warning", "rejected"]);
 const VALID_RATE_LIMIT_TYPES: ReadonlySet<string> = new Set<RateLimitInfo["rateLimitType"]>(["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "overage"]);
+const CONTEXT_USAGE_BANNER_RE = /^\d+%\s*context used/i;
 
 function isRateLimitStatus(s: string): s is RateLimitInfo["status"] {
   return VALID_RATE_LIMIT_STATUSES.has(s);
@@ -378,6 +379,9 @@ export class StreamParser {
   private handleSystemMessage(data: Record<string, unknown>) {
     const message = typeof data.message === "string" ? data.message : "";
     if (!message) return;
+
+    // Suppress context-usage banner — the ContextDonut indicator already shows this.
+    if (CONTEXT_USAGE_BANNER_RE.test(message)) return;
 
     this.messages.push({
       role: "system",
