@@ -42,8 +42,8 @@ export function ChatPanel(props: ChatPanelProps) {
   const [showModelPicker, setShowModelPicker] = createSignal(false);
   const [contextInputTokens, setContextInputTokens] = createSignal(0);
   const contextPct = createMemo(() => contextInputTokens() / CONTEXT_WINDOW_SIZE);
-  const contextBarColor = createMemo(() => contextColor(contextPct()));
-  const showContextBar = createMemo(() =>
+  const contextIndicatorColor = createMemo(() => contextColor(contextPct()));
+  const showContextIndicator = createMemo(() =>
     contextInputTokens() > 0 && props.tab.cliConfig.cliType === "claude-code"
   );
   const inputHistory: string[] = [];
@@ -600,22 +600,6 @@ export function ChatPanel(props: ChatPanelProps) {
           {sendReview.isSending() ? "Sending..." : "Send review to source"}
         </button>
       </Show>
-      <Show when={showContextBar()}>
-        <div
-          class={styles.contextBar}
-          onClick={() => sendAsSlashCommand("compact")}
-          title="Click to compact conversation"
-          style={{ "pointer-events": isStreaming() ? "none" : undefined }}
-        >
-          <div
-            class={styles.contextBarFill}
-            style={{ width: `${Math.min(contextPct() * 100, 100)}%`, background: contextBarColor() }}
-          />
-          <span class={styles.contextBarText} style={{ color: contextBarColor() }}>
-            {Math.round(contextPct() * 100)}% context used — click to compact
-          </span>
-        </div>
-      </Show>
       <ChatInput
         tabId={props.tab.id}
         cliType={props.tab.cliConfig.cliType}
@@ -635,6 +619,15 @@ export function ChatPanel(props: ChatPanelProps) {
         onRequestReview={review.requestReview}
         isReviewInProgress={review.isReviewInProgress()}
         inputHistory={inputHistory}
+        contextIndicator={
+          showContextIndicator()
+            ? {
+                pct: contextPct(),
+                color: contextIndicatorColor(),
+                onCompact: () => sendAsSlashCommand("compact"),
+              }
+            : undefined
+        }
       />
     </div>
   );

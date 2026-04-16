@@ -29,6 +29,60 @@ interface ChatInputProps {
   onRequestReview?: () => void;
   isReviewInProgress?: boolean;
   inputHistory: string[];
+  contextIndicator?: {
+    pct: number;
+    color: string;
+    onCompact: () => void;
+  };
+}
+
+const DONUT_RADIUS = 6;
+const DONUT_CIRCUMFERENCE = 2 * Math.PI * DONUT_RADIUS;
+
+interface ContextDonutProps {
+  pct: number;
+  color: string;
+  isStreaming: boolean;
+  onCompact: () => void;
+}
+
+function ContextDonut(props: ContextDonutProps) {
+  const [showTooltip, setShowTooltip] = createSignal(false);
+  const usedPct = () => Math.max(0, Math.min(100, Math.round(props.pct * 100)));
+  const remainingPct = () => 100 - usedPct();
+  const strokeDashoffset = () => DONUT_CIRCUMFERENCE * (1 - Math.min(props.pct, 1));
+
+  return (
+    <div
+      class={styles.contextDonutWrap}
+      onMouseEnter={() => setShowTooltip(true)}
+      onMouseLeave={() => setShowTooltip(false)}
+      onClick={() => { if (!props.isStreaming) props.onCompact(); }}
+      style={{ cursor: props.isStreaming ? "default" : "pointer" }}
+    >
+      <svg width="16" height="16" viewBox="0 0 16 16">
+        <circle
+          cx="8" cy="8" r={DONUT_RADIUS}
+          fill="none" stroke="#333" stroke-width="2.5"
+        />
+        <circle
+          cx="8" cy="8" r={DONUT_RADIUS}
+          fill="none" stroke={props.color} stroke-width="2.5"
+          stroke-dasharray={DONUT_CIRCUMFERENCE}
+          stroke-dashoffset={strokeDashoffset()}
+          stroke-linecap="round"
+          transform="rotate(-90 8 8)"
+          style={{ transition: "stroke-dashoffset 0.4s ease, stroke 0.4s ease" }}
+        />
+      </svg>
+      <Show when={showTooltip()}>
+        <div class={styles.contextTooltip}>
+          <span>{remainingPct()}% of context remaining until auto-compact.</span>
+          <span class={styles.contextTooltipAction}>Click to compact now.</span>
+        </div>
+      </Show>
+    </div>
+  );
 }
 
 export function ChatInput(props: ChatInputProps) {
@@ -190,6 +244,16 @@ export function ChatInput(props: ChatInputProps) {
             setSlashFilter("");
             if (!inputText().startsWith("/")) setInputText("/");
           }}>/</span>
+          <Show when={props.contextIndicator}>
+            {(indicator) => (
+              <ContextDonut
+                pct={indicator().pct}
+                color={indicator().color}
+                isStreaming={props.isStreaming}
+                onCompact={indicator().onCompact}
+              />
+            )}
+          </Show>
         </div>
         <div class={styles.inputRight}>
           <span class={styles.inputProject}>
