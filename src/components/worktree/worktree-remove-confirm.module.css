@@ -16,6 +16,8 @@
   padding: 22px;
   width: 440px;
   max-width: 92vw;
+  max-height: 80vh;
+  overflow-y: auto;
 }
 
 .title {
