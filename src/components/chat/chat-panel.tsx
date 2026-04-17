@@ -22,6 +22,7 @@ import { WorktreeResetConfirm } from "../worktree/worktree-reset-confirm";
 import { TerminalModal } from "../terminal/terminal-modal";
 import { REPL_COMMANDS, matchReplCommand } from "../../lib/repl-commands";
 import { CONTEXT_WINDOW_SIZE, AUTO_COMPACT_THRESHOLD, AUTO_COMPACT_RESET_THRESHOLD, contextColor, shouldAutoCompact } from "../../lib/context-window";
+import { appendToHistory } from "./input-history";
 import styles from "./chat-panel.module.css";
 
 
@@ -47,7 +48,9 @@ export function ChatPanel(props: ChatPanelProps) {
   const showContextIndicator = createMemo(() =>
     contextInputTokens() > 0 && props.tab.cliConfig.cliType === "claude-code"
   );
-  const inputHistory: string[] = [];
+  const [inputHistory, setInputHistory] = createSignal<readonly string[]>([]);
+  const appendInputHistory = (text: string) =>
+    setInputHistory(appendToHistory(inputHistory(), text));
   let scrollRef: HTMLDivElement | undefined;
   let containerRef: HTMLDivElement | undefined;
   // On macOS, pasting a file triggers BOTH a Tauri drop event AND a DOM paste event.
@@ -662,7 +665,8 @@ export function ChatPanel(props: ChatPanelProps) {
         onInterrupt={handleInterrupt}
         onRequestReview={review.requestReview}
         isReviewInProgress={review.isReviewInProgress()}
-        inputHistory={inputHistory}
+        inputHistory={inputHistory()}
+        onAppendHistory={appendInputHistory}
         contextIndicator={
           showContextIndicator()
             ? {

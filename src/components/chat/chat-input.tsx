@@ -1,12 +1,12 @@
 import { createSignal, For, Show } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { SlashMenu, getFiltered } from "./slash-menu";
+import { navigateHistory, type HistoryNavHandled } from "./input-history";
 import { useTabStore } from "../../stores/tab-store";
 import type { CliType, CliMode, AttachedImage } from "../../types";
 import styles from "./chat-panel.module.css";
 
 const CLAUDE_MODES: CliMode[] = ["default", "plan", "dangerously-skip-permissions"];
-const MAX_INPUT_HISTORY = 200;
 const CODEX_MODES: CliMode[] = ["default", "dangerously-skip-permissions"];
 const MODE_LABELS: Record<CliMode, string> = {
   default: "Default",
@@ -28,7 +28,8 @@ interface ChatInputProps {
   onInterrupt: () => void;
   onRequestReview?: () => void;
   isReviewInProgress?: boolean;
-  inputHistory: string[];
+  inputHistory: readonly string[];
+  onAppendHistory: (text: string) => void;
   contextIndicator?: {
     pct: number;
     color: string;
@@ -95,6 +96,9 @@ export function ChatInput(props: ChatInputProps) {
   const [previewImage, setPreviewImage] = createSignal<string | null>(null);
 
   let isCompositionJustEnded = false;
+  // Intentionally non-reactive: only consumed inside the keydown handler.
+  // A signal would force a re-render on every ↑/↓ press without changing
+  // any rendered output.
   let historyIdx = -1;
   let draftBeforeHistory = "";
   let textareaRef: HTMLTextAreaElement | undefined;
@@ -112,14 +116,17 @@ export function ChatInput(props: ChatInputProps) {
     store.updateMode(props.tabId, nextMode);
   }
 
+  function resetHistoryCursor() {
+    historyIdx = -1;
+    draftBeforeHistory = "";
+  }
+
   function handleSubmit() {
     if (props.isStreaming) return;
     const text = inputText().trim();
     if (!text) return;
-    props.inputHistory.unshift(text);
-    if (props.inputHistory.length > MAX_INPUT_HISTORY) props.inputHistory.length = MAX_INPUT_HISTORY;
-    historyIdx = -1;
-    draftBeforeHistory = "";
+    props.onAppendHistory(text);
+    resetHistoryCursor();
     props.onSubmit(text);
     setInputText("");
     if (textareaRef) { textareaRef.style.height = "auto"; }
@@ -129,6 +136,7 @@ export function ChatInput(props: ChatInputProps) {
     setShowSlash(false);
     setSlashIdx(0);
     setInputText("");
+    resetHistoryCursor();
     props.onSlashCommand(id);
   }
 
@@ -142,21 +150,41 @@ export function ChatInput(props: ChatInputProps) {
     return false;
   }
 
+  function applyHistoryResult(result: HistoryNavHandled) {
+    historyIdx = result.newHistoryIdx;
+    draftBeforeHistory = result.newDraft;
+    setInputText(result.newValue);
+    if (!textareaRef) return;
+    autoResize(textareaRef);
+    // Drop the caret to the end so a follow-up ↑/↓ at that position keeps
+    // stepping through history (first/last-line guard stays satisfied for
+    // single-line entries; multi-line entries let the textarea handle
+    // intra-text navigation first).
+    const pos = result.newValue.length;
+    textareaRef.setSelectionRange(pos, pos);
+  }
+
   /** Returns true if the key was handled by input history navigation. */
   function handleHistoryKey(e: KeyboardEvent): boolean {
-    if (e.key === "ArrowUp" && !e.shiftKey && props.inputHistory.length > 0) {
-      e.preventDefault();
-      if (historyIdx === -1) draftBeforeHistory = inputText();
-      if (historyIdx < props.inputHistory.length - 1) { historyIdx++; setInputText(props.inputHistory[historyIdx]); }
-      return true;
-    }
-    if (e.key === "ArrowDown" && !e.shiftKey && historyIdx >= 0) {
-      e.preventDefault();
-      historyIdx--;
-      setInputText(historyIdx >= 0 ? props.inputHistory[historyIdx] : draftBeforeHistory);
-      return true;
-    }
-    return false;
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return false;
+    if (!textareaRef) return false;
+    const result = navigateHistory({
+      key: e.key,
+      shiftKey: e.shiftKey,
+      altKey: e.altKey,
+      ctrlKey: e.ctrlKey,
+      metaKey: e.metaKey,
+      value: textareaRef.value,
+      selectionStart: textareaRef.selectionStart,
+      selectionEnd: textareaRef.selectionEnd,
+      historyIdx,
+      history: props.inputHistory,
+      draft: draftBeforeHistory,
+    });
+    if (!result.handled) return false;
+    e.preventDefault();
+    applyHistoryResult(result);
+    return true;
   }
 
   function handleKeyDown(e: KeyboardEvent) {
