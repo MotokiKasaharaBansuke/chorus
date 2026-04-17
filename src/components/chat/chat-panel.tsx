@@ -1,7 +1,7 @@
 import { createSignal, createEffect, createMemo, For, Show, onMount, onCleanup } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
-import { sendMessage as sendMessageCmd, killPty, spawnPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
+import { sendMessage as sendMessageCmd, killPty, spawnPty, spawnEphemeralPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
 import { useReviewRequest } from "../../hooks/use-review-request";
 import { useSendReview } from "../../hooks/use-send-review";
 import { getOrCreateParser } from "../../lib/stream-parser-registry";
@@ -20,6 +20,8 @@ import { classifyStreamError } from "../../lib/classify-error";
 import { isValidTempImagePath } from "../../lib/validate-path";
 import { submitWithBusyRetry } from "../../lib/submit-with-busy-retry";
 import { WorktreeResetConfirm } from "../worktree/worktree-reset-confirm";
+import { TerminalModal } from "../terminal/terminal-modal";
+import { REPL_COMMANDS, matchReplCommand } from "../../lib/repl-commands";
 import { CONTEXT_WINDOW_SIZE, AUTO_COMPACT_THRESHOLD, AUTO_COMPACT_RESET_THRESHOLD, contextColor, shouldAutoCompact } from "../../lib/context-window";
 import styles from "./chat-panel.module.css";
 
@@ -309,6 +311,12 @@ export function ChatPanel(props: ChatPanelProps) {
 
   async function handleSubmitFromInput(text: string) {
     if (isStreaming()) return;
+    // Intercept REPL-only commands (e.g. /login) before sending to stream session
+    const replId = matchReplCommand(text);
+    if (replId) {
+      await handleReplCommand(replId);
+      return;
+    }
     const images = attachedImages();
     const imagePayloads = images
       .filter(img => isValidTempImagePath(img.path) && img.base64Data && img.mediaType)
@@ -387,6 +395,34 @@ export function ChatPanel(props: ChatPanelProps) {
   }
 
   const [resetConfirm, setResetConfirm] = createSignal<{ isDirty: boolean } | null>(null);
+  const [replTerminal, setReplTerminal] = createSignal<{ title: string; ptyId: string } | null>(null);
+  let replInProgress = false;
+
+  async function handleReplCommand(id: string): Promise<boolean> {
+    const def = REPL_COMMANDS[id];
+    if (!def || replInProgress) return false;
+    replInProgress = true;
+    try {
+      // Kill any existing ephemeral PTY before opening a new one
+      const existing = replTerminal();
+      if (existing) {
+        await killPty(existing.ptyId).catch(() => {});
+        setReplTerminal(null);
+      }
+      const newPtyId = await spawnEphemeralPty(
+        def.command,
+        [...def.args],
+        props.tab.cliConfig.workingDir,
+      );
+      setReplTerminal({ title: def.title, ptyId: newPtyId });
+      return true;
+    } catch {
+      parser.addUserMessage(`[Error: Failed to run /${id}]`);
+      return false;
+    } finally {
+      replInProgress = false;
+    }
+  }
 
   const UI_COMMANDS: Record<string, () => void> = {
     "clear-conversation": () => {
@@ -414,9 +450,10 @@ export function ChatPanel(props: ChatPanelProps) {
     "model": () => setShowModelPicker(true),
   };
 
-  function selectSlashCommand(id: string) {
+  async function selectSlashCommand(id: string) {
     const handler = UI_COMMANDS[id];
     if (handler) { handler(); return; }
+    if (await handleReplCommand(id)) return;
     sendAsSlashCommand(id);
   }
 
@@ -494,6 +531,15 @@ export function ChatPanel(props: ChatPanelProps) {
 
   return (
     <div class={styles.container} ref={containerRef} data-tab-id={props.tab.id}>
+      <Show when={replTerminal()}>
+        {(term) => (
+          <TerminalModal
+            title={term().title}
+            ptyId={term().ptyId}
+            onClose={() => setReplTerminal(null)}
+          />
+        )}
+      </Show>
       <WorktreeResetConfirm
         worktree={resetConfirm() ? (props.tab.worktree ?? null) : null}
         isDirty={resetConfirm()?.isDirty ?? false}

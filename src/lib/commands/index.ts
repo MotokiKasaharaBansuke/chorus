@@ -1,4 +1,4 @@
-export { spawnPty, writePty, resizePty, killPty, sendMessage, listSessionIds, killZombieSessions, listZombieSessions, killSessionById } from "./pty-commands";
+export { spawnPty, writePty, resizePty, killPty, sendMessage, listSessionIds, killZombieSessions, listZombieSessions, killSessionById, spawnEphemeralPty } from "./pty-commands";
 export type { ImageAttachmentPayload, ZombieSessionInfo } from "./pty-commands";
 export { listDirectory, readFile, watchDirectory, unwatchDirectory, listSessions, readSession, listCodexSessions, readCodexSession, gitChangedFiles, gitHasTrackedChanges } from "./fs-commands";
 export type { SessionInfo } from "./fs-commands";

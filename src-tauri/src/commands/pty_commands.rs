@@ -2,13 +2,22 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use tauri::{AppHandle, State};
 
-use crate::cli::registry::{CliMode, CliType, resolve_command};
+use crate::cli::registry::{CliMode, CliType, find_binary, resolve_command};
 use crate::error::AppError;
 use crate::pty::manager::PtyManager;
 use crate::pty::session::ImageAttachment;
 
 const MAX_WRITE_SIZE: usize = 1_048_576;
 const MAX_IMAGE_ATTACHMENTS: usize = 10;
+
+/// Allowed (command, args) pairs for ephemeral PTY sessions.
+/// Only these exact combinations are permitted via `command_override`.
+const EPHEMERAL_ALLOWED: &[(&str, &[&str])] = &[
+    ("claude", &["auth", "login"]),
+    ("claude", &["auth", "logout"]),
+    ("claude", &["auth", "status"]),
+    ("claude", &["doctor"]),
+];
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PtySpawnConfig {
@@ -18,6 +27,12 @@ pub struct PtySpawnConfig {
     pub working_dir: String,
     pub cols: Option<u16>,
     pub rows: Option<u16>,
+    /// Override the command binary (e.g. "claude") for ephemeral PTY sessions.
+    /// When set, spawns a raw PTY with the given command instead of the normal
+    /// CLI resolution, ignoring `cli_type` / `mode` / `model`.
+    pub command_override: Option<String>,
+    /// Arguments for the overridden command.
+    pub args_override: Option<Vec<String>>,
 }
 
 #[tauri::command]
@@ -27,6 +42,30 @@ pub fn spawn_pty(
     app: AppHandle,
 ) -> Result<String, AppError> {
     let id = uuid::Uuid::new_v4().to_string();
+
+    // Ephemeral PTY: command_override bypasses normal CLI resolution.
+    // Only allow explicitly listed (command, args) pairs to prevent arbitrary execution.
+    if let Some(ref cmd_name) = config.command_override {
+        let args = config.args_override.unwrap_or_default();
+        let args_strs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let is_allowed = EPHEMERAL_ALLOWED.iter().any(|(cmd, allowed_args)| {
+            *cmd == cmd_name.as_str() && *allowed_args == args_strs.as_slice()
+        });
+        if !is_allowed {
+            return Err(AppError::PtySpawnFailed(
+                "Ephemeral command not in allowlist".into(),
+            ));
+        }
+        let command = find_binary(cmd_name)
+            .ok_or_else(|| AppError::CliNotFound(format!("{cmd_name} not found")))?
+            .to_string_lossy()
+            .to_string();
+        let cols = config.cols.unwrap_or(120);
+        let rows = config.rows.unwrap_or(30);
+        state.spawn_pty(&id, &command, &args, &config.working_dir, cols, rows, app)?;
+        return Ok(id);
+    }
+
     let (command, args) = resolve_command(&config.cli_type, &config.mode, &config.model)?;
 
     if config.cli_type.uses_stream_session() {
