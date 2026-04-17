@@ -67,6 +67,7 @@ pub fn run() {
             pty_commands::write_pty,
             pty_commands::resize_pty,
             pty_commands::kill_pty,
+            pty_commands::interrupt_pty,
             pty_commands::list_session_ids,
             pty_commands::kill_zombie_sessions,
             pty_commands::list_zombie_sessions,

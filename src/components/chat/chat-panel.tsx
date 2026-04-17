@@ -1,6 +1,6 @@
 import { createSignal, createEffect, createMemo, For, Show, onMount, onCleanup } from "solid-js";
 import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
-import { sendMessage as sendMessageCmd, killPty, spawnPty, spawnEphemeralPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
+import { sendMessage as sendMessageCmd, killPty, interruptPty, spawnPty, spawnEphemeralPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
 import { useReviewRequest } from "../../hooks/use-review-request";
 import { useSendReview } from "../../hooks/use-send-review";
 import { getOrCreateParser } from "../../lib/stream-parser-registry";
@@ -493,15 +493,21 @@ export function ChatPanel(props: ChatPanelProps) {
 
 
   async function handleInterrupt() {
-    // Abort any in-flight busy-retry loop so it doesn't respawn the session
-    // we're about to kill.
+    // Flip user-visible state synchronously, before awaiting the IPC.
+    // The send button reads `isStreaming` to disable itself; if we waited
+    // for `interruptPty` to round-trip first, a fast Enter press could
+    // sneak through and queue a `sendMessage` against the child we're
+    // about to kill.
     interrupted = true;
-    try {
-      await killPty(ptyId());
-    } catch { /* already stopped */ }
-    parser.addInterrupted();
     setIsStreaming(false);
     store.updateStatus(props.tab.id, "waiting");
+    // Interrupt — not kill — so the StreamSession (and its CLI session_id)
+    // survives. The next send_message resumes the same conversation via
+    // `--resume`, preserving model context.
+    try {
+      await interruptPty(ptyId());
+    } catch { /* session missing or already idle */ }
+    parser.addInterrupted();
   }
 
   const sendReview = useSendReview({

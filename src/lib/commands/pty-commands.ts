@@ -54,8 +54,25 @@ export async function resizePty(ptyId: string, cols: number, rows: number): Prom
   return invoke("resize_pty", { ptyId, cols, rows });
 }
 
+/**
+ * Discards the entire pty/stream session, including the CLI's `session_id`.
+ * The next `spawnPty` starts a fresh conversation with no `--resume`
+ * context. Use `interruptPty` instead when cancelling a running response
+ * but wanting the next message to continue the same thread.
+ */
 export async function killPty(ptyId: string): Promise<void> {
   return invoke("kill_pty", { ptyId });
+}
+
+/**
+ * Interrupts a stream session's running child process without discarding
+ * the session record. The next `sendMessage` call on this pty id resumes
+ * the same conversation (via CLI `--resume`), preserving the model's
+ * context. Use this instead of `killPty` when cancelling the current
+ * response mid-stream.
+ */
+export async function interruptPty(ptyId: string): Promise<void> {
+  return invoke("interrupt_pty", { ptyId });
 }
 
 export async function listSessionIds(): Promise<string[]> {
