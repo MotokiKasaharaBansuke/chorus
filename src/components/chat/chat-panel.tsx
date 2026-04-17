@@ -23,6 +23,7 @@ import { TerminalModal } from "../terminal/terminal-modal";
 import { REPL_COMMANDS, matchReplCommand } from "../../lib/repl-commands";
 import { CONTEXT_WINDOW_SIZE, AUTO_COMPACT_THRESHOLD, AUTO_COMPACT_RESET_THRESHOLD, contextColor, shouldAutoCompact } from "../../lib/context-window";
 import { appendToHistory } from "./input-history";
+import { SlashCommandQueue } from "./slash-command-queue";
 import styles from "./chat-panel.module.css";
 
 
@@ -117,8 +118,12 @@ export function ChatPanel(props: ChatPanelProps) {
         autoCompactTriggered = false;
       } else if (shouldAutoCompact(pct, isStreaming(), autoCompactTriggered)) {
         autoCompactTriggered = true;
+        const myGen = ++pendingAutoCompactGeneration;
         // queueMicrotask defers the async call outside the synchronous update callback
-        queueMicrotask(() => sendAsSlashCommand("compact"));
+        queueMicrotask(() => {
+          if (myGen !== pendingAutoCompactGeneration) return;
+          sendAsSlashCommand("compact", { silent: true });
+        });
       }
     }
   });
@@ -131,6 +136,7 @@ export function ChatPanel(props: ChatPanelProps) {
   const unsubStatus = parser.onStatusChange((status) => {
     setIsStreaming(status === "streaming");
     store.updateStatus(props.tab.id, status === "streaming" ? "running" : "waiting");
+    if (status === "idle") drainPendingSlashCommand();
   });
   onCleanup(unsubStatus);
 
@@ -146,6 +152,9 @@ export function ChatPanel(props: ChatPanelProps) {
     const id = ptyId();
     // Reset auto-compact guard on respawn so the new session can trigger compact independently
     autoCompactTriggered = false;
+    slashQueue.clear();
+    pendingDrainGeneration += 1;
+    pendingAutoCompactGeneration += 1;
     const unsub = streamEventDispatcher.subscribe(id, (payload) => {
       parser.processLine(payload.data);
     });
@@ -233,6 +242,19 @@ export function ChatPanel(props: ChatPanelProps) {
   let interrupted = false;
   const isCancelled = () => unmounted || interrupted;
   onCleanup(() => { unmounted = true; });
+
+  // Queues a single slash command sent while a turn is streaming so the request
+  // doesn't silently drop (auto-compact firing during a still-streaming turn,
+  // or a manual donut click landing between status flips). Drained when the
+  // parser reports "idle"; replaced by later requests so a stale auto-compact
+  // can't override an explicit user click.
+  const slashQueue = new SlashCommandQueue();
+  // Generation counters that invalidate any in-flight microtask when the
+  // conversation state changes (interrupt, PTY respawn). Two counters so the
+  // drain path and the auto-compact path can each be cancelled without
+  // invalidating each other when both fire in the same tick.
+  let pendingDrainGeneration = 0;
+  let pendingAutoCompactGeneration = 0;
 
   type SendResult = "sent" | "busy" | "error";
 
@@ -464,13 +486,30 @@ export function ChatPanel(props: ChatPanelProps) {
     sendAsSlashCommand(id);
   }
 
-  /** Send a slash command directly to the CLI */
-  async function sendAsSlashCommand(id: string) {
-    if (isStreaming()) return;
+  /** Send a slash command to the CLI. Queues if a turn is still streaming
+   *  so the request runs as soon as it ends, instead of being silently dropped.
+   *  `silent` suppresses the visible user message — used for auto-compact so
+   *  the chat history doesn't fill with synthetic /compact entries. */
+  async function sendAsSlashCommand(id: string, options?: { silent?: boolean }) {
+    const silent = options?.silent ?? false;
+    if (isStreaming()) {
+      slashQueue.enqueue({ id, silent });
+      return;
+    }
     const command = `/${id}`;
-    parser.addUserMessage(command);
+    if (!silent) parser.addUserMessage(command);
     setIsStreaming(true);
     await submitMessage(command);
+  }
+
+  function drainPendingSlashCommand() {
+    const cmd = slashQueue.drain();
+    if (!cmd) return;
+    const myGen = ++pendingDrainGeneration;
+    queueMicrotask(() => {
+      if (myGen !== pendingDrainGeneration) return;
+      sendAsSlashCommand(cmd.id, { silent: cmd.silent });
+    });
   }
 
 
@@ -507,6 +546,13 @@ export function ChatPanel(props: ChatPanelProps) {
     interrupted = true;
     setIsStreaming(false);
     store.updateStatus(props.tab.id, "waiting");
+    // Drop any queued slash command and re-arm auto-compact so the next high-pct
+    // turn can re-fire — otherwise the user is stuck with a triggered flag and
+    // a pending compact that the interrupt invalidated.
+    slashQueue.clear();
+    autoCompactTriggered = false;
+    pendingDrainGeneration += 1;
+    pendingAutoCompactGeneration += 1;
     // Interrupt — not kill — so the StreamSession (and its CLI session_id)
     // survives. The next send_message resumes the same conversation via
     // `--resume`, preserving model context.
