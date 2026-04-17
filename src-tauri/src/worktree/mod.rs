@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 pub use crate::settings::ShareCargoTarget;
 pub use create::create_worktree;
 pub use hook::run_post_create_hooks;
-pub use list::{find_git_repo_root, get_disk_usage, list_branches, list_worktrees};
+pub use list::{find_git_repo_root, get_current_branch, get_disk_usage, list_branches, list_worktrees};
 pub use remove::remove_worktree;
 
 // ---------- Shared types ----------

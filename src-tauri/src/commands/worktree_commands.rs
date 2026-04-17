@@ -18,6 +18,16 @@ pub fn list_branches(repo_root: String) -> Result<Vec<BranchInfo>, AppError> {
 }
 
 #[tauri::command]
+pub async fn get_current_branch(cwd: String) -> Result<Option<String>, AppError> {
+    if cwd.is_empty() {
+        return Ok(None);
+    }
+    tokio::task::spawn_blocking(move || worktree::get_current_branch(Path::new(&cwd)))
+        .await
+        .map_err(|e| AppError::FileSystemError(format!("get_current_branch task: {e}")))?
+}
+
+#[tauri::command]
 pub fn list_worktrees(repo_root: String) -> Result<Vec<WorktreeInfo>, AppError> {
     worktree::list_worktrees(Path::new(&repo_root))
 }

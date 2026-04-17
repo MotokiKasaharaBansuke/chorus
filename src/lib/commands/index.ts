@@ -8,6 +8,7 @@ export { loadSettings, saveSettings } from "./settings-commands";
 export {
   findGitRepoRoot,
   listBranches,
+  getCurrentBranch,
   listWorktrees,
   createWorktree,
   removeWorktree,

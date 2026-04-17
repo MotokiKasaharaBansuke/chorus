@@ -7,7 +7,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useTabStore } from "./stores/tab-store";
 import { useSidebarStore } from "./stores/sidebar-store";
 import { useSettingsStore } from "./stores/settings-store";
-import { spawnPty, killPty, findGitRepoRoot, createWorktree, listWorktrees, removeWorktree, gitHasTrackedChanges, listSessionIds, killZombieSessions, listZombieSessions, killSessionById } from "./lib/commands";
+import { spawnPty, killPty, findGitRepoRoot, createWorktree, listWorktrees, removeWorktree, gitHasTrackedChanges, getCurrentBranch, listSessionIds, killZombieSessions, listZombieSessions, killSessionById } from "./lib/commands";
 import type { ZombieSessionInfo } from "./lib/commands";
 import { buildSavedSession, persistSession, restoreSession, tryLoadSession } from "./lib/session";
 import { spawnPaneWithWorktree } from "./lib/worktree/spawn-pane";
@@ -31,6 +31,7 @@ import { TopBar } from "./components/top-bar/top-bar";
 import { useBottomTerminal } from "./hooks/use-bottom-terminal";
 import { useKeyboardShortcuts } from "./hooks/use-keyboard-shortcuts";
 import { useResizeHandle } from "./hooks/use-resize-handle";
+import { useActiveTabAttr } from "./hooks/use-active-tab-attr";
 import { removeParser } from "./lib/stream-parser-registry";
 import { effectivePtyId, isTabStreaming } from "./types";
 import type { CliConfig, CliMode, Tab } from "./types";
@@ -54,7 +55,6 @@ function App() {
   const [removeConfirm, setRemoveConfirm] = createSignal<
     { worktree: TabWorktree; isDirty: boolean } | null
   >(null);
-  const [activeRepoRoot, setActiveRepoRoot] = createSignal<string | null>(null);
   const [zombieSessions, setZombieSessions] = createSignal<ZombieSessionInfo[]>([]);
   const [isActiveTabStale, setIsActiveTabStale] = createSignal(false);
   let spawningCount = 0;
@@ -63,15 +63,18 @@ function App() {
     return spawnPty(config);
   }
 
-  // Track the repo root of the currently active pane so the worktree
-  // settings list can display that repo's worktrees.
-  createEffect(() => {
-    const tab = tabStore.activeTab;
-    if (!tab) { setActiveRepoRoot(null); return; }
-    if (tab.worktree?.repoRoot) { setActiveRepoRoot(tab.worktree.repoRoot); return; }
-    const dir = tab.cliConfig.workingDir;
-    if (!dir) { setActiveRepoRoot(null); return; }
-    findGitRepoRoot(dir).then(setActiveRepoRoot).catch(() => setActiveRepoRoot(null));
+  const activeTabAccessor = () => tabStore.activeTab;
+
+  const activeRepoRoot = useActiveTabAttr({
+    activeTab: activeTabAccessor,
+    pick: (tab) => tab.worktree?.repoRoot,
+    resolve: findGitRepoRoot,
+  });
+
+  const activeBranch = useActiveTabAttr({
+    activeTab: activeTabAccessor,
+    pick: (tab) => tab.worktree?.branch,
+    resolve: getCurrentBranch,
   });
 
   const openWorktreePaths = createMemo(() =>
@@ -611,7 +614,7 @@ function App() {
       <div class="app-body">
         <Show when={sidebarStore.isOpen}>
           <div class="sidebar-container" style={{ width: `${sidebarStore.width}px` }}>
-            <Sidebar workingDir={sidebarStore.workingDir} displayDir={tabStore.activeTab?.worktree?.repoRoot} onFileOpen={handleFileOpen} />
+            <Sidebar workingDir={sidebarStore.workingDir} displayDir={tabStore.activeTab?.worktree?.repoRoot} currentBranch={activeBranch()} onFileOpen={handleFileOpen} />
           </div>
           <div class="sidebar-resize" onMouseDown={sidebarResizeDown} />
         </Show>
