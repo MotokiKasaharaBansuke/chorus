@@ -3,12 +3,14 @@ import { createStore, reconcile } from "solid-js/store";
 import type { FileNode } from "../../types";
 import { listDirectory, watchDirectory, unwatchDirectory } from "../../lib/commands";
 import { useDirectoryWatch } from "../../hooks/use-directory-watch";
+import { BranchIcon } from "../icons";
 import { FileNodeComponent } from "./file-node";
 import styles from "./sidebar.module.css";
 
 interface SidebarProps {
   workingDir: string;
   displayDir?: string;
+  currentBranch?: string | null;
   onFileOpen?: (path: string) => void;
 }
 
@@ -81,6 +83,16 @@ export function Sidebar(props: SidebarProps) {
           )}
         </For>
       </div>
+      <Show when={props.currentBranch}>
+        {(branch) => (
+          <div class={styles.branchBar} title={branch()}>
+            <span class={styles.branchBarIcon}>
+              <BranchIcon size={12} />
+            </span>
+            <span class={styles.branchBarName}>{branch()}</span>
+          </div>
+        )}
+      </Show>
     </div>
   );
 }

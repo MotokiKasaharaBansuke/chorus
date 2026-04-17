@@ -47,6 +47,22 @@ export function RefreshIcon(props: { size?: number }) {
   );
 }
 
+/** Git branch icon */
+export function BranchIcon(props: { size?: number }) {
+  const s = props.size ?? 12;
+  return (
+    <svg width={s} height={s} viewBox="0 0 16 16" fill="none">
+      <path
+        d="M5 3.5a1.5 1.5 0 1 1-2 0 1.5 1.5 0 0 1 2 0zM4 6v4.5M4 10.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM13 5.5a1.5 1.5 0 1 1-2 0 1.5 1.5 0 0 1 2 0zM12 7v.5a3 3 0 0 1-3 3H7"
+        stroke="currentColor"
+        stroke-width="1.2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
+    </svg>
+  );
+}
+
 /** Terminal icon */
 export function TerminalIcon(props: { size?: number }) {
   const s = props.size ?? 16;

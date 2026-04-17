@@ -14,6 +14,10 @@ export function listBranches(repoRoot: string): Promise<BranchInfo[]> {
   return invoke<BranchInfo[]>("list_branches", { repoRoot });
 }
 
+export function getCurrentBranch(cwd: string): Promise<string | null> {
+  return invoke<string | null>("get_current_branch", { cwd });
+}
+
 export function listWorktrees(repoRoot: string): Promise<WorktreeInfo[]> {
   return invoke<WorktreeInfo[]>("list_worktrees", { repoRoot });
 }

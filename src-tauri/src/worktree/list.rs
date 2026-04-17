@@ -19,6 +19,30 @@ pub fn find_git_repo_root(path: &Path) -> Result<Option<PathBuf>, AppError> {
     }
 }
 
+/// Returns the branch name (or short SHA for detached HEAD) of the git
+/// repository containing `cwd`. Returns `None` when `cwd` is not inside a
+/// git repository or when HEAD cannot be resolved.
+pub fn get_current_branch(cwd: &Path) -> Result<Option<String>, AppError> {
+    if !cwd.exists() {
+        return Ok(None);
+    }
+    let sym = super::git::run_git(cwd, &["symbolic-ref", "--short", "HEAD"])?;
+    if sym.status.success() {
+        let name = super::git::stdout_utf8(&sym);
+        if !name.is_empty() {
+            return Ok(Some(name));
+        }
+    }
+    let sha = super::git::run_git(cwd, &["rev-parse", "--short", "HEAD"])?;
+    if sha.status.success() {
+        let value = super::git::stdout_utf8(&sha);
+        if !value.is_empty() {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
 pub fn list_worktrees(repo_root: &Path) -> Result<Vec<WorktreeInfo>, AppError> {
     let out = super::git::run_git(repo_root, &["worktree", "list", "--porcelain"])?;
     super::git::check_success(&out, "worktree-list")?;
@@ -150,6 +174,7 @@ fn walk_bytes(path: &Path) -> std::io::Result<u64> {
 mod tests {
     use super::*;
     use crate::worktree::test_support::{init_repo, run};
+    use std::process::Command;
     use tempfile::TempDir;
 
     #[test]
@@ -175,6 +200,47 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert!(list[0].branch.as_deref() == Some("main"));
         assert!(!list[0].head_sha.is_empty());
+    }
+
+    #[test]
+    fn get_current_branch_returns_main_after_init() {
+        let tmp = TempDir::new().unwrap();
+        init_repo(tmp.path());
+        let branch = get_current_branch(tmp.path()).unwrap();
+        assert_eq!(branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn get_current_branch_returns_none_for_non_repo() {
+        let tmp = TempDir::new().unwrap();
+        assert!(get_current_branch(tmp.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn get_current_branch_returns_name_on_orphan_branch() {
+        let tmp = TempDir::new().unwrap();
+        init_repo(tmp.path());
+        run(tmp.path(), &["checkout", "--orphan", "empty"]);
+        let branch = get_current_branch(tmp.path()).unwrap();
+        assert_eq!(branch.as_deref(), Some("empty"));
+    }
+
+    #[test]
+    fn get_current_branch_returns_sha_for_detached_head() {
+        let tmp = TempDir::new().unwrap();
+        init_repo(tmp.path());
+        let head = Command::new("git")
+            .current_dir(tmp.path())
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let full_sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        run(tmp.path(), &["checkout", "--detach", &full_sha]);
+        let branch = get_current_branch(tmp.path()).unwrap().unwrap();
+        assert!(!branch.is_empty());
+        assert!(full_sha.starts_with(&branch));
     }
 
     #[test]

@@ -42,6 +42,32 @@
   padding: 4px 0;
 }
 
+.branchBar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 14px;
+  border-top: 1px solid #2d2d2d;
+  background: #1e1e1e;
+  font-size: 11px;
+  color: #a0a0a0;
+  overflow: hidden;
+}
+
+.branchBarIcon {
+  flex-shrink: 0;
+  display: inline-flex;
+  color: #7d7d7d;
+}
+
+.branchBarName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* File Node */
 .node {
   display: flex;

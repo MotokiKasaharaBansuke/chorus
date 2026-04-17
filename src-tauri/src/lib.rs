@@ -92,6 +92,7 @@ pub fn run() {
             settings_commands::save_settings,
             worktree_commands::find_git_repo_root,
             worktree_commands::list_branches,
+            worktree_commands::get_current_branch,
             worktree_commands::list_worktrees,
             worktree_commands::create_worktree,
             worktree_commands::remove_worktree,
