@@ -224,10 +224,10 @@ impl StreamSession {
         images: Option<&[ImageAttachment]>,
         app: AppHandle,
     ) -> Result<(), AppError> {
-        {
+        let started = {
             let mut running = self.running_since.lock();
-            if let Some(started) = *running {
-                let elapsed = started.elapsed();
+            if let Some(prev) = *running {
+                let elapsed = prev.elapsed();
                 if elapsed < Self::STALE_LOCK_TIMEOUT {
                     tracing::warn!(pane_id = %pane_id, elapsed_ms = elapsed.as_millis(), "send_message rejected: running_since still held");
                     return Err(AppError::StreamSessionBusy("Already processing a message".into()));
@@ -237,12 +237,16 @@ impl StreamSession {
                 // Kill the stale process if PID is still set
                 self.kill();
             }
-            *running = Some(Instant::now());
-        }
+            let now = Instant::now();
+            *running = Some(now);
+            now
+        };
 
-        // Guard created immediately after setting running_since.
-        // If anything below panics or returns Err, Drop clears running_since automatically.
-        let guard = super::running_guard::MessageRunGuard::new(self.running_since.clone());
+        // Guard owns `started` so it only clears its own run on drop. If an
+        // interrupt + fresh send_message race in before the reader thread
+        // exits, the stale guard sees a different Instant and leaves the new
+        // run's busy flag intact.
+        let guard = super::running_guard::MessageRunGuard::new(self.running_since.clone(), started);
 
         let has_images = images.is_some_and(|imgs| !imgs.is_empty());
         let imgs = images.unwrap_or(&[]);
@@ -799,6 +803,20 @@ impl StreamSession {
 
     pub fn is_busy(&self) -> bool {
         self.running_since.lock().is_some()
+    }
+
+    /// Test-only: simulates the state after a successful first message so
+    /// tests can verify that `interrupt` preserves the `--resume` flag.
+    #[cfg(test)]
+    pub(super) fn mark_session_started_for_test(&self) {
+        self.has_session.store(true, Ordering::Release);
+    }
+
+    /// Test-only: reads the `has_session` flag without exposing the
+    /// underlying `AtomicBool` to non-test code.
+    #[cfg(test)]
+    pub(super) fn has_session_for_test(&self) -> bool {
+        self.has_session.load(Ordering::Acquire)
     }
 }
 

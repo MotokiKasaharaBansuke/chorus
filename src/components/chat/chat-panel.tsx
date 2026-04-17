@@ -1,6 +1,6 @@
 import { createSignal, createEffect, createMemo, For, Show, onMount, onCleanup } from "solid-js";
 import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
-import { sendMessage as sendMessageCmd, killPty, spawnPty, spawnEphemeralPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
+import { sendMessage as sendMessageCmd, killPty, interruptPty, spawnPty, spawnEphemeralPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
 import { useReviewRequest } from "../../hooks/use-review-request";
 import { useSendReview } from "../../hooks/use-send-review";
 import { getOrCreateParser } from "../../lib/stream-parser-registry";
@@ -22,6 +22,7 @@ import { WorktreeResetConfirm } from "../worktree/worktree-reset-confirm";
 import { TerminalModal } from "../terminal/terminal-modal";
 import { REPL_COMMANDS, matchReplCommand } from "../../lib/repl-commands";
 import { CONTEXT_WINDOW_SIZE, AUTO_COMPACT_THRESHOLD, AUTO_COMPACT_RESET_THRESHOLD, contextColor, shouldAutoCompact } from "../../lib/context-window";
+import { appendToHistory } from "./input-history";
 import styles from "./chat-panel.module.css";
 
 
@@ -47,7 +48,9 @@ export function ChatPanel(props: ChatPanelProps) {
   const showContextIndicator = createMemo(() =>
     contextInputTokens() > 0 && props.tab.cliConfig.cliType === "claude-code"
   );
-  const inputHistory: string[] = [];
+  const [inputHistory, setInputHistory] = createSignal<readonly string[]>([]);
+  const appendInputHistory = (text: string) =>
+    setInputHistory(appendToHistory(inputHistory(), text));
   let scrollRef: HTMLDivElement | undefined;
   let containerRef: HTMLDivElement | undefined;
   // On macOS, pasting a file triggers BOTH a Tauri drop event AND a DOM paste event.
@@ -82,7 +85,13 @@ export function ChatPanel(props: ChatPanelProps) {
     let inputTokens = 0;
     let outputTokens = 0;
     let turnCount = 0;
-    // lastContextTokens: the final assistant message's inputTokens = cumulative context usage
+    // `m.inputTokens` is `totalInputTokens(usage)` = fresh + cache-creation +
+    // cache-read, i.e. the actual context window occupancy for that turn.
+    // `lastContextTokens` keeps the most recent turn's value so the donut
+    // shows current usage; the running `inputTokens` sum is left in place
+    // for the usage-store, even though it overstates billing-relevant input
+    // (cache reads recur each turn). The dollar figure relies on `costUsd`
+    // from the CLI, so accuracy of the sum doesn't affect billing display.
     let lastContextTokens: number | undefined;
     for (const m of msgs) {
       if (m.role !== "assistant") continue;
@@ -490,15 +499,21 @@ export function ChatPanel(props: ChatPanelProps) {
 
 
   async function handleInterrupt() {
-    // Abort any in-flight busy-retry loop so it doesn't respawn the session
-    // we're about to kill.
+    // Flip user-visible state synchronously, before awaiting the IPC.
+    // The send button reads `isStreaming` to disable itself; if we waited
+    // for `interruptPty` to round-trip first, a fast Enter press could
+    // sneak through and queue a `sendMessage` against the child we're
+    // about to kill.
     interrupted = true;
-    try {
-      await killPty(ptyId());
-    } catch { /* already stopped */ }
-    parser.addInterrupted();
     setIsStreaming(false);
     store.updateStatus(props.tab.id, "waiting");
+    // Interrupt — not kill — so the StreamSession (and its CLI session_id)
+    // survives. The next send_message resumes the same conversation via
+    // `--resume`, preserving model context.
+    try {
+      await interruptPty(ptyId());
+    } catch { /* session missing or already idle */ }
+    parser.addInterrupted();
   }
 
   const sendReview = useSendReview({
@@ -662,7 +677,8 @@ export function ChatPanel(props: ChatPanelProps) {
         onInterrupt={handleInterrupt}
         onRequestReview={review.requestReview}
         isReviewInProgress={review.isReviewInProgress()}
-        inputHistory={inputHistory}
+        inputHistory={inputHistory()}
+        onAppendHistory={appendInputHistory}
         contextIndicator={
           showContextIndicator()
             ? {

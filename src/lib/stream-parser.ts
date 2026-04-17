@@ -15,6 +15,28 @@ function isRateLimitType(s: string): s is RateLimitInfo["rateLimitType"] {
   return VALID_RATE_LIMIT_TYPES.has(s);
 }
 
+/**
+ * Claude Code's `usage` object splits the input context across three fields
+ * once prompt caching kicks in. Summing all of them yields the actual window
+ * occupancy; reading only `input_tokens` leaves the context donut stuck near
+ * zero because the conversation history lives in `cache_read_input_tokens`.
+ */
+const INPUT_TOKEN_FIELDS = [
+  "input_tokens",
+  "cache_creation_input_tokens",
+  "cache_read_input_tokens",
+] as const;
+
+export function totalInputTokens(usage: Record<string, unknown> | null | undefined): number | undefined {
+  if (!usage) return undefined;
+  return INPUT_TOKEN_FIELDS.reduce<number | undefined>((acc, key) => {
+    const value = usage[key];
+    // Number.isFinite rejects NaN/±Infinity so a malformed field never
+    // poisons the running total (and, downstream, the context donut).
+    return Number.isFinite(value) ? (acc ?? 0) + (value as number) : acc;
+  }, undefined);
+}
+
 /** Manages streaming state for a single chat session (Claude Code or Codex) */
 export class StreamParser {
   private messages: ChatMessage[] = [];
@@ -322,7 +344,7 @@ export class StreamParser {
       ...this.messages[idx],
       costUsd: typeof data.total_cost_usd === "number" ? data.total_cost_usd : undefined,
       durationMs: typeof data.duration_ms === "number" ? data.duration_ms : undefined,
-      inputTokens: typeof usageObj?.input_tokens === "number" ? usageObj.input_tokens : undefined,
+      inputTokens: totalInputTokens(usageObj),
       outputTokens: typeof usageObj?.output_tokens === "number" ? usageObj.output_tokens : undefined,
     };
     this.notifyBatched();

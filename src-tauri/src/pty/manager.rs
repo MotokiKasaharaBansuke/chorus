@@ -110,6 +110,32 @@ impl PtyManager {
         }
     }
 
+    /// Interrupt the running child process of a stream session **without**
+    /// discarding the session record. This preserves the CLI's `session_id`
+    /// and `has_session` flag so the next `send_message` can resume the same
+    /// conversation via `--resume`, keeping the model's context intact.
+    ///
+    /// Mirrors `send_stream_message`'s pattern: clone the `Arc<StreamSession>`
+    /// and release the sessions map lock before calling `kill()`. `kill()`
+    /// spawns a detached thread for the SIGKILL escalation, which is fast
+    /// but still real work — holding the global sessions lock across it
+    /// would briefly block every other tab's spawn / send / list call.
+    pub fn interrupt_stream(&self, id: &str) -> Result<(), AppError> {
+        let session = {
+            let sessions = self.sessions.lock();
+            match sessions.get(id) {
+                Some(Session::Stream(s)) => Arc::clone(s),
+                Some(Session::Pty(_)) => return Err(AppError::PtyWriteFailed(
+                    "Not a stream session".into(),
+                )),
+                None => return Err(AppError::PtyNotFound(id.to_string())),
+            }
+        }; // Lock released here — before kill()
+        session.kill();
+        tracing::info!(session_id = id, "Stream session child interrupted (session preserved)");
+        Ok(())
+    }
+
     pub fn list_session_ids(&self) -> Vec<String> {
         self.sessions.lock().keys().cloned().collect()
     }
@@ -246,5 +272,69 @@ mod tests {
         let mgr = make_manager_with_streams(&["a"]);
         assert!(!mgr.kill_one("nonexistent"));
         assert_eq!(mgr.list_session_ids().len(), 1);
+    }
+
+    fn stream_session_id(mgr: &PtyManager, id: &str) -> String {
+        let sessions = mgr.sessions.lock();
+        match sessions.get(id) {
+            Some(Session::Stream(s)) => s.session_id.clone(),
+            _ => panic!("expected stream session at id {id}"),
+        }
+    }
+
+    fn stream_has_session(mgr: &PtyManager, id: &str) -> bool {
+        let sessions = mgr.sessions.lock();
+        match sessions.get(id) {
+            Some(Session::Stream(s)) => s.has_session_for_test(),
+            _ => panic!("expected stream session at id {id}"),
+        }
+    }
+
+    #[test]
+    fn interrupt_stream_preserves_session_in_map() {
+        let mgr = make_manager_with_streams(&["a"]);
+        let before_id = stream_session_id(&mgr, "a");
+
+        mgr.interrupt_stream("a").expect("interrupt should succeed");
+
+        // Session is still registered, and its session_id is unchanged so the
+        // next send_message resumes the same CLI conversation.
+        assert!(mgr.list_session_ids().contains(&"a".to_string()));
+        assert_eq!(before_id, stream_session_id(&mgr, "a"));
+    }
+
+    #[test]
+    fn interrupt_stream_preserves_has_session_flag() {
+        // This is the core guarantee: after interrupt, has_session must stay
+        // true so the next message spawns the CLI with --resume, not a fresh
+        // --session-id. Simulates the state after a first successful message.
+        let mgr = make_manager_with_streams(&["a"]);
+        {
+            let sessions = mgr.sessions.lock();
+            if let Some(Session::Stream(s)) = sessions.get("a") {
+                s.mark_session_started_for_test();
+            }
+        }
+
+        mgr.interrupt_stream("a").expect("interrupt should succeed");
+
+        assert!(stream_has_session(&mgr, "a"));
+    }
+
+    #[test]
+    fn interrupt_stream_is_idempotent() {
+        // Double-interrupt (rapid user clicks, or interrupt after CLI already
+        // exited) must not panic and must not destroy the session.
+        let mgr = make_manager_with_streams(&["a"]);
+        mgr.interrupt_stream("a").expect("first interrupt should succeed");
+        mgr.interrupt_stream("a").expect("second interrupt should succeed");
+        assert!(mgr.list_session_ids().contains(&"a".to_string()));
+    }
+
+    #[test]
+    fn interrupt_stream_returns_not_found_for_missing_id() {
+        let mgr = make_manager_with_streams(&["a"]);
+        let result = mgr.interrupt_stream("nonexistent");
+        assert!(matches!(result, Err(AppError::PtyNotFound(_))));
     }
 }

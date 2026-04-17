@@ -135,6 +135,17 @@ pub fn kill_pty(
     state.kill(&pty_id)
 }
 
+/// Interrupt a stream session's running child without discarding the
+/// session. The next `send_message` on this pty id resumes the same CLI
+/// conversation via `--resume`, so the model keeps its context.
+#[tauri::command]
+pub fn interrupt_pty(
+    pty_id: String,
+    state: State<'_, PtyManager>,
+) -> Result<(), AppError> {
+    state.interrupt_stream(&pty_id)
+}
+
 #[tauri::command]
 pub fn list_session_ids(
     state: State<'_, PtyManager>,
