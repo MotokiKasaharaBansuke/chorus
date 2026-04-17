@@ -85,7 +85,13 @@ export function ChatPanel(props: ChatPanelProps) {
     let inputTokens = 0;
     let outputTokens = 0;
     let turnCount = 0;
-    // lastContextTokens: the final assistant message's inputTokens = cumulative context usage
+    // `m.inputTokens` is `totalInputTokens(usage)` = fresh + cache-creation +
+    // cache-read, i.e. the actual context window occupancy for that turn.
+    // `lastContextTokens` keeps the most recent turn's value so the donut
+    // shows current usage; the running `inputTokens` sum is left in place
+    // for the usage-store, even though it overstates billing-relevant input
+    // (cache reads recur each turn). The dollar figure relies on `costUsd`
+    // from the CLI, so accuracy of the sum doesn't affect billing display.
     let lastContextTokens: number | undefined;
     for (const m of msgs) {
       if (m.role !== "assistant") continue;

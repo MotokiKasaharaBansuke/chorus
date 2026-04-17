@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { StreamParser } from "./stream-parser";
+import { StreamParser, totalInputTokens } from "./stream-parser";
 
 // ---- helpers ----
 
@@ -148,6 +148,26 @@ describe("StreamParser.processLine", () => {
     expect(msgs[0].durationMs).toBe(1200);
     expect(msgs[0].inputTokens).toBe(100);
     expect(msgs[0].outputTokens).toBe(50);
+  });
+
+  it("sums cache tokens into inputTokens so the context donut reflects full usage", () => {
+    const parser = new StreamParser();
+    parser.processLine(assistantLine("reply"));
+    parser.processLine(JSON.stringify({
+      type: "result",
+      total_cost_usd: 0.01,
+      duration_ms: 2000,
+      usage: {
+        input_tokens: 200,
+        cache_creation_input_tokens: 1_500,
+        cache_read_input_tokens: 80_000,
+        output_tokens: 500,
+      },
+    }));
+    const msgs = parser.getMessages();
+    // 200 + 1500 + 80000 — the real context window occupancy.
+    expect(msgs[0].inputTokens).toBe(81_700);
+    expect(msgs[0].outputTokens).toBe(500);
   });
 
   it("marks last assistant message complete on 'turn_complete'", () => {
@@ -527,5 +547,47 @@ describe("StreamParser.onRateLimit", () => {
       isUsingOverage: false,
     }));
     expect(callCount).toBe(1);
+  });
+});
+
+describe("totalInputTokens", () => {
+  it("returns undefined when usage is missing", () => {
+    expect(totalInputTokens(undefined)).toBeUndefined();
+  });
+
+  it("returns undefined when no token fields are present", () => {
+    expect(totalInputTokens({ other: 1 })).toBeUndefined();
+  });
+
+  it("returns input_tokens alone when that's the only field", () => {
+    expect(totalInputTokens({ input_tokens: 500 })).toBe(500);
+  });
+
+  it("sums input + cache creation + cache read", () => {
+    expect(totalInputTokens({
+      input_tokens: 200,
+      cache_creation_input_tokens: 1_500,
+      cache_read_input_tokens: 80_000,
+    })).toBe(81_700);
+  });
+
+  it("treats non-number fields as zero so malformed partials still report a total", () => {
+    expect(totalInputTokens({
+      input_tokens: 100,
+      cache_creation_input_tokens: "nope",
+      cache_read_input_tokens: 900,
+    })).toBe(1_000);
+  });
+
+  it("rejects NaN and Infinity so one bad field cannot freeze the donut at NaN", () => {
+    expect(totalInputTokens({
+      input_tokens: 100,
+      cache_creation_input_tokens: Number.NaN,
+      cache_read_input_tokens: Number.POSITIVE_INFINITY,
+    })).toBe(100);
+  });
+
+  it("accepts null usage (same as undefined)", () => {
+    expect(totalInputTokens(null)).toBeUndefined();
   });
 });
