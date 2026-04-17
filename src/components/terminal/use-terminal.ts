@@ -90,21 +90,43 @@ export function useTerminal(options: UseTerminalOptions) {
       }
     });
 
+    // Cap the per-pane queue so a slow RAF frame can't let it grow without
+    // bound when the backend bursts output (e.g. 20 panes streaming at once).
+    // Counts UTF-16 code units (`.length`), which approximates xterm's workload
+    // more closely than bytes and avoids per-chunk TextEncoder overhead.
+    const MAX_PENDING_CHARS = 2 * 1024 * 1024;
     let pendingWrites: string[] = [];
+    let pendingChars = 0;
+    let overflowWarned = false;
 
     function flushWrites() {
       rafId = null;
       if (!terminal || pendingWrites.length === 0) return;
       const batch = pendingWrites.join("");
       pendingWrites.length = 0;
+      pendingChars = 0;
+      overflowWarned = false;
       terminal.write(batch);
+      // detectStatus runs once per flush — bounded to RAF cadence (~60Hz) instead
+      // of once per PTY chunk, which previously scaled with output volume.
+      const status = detectStatus(batch, options.cliType);
+      if (status) options.onStatusChange(status);
     }
 
     unsubscribePtyOutput = ptyOutputDispatcher.subscribe(options.ptyId, (payload) => {
       if (!terminal) return;
-      pendingWrites.push(payload.data);
-      const status = detectStatus(payload.data, options.cliType);
-      if (status) options.onStatusChange(status);
+      // Drop the newest chunk on overflow, not the oldest: head-dropping would
+      // split ANSI/CSI sequences mid-stream and leave xterm's parser in an
+      // undefined state. Better to show slightly stale output than garbled output.
+      if (pendingChars + payload.data.length > MAX_PENDING_CHARS) {
+        if (!overflowWarned) {
+          console.warn(`[chorus] terminal output cap reached (${options.ptyId}); dropping new data until flushed`);
+          overflowWarned = true;
+        }
+      } else {
+        pendingWrites.push(payload.data);
+        pendingChars += payload.data.length;
+      }
       if (rafId === null) rafId = requestAnimationFrame(flushWrites);
     });
 
