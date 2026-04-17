@@ -8,6 +8,8 @@ interface PtySpawnConfig {
   workingDir: string;
   cols?: number;
   rows?: number;
+  commandOverride?: string;
+  argsOverride?: string[];
 }
 
 export async function spawnPty(
@@ -75,4 +77,25 @@ export async function listZombieSessions(keepIds: string[]): Promise<ZombieSessi
 
 export async function killSessionById(id: string): Promise<boolean> {
   return invoke<boolean>("kill_session_by_id", { id });
+}
+
+/** Spawn an ephemeral PTY for a one-off command (e.g. `claude auth login`). */
+export async function spawnEphemeralPty(
+  command: string,
+  args: string[],
+  workingDir: string,
+  cols?: number,
+  rows?: number,
+): Promise<string> {
+  return invoke<string>("spawn_pty", {
+    config: {
+      cliType: "shell",
+      mode: "default",
+      workingDir,
+      cols,
+      rows,
+      commandOverride: command,
+      argsOverride: args,
+    } satisfies PtySpawnConfig,
+  });
 }

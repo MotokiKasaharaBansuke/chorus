@@ -19,7 +19,9 @@ const COMMANDS: CommandDef[] = [
   { id: "resume-conversation", label: "Resume conversation", desc: "Continue a previous conversation", section: "Context", cliTypes: ["claude-code"] },
   // --- Model ---
   { id: "model", label: "Switch model…", desc: "Change the AI model", section: "Model" },
-  { id: "login", label: "Switch account…", desc: "Log in to a different Anthropic account", section: "Model", cliTypes: ["claude-code"] },
+  { id: "login", label: "Login", desc: "Log in to your Anthropic account", section: "Model", cliTypes: ["claude-code"] },
+  { id: "logout", label: "Logout", desc: "Log out from your Anthropic account", section: "Model", cliTypes: ["claude-code"] },
+  { id: "status", label: "Auth status", desc: "Show authentication status", section: "Model", cliTypes: ["claude-code"] },
   { id: "effort", label: "Effort", desc: "Set effort level", section: "Model", cliTypes: ["claude-code"] },
   { id: "thinking", label: "Thinking", desc: "Toggle extended thinking", section: "Model", cliTypes: ["claude-code"] },
   { id: "account", label: "Account & usage…", desc: "View account info", section: "Model", cliTypes: ["claude-code"] },
@@ -28,6 +30,7 @@ const COMMANDS: CommandDef[] = [
   { id: "mcp-config", label: "MCP servers", desc: "Configure MCP servers", section: "Customize", cliTypes: ["claude-code"] },
   { id: "config", label: "General config…", desc: "Open configuration", section: "Customize", cliTypes: ["claude-code"] },
   // --- Slash Commands (Claude Code only) ---
+  { id: "doctor", label: "Doctor", desc: "Check Claude Code installation health", section: "Model", cliTypes: ["claude-code"] },
   { id: "compact", label: "/compact", desc: "Compact conversation history", section: "Slash Commands", cliTypes: ["claude-code"] },
   { id: "init", label: "/init", desc: "Initialize project with CLAUDE.md", section: "Slash Commands", cliTypes: ["claude-code"] },
   { id: "review", label: "/review", desc: "Review code changes", section: "Slash Commands", cliTypes: ["claude-code"] },

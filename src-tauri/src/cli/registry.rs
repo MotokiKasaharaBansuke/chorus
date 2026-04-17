@@ -26,7 +26,7 @@ pub enum CliMode {
     DangerouslySkipPermissions,
 }
 
-fn find_binary(name: &str) -> Option<PathBuf> {
+pub fn find_binary(name: &str) -> Option<PathBuf> {
     // Check common paths for CLI binaries
     let paths = [
         format!("/usr/local/bin/{name}"),
