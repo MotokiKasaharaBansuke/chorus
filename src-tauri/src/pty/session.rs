@@ -28,11 +28,13 @@ pub struct StreamEventPayload {
     pub data: String,
 }
 
-/// Image attachment for stream-json input to Claude Code CLI.
+/// Image attachment sent from the frontend as a temp file path + media type.
+/// The actual image data is read from the file at send time, avoiding large
+/// base64 payloads in the IPC (Tauri command) layer.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageAttachment {
-    pub data: String,       // base64-encoded image data
+    pub path: String,       // absolute path to temp image file
     pub media_type: String, // e.g. "image/png"
 }
 
@@ -243,25 +245,33 @@ impl StreamSession {
         let guard = super::running_guard::MessageRunGuard::new(self.running_since.clone());
 
         let has_images = images.is_some_and(|imgs| !imgs.is_empty());
-        // Claude Code: images sent via stdin (stream-json).
-        // Slash commands (e.g. /compact) are passed directly as the `-p`
-        // argument so the CLI recognises them as commands, not prompt text.
-        // Codex: images saved to temp files and passed via --image flags.
+        let imgs = images.unwrap_or(&[]);
+        // Claude Code: read files now (O_NOFOLLOW, size-capped) and send via stdin.
+        // Codex: validate paths only — the CLI reads files itself via --image flags.
         let use_stream_input = has_images && self.cli_type == CliType::ClaudeCode;
-        let image_paths = if has_images && self.cli_type == CliType::Codex {
-            Self::save_images_to_temp(images.unwrap_or(&[]))?
+
+        // Pre-read image data for Claude Code (atomic validate + read with O_NOFOLLOW).
+        // For Codex, only validate paths — the CLI reads the files directly.
+        let read_images: Vec<(String, Vec<u8>)>;
+        let image_paths: Vec<String>;
+        if use_stream_input {
+            read_images = Self::validate_and_read_images(imgs)?;
+            image_paths = read_images.iter().map(|(p, _)| p.clone()).collect();
+        } else if has_images {
+            image_paths = Self::validate_image_paths(imgs)?;
+            read_images = Vec::new();
         } else {
-            Vec::new()
-        };
+            image_paths = Vec::new();
+            read_images = Vec::new();
+        }
 
         let (mut child, stdin, stdout, stderr) = self.spawn_cli_process(message, use_stream_input, &image_paths)?;
 
-        // Write stream-json input to stdin for image attachments
+        // Write stream-json input to stdin for Claude Code image attachments
         if use_stream_input {
             match stdin {
                 Some(stdin_handle) => {
-                    let imgs = images.unwrap_or(&[]);
-                    if let Err(e) = Self::write_stream_json_input(stdin_handle, message, imgs) {
+                    if let Err(e) = Self::write_stream_json_input(stdin_handle, message, imgs, &read_images) {
                         let _ = child.kill();
                         return Err(e);
                     }
@@ -272,6 +282,9 @@ impl StreamSession {
                 }
             }
         }
+
+        // Temp files are cleaned up by the reader thread after the CLI exits
+        // (covers both Claude Code and Codex paths).
 
         // Mark session as created so subsequent messages use --resume
         // (set AFTER successful stdin write to avoid --resume on a never-started session)
@@ -333,46 +346,116 @@ impl StreamSession {
         Ok((child, stdin, stdout, stderr))
     }
 
-    /// Save base64 image attachments to temp files for Codex `--image` flag.
-    /// Delegates to the existing `save_temp_image` command which has full security
-    /// hardening (O_EXCL, mode 0o600, size limits, extension allowlist).
-    const ALLOWED_MEDIA_TYPES: &[&str] = &["image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"];
+    const ALLOWED_MEDIA_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
 
-    fn save_images_to_temp(images: &[ImageAttachment]) -> Result<Vec<String>, AppError> {
+    /// 20 MiB — must match MAX_IMAGE_BYTES in image_commands.rs.
+    const MAX_IMAGE_READ_BYTES: u64 = 20 * 1024 * 1024;
+
+    /// Shared path-level validation: rejects traversal and paths outside temp dir.
+    fn assert_temp_image_path(path: &str) -> Result<(), AppError> {
+        let p = std::path::Path::new(path);
+        if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            return Err(AppError::ImageSaveFailed("Path traversal not allowed".into()));
+        }
+        if !path.starts_with("/tmp/chorus-images/") {
+            return Err(AppError::ImageSaveFailed("Image path outside temp directory".into()));
+        }
+        Ok(())
+    }
+
+    /// Shared media type validation.
+    fn assert_media_type(media_type: &str) -> Result<(), AppError> {
+        if !Self::ALLOWED_MEDIA_TYPES.contains(&media_type) {
+            return Err(AppError::ImageSaveFailed(format!(
+                "Unsupported media type: {media_type}",
+            )));
+        }
+        Ok(())
+    }
+
+    /// Validate a temp image path and read its contents atomically.
+    /// Opens with `O_NOFOLLOW` to reject symlinks without a TOCTOU window,
+    /// then checks size from the open fd before reading.
+    fn validate_and_read_image(path: &str) -> Result<Vec<u8>, AppError> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        Self::assert_temp_image_path(path)?;
+
+        // O_NOFOLLOW atomically rejects symlinks at open time (no TOCTOU window).
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|e| {
+                if e.raw_os_error() == Some(libc::ELOOP) {
+                    AppError::ImageSaveFailed("Symlinks not allowed".into())
+                } else {
+                    AppError::ImageSaveFailed(format!("Cannot open image {path}: {e}"))
+                }
+            })?;
+
+        let meta = file.metadata()
+            .map_err(|e| AppError::ImageSaveFailed(format!("Cannot stat image {path}: {e}")))?;
+        if !meta.is_file() {
+            return Err(AppError::ImageSaveFailed("Not a regular file".into()));
+        }
+        if meta.len() > Self::MAX_IMAGE_READ_BYTES {
+            return Err(AppError::ImageSaveFailed(format!(
+                "Image too large: {} bytes (max {})",
+                meta.len(), Self::MAX_IMAGE_READ_BYTES
+            )));
+        }
+
+        let mut bytes = Vec::with_capacity(meta.len() as usize);
+        std::io::Read::read_to_end(&mut file, &mut bytes)
+            .map_err(|e| AppError::ImageSaveFailed(format!("Failed to read image {path}: {e}")))?;
+        Ok(bytes)
+    }
+
+    /// Validate all image attachments, read their data, and return (path, bytes) pairs.
+    /// Paths are returned for cleanup; bytes are used for stream-json encoding.
+    fn validate_and_read_images(images: &[ImageAttachment]) -> Result<Vec<(String, Vec<u8>)>, AppError> {
+        let mut results = Vec::with_capacity(images.len());
+        for img in images {
+            Self::assert_media_type(&img.media_type)?;
+            let bytes = Self::validate_and_read_image(&img.path)?;
+            results.push((img.path.clone(), bytes));
+        }
+        Ok(results)
+    }
+
+    /// Validate image paths without reading (for Codex, which passes paths to --image).
+    fn validate_image_paths(images: &[ImageAttachment]) -> Result<Vec<String>, AppError> {
         let mut paths = Vec::with_capacity(images.len());
         for img in images {
-            if !Self::ALLOWED_MEDIA_TYPES.contains(&img.media_type.as_str()) {
-                return Err(AppError::ImageSaveFailed(format!(
-                    "Unsupported media type: {}",
-                    img.media_type
-                )));
-            }
-            let ext = img.media_type.strip_prefix("image/").unwrap_or("png");
-            // save_temp_image also validates extension via ALLOWED_EXTENSIONS
-            let path = crate::commands::image_commands::save_temp_image(
-                img.data.clone(),
-                Some(ext.to_string()),
-            )?;
-            paths.push(path);
+            Self::assert_media_type(&img.media_type)?;
+            Self::assert_temp_image_path(&img.path)?;
+            paths.push(img.path.clone());
         }
         Ok(paths)
     }
 
     /// Write a stream-json user message to stdin, then drop stdin so the CLI
-    /// processes the input. Used for image attachments.
+    /// processes the input. Uses pre-read image bytes (already validated and
+    /// size-capped by `validate_and_read_images`) to avoid TOCTOU issues.
     fn write_stream_json_input(
         stdin: std::process::ChildStdin,
         message: &str,
         images: &[ImageAttachment],
+        read_images: &[(String, Vec<u8>)],
     ) -> Result<(), AppError> {
+        use base64::Engine;
+        debug_assert_eq!(images.len(), read_images.len(), "images and read_images must have equal length");
+
         let mut content = Vec::new();
-        for img in images {
+        for (img, (_path, bytes)) in images.iter().zip(read_images.iter()) {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
             content.push(serde_json::json!({
                 "type": "image",
                 "source": {
                     "type": "base64",
                     "media_type": img.media_type,
-                    "data": img.data,
+                    "data": b64,
                 }
             }));
         }
@@ -454,9 +537,13 @@ impl StreamSession {
                     .unwrap_or("unknown");
                 tracing::error!(panic = msg, "Reader thread panicked");
             }
-            // Clean up Codex temp image files after the CLI process exits
+            // Clean up temp image files after the CLI process exits (both CLI types)
             for path in &temp_image_paths {
-                let _ = std::fs::remove_file(path);
+                if let Err(e) = std::fs::remove_file(path) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        tracing::warn!(path = %path, error = %e, "Failed to clean up temp image");
+                    }
+                }
             }
         });
     }
@@ -904,6 +991,101 @@ mod tests {
         assert!(is_sensitive_env_key("db_password"));
         assert!(is_sensitive_env_key("Db_Password"));
         assert!(!is_sensitive_env_key("anthropic_api_key"));
+    }
+
+    // ---- validate_and_read_image ----
+
+    #[test]
+    fn validate_read_rejects_path_traversal() {
+        let result = StreamSession::validate_and_read_image("/tmp/chorus-images/../etc/passwd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_read_rejects_outside_temp_dir() {
+        let result = StreamSession::validate_and_read_image("/etc/passwd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_read_rejects_home_dir_path() {
+        let result = StreamSession::validate_and_read_image("/Users/someone/photo.png");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_read_accepts_valid_temp_file() {
+        let dir = std::path::Path::new("/tmp/chorus-images");
+        let _ = std::fs::create_dir_all(dir);
+        let path = dir.join("test-validate-read.png");
+        std::fs::write(&path, b"fake-image-data").unwrap();
+        let result = StreamSession::validate_and_read_image(path.to_str().unwrap());
+        let _ = std::fs::remove_file(&path);
+        let bytes = result.unwrap();
+        assert_eq!(bytes, b"fake-image-data");
+    }
+
+    #[test]
+    fn validate_read_rejects_nonexistent_file() {
+        let result = StreamSession::validate_and_read_image(
+            "/tmp/chorus-images/nonexistent-abc123.png"
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_read_rejects_oversized_file() {
+        let dir = std::path::Path::new("/tmp/chorus-images");
+        let _ = std::fs::create_dir_all(dir);
+        let path = dir.join("test-oversize.png");
+        // Create a sparse file whose metadata reports > MAX_IMAGE_READ_BYTES
+        // without actually writing 20+ MiB of data.
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(StreamSession::MAX_IMAGE_READ_BYTES + 1).unwrap();
+        drop(file);
+        let result = StreamSession::validate_and_read_image(path.to_str().unwrap());
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_err());
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(err_msg.contains("too large"), "Expected 'too large' error, got: {err_msg}");
+    }
+
+    // ---- validate_image_paths ----
+
+    #[test]
+    fn validate_paths_rejects_unsupported_media_type() {
+        let images = vec![super::ImageAttachment {
+            path: "/tmp/chorus-images/test.png".into(),
+            media_type: "application/pdf".into(),
+        }];
+        let result = StreamSession::validate_image_paths(&images);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_paths_rejects_traversal() {
+        let images = vec![super::ImageAttachment {
+            path: "/tmp/chorus-images/../etc/passwd".into(),
+            media_type: "image/png".into(),
+        }];
+        let result = StreamSession::validate_image_paths(&images);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_paths_rejects_outside_temp_dir() {
+        let images = vec![super::ImageAttachment {
+            path: "/etc/passwd".into(),
+            media_type: "image/png".into(),
+        }];
+        let result = StreamSession::validate_image_paths(&images);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_paths_returns_empty_for_empty_input() {
+        let result = StreamSession::validate_image_paths(&[]);
+        assert!(result.unwrap().is_empty());
     }
 }
 

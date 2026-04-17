@@ -32,7 +32,7 @@ export async function writePty(ptyId: string, data: string): Promise<void> {
 }
 
 export interface ImageAttachmentPayload {
-  data: string;      // base64-encoded image data (no data: prefix)
+  path: string;      // absolute path to temp image file
   mediaType: string; // e.g. "image/png"
 }
 

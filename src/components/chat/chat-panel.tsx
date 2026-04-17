@@ -1,5 +1,4 @@
 import { createSignal, createEffect, createMemo, For, Show, onMount, onCleanup } from "solid-js";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
 import { sendMessage as sendMessageCmd, killPty, spawnPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
 import { useReviewRequest } from "../../hooks/use-review-request";
@@ -193,7 +192,7 @@ export function ChatPanel(props: ChatPanelProps) {
           setAttachedImages(prev =>
             prev.some(img => img.path === imported.path)
               ? prev
-              : [...prev, { name: p.split("/").pop() ?? "image", ...imported }]
+              : [...prev, { name: p.split("/").pop() ?? "image", path: imported.path, mediaType: imported.mediaType }]
           );
         } catch { /* unsupported format or read error — skip */ }
       }
@@ -311,17 +310,16 @@ export function ChatPanel(props: ChatPanelProps) {
     if (isStreaming()) return;
     const images = attachedImages();
     const imagePayloads = images
-      .filter(img => isValidTempImagePath(img.path) && img.base64Data && img.mediaType)
-      .map(img => ({ data: img.base64Data, mediaType: img.mediaType }));
+      .filter(img => isValidTempImagePath(img.path) && img.mediaType)
+      .map(img => ({ path: img.path, mediaType: img.mediaType }));
 
     parser.addUserMessage(text, images);
     setAttachedImages([]);
     setIsStreaming(true);
 
     await submitMessage(text, imagePayloads.length > 0 ? imagePayloads : undefined);
-    for (const img of images) {
-      deleteTempImage(img.path).catch(() => {});
-    }
+    // Temp files are cleaned up by the Rust reader thread after the CLI process
+    // exits, not here — the CLI may still be reading them when this returns.
   }
 
   async function handleImageFile(file: File) {
@@ -365,7 +363,7 @@ export function ChatPanel(props: ChatPanelProps) {
       const path = await saveTempImage(base64, saveExt);
       const name = file.name || `screenshot.${saveExt}`;
       const mediaType = `image/${saveExt}`;
-      setAttachedImages(prev => [...prev, { name, path, base64Data: base64, mediaType }]);
+      setAttachedImages(prev => [...prev, { name, path, mediaType }]);
     } catch { /* ignore */ }
   }
 

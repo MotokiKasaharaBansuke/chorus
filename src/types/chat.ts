@@ -1,8 +1,7 @@
-/** Image attached to a chat message (preview + send data). */
+/** Image attached to a chat message (preview via temp file path). */
 export interface AttachedImage {
   name: string;
   path: string;
-  base64Data: string;
   mediaType: string;
 }
 
