@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   contextColor,
   shouldAutoCompact,
-  CONTEXT_WINDOW_SIZE,
+  DEFAULT_CONTEXT_WINDOW_SIZE,
   AUTO_COMPACT_THRESHOLD,
   AUTO_COMPACT_RESET_THRESHOLD,
   CONTEXT_WARN_THRESHOLD,
@@ -71,8 +71,8 @@ describe("shouldAutoCompact", () => {
 });
 
 describe("constants", () => {
-  it("CONTEXT_WINDOW_SIZE is 200k tokens", () => {
-    expect(CONTEXT_WINDOW_SIZE).toBe(200_000);
+  it("DEFAULT_CONTEXT_WINDOW_SIZE is 200k tokens (fallback)", () => {
+    expect(DEFAULT_CONTEXT_WINDOW_SIZE).toBe(200_000);
   });
 
   it("AUTO_COMPACT_THRESHOLD is 0.9", () => {

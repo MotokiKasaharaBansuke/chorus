@@ -1,4 +1,8 @@
-export const CONTEXT_WINDOW_SIZE = 200_000;
+/** Fallback context window size used until the CLI reports the actual value
+ *  via `modelUsage.contextWindow` in the first `result` event. Conservative
+ *  default (200k) ensures auto-compact fires early rather than late for
+ *  models whose window size is unknown. */
+export const DEFAULT_CONTEXT_WINDOW_SIZE = 200_000;
 export const AUTO_COMPACT_THRESHOLD = 0.9;
 export const AUTO_COMPACT_RESET_THRESHOLD = 0.5;
 export const CONTEXT_WARN_THRESHOLD = 0.8;
