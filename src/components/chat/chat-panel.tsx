@@ -16,6 +16,7 @@ import { effectivePtyId, isTabStreaming } from "../../types";
 import { useTabStore } from "../../stores/tab-store";
 import { useSettingsStore } from "../../stores/settings-store";
 import { useUsageStore } from "../../stores/usage-store";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { classifyStreamError } from "../../lib/classify-error";
 import { isValidTempImagePath } from "../../lib/validate-path";
 import { submitWithBusyRetry } from "../../lib/submit-with-busy-retry";
@@ -25,6 +26,7 @@ import { REPL_COMMANDS, matchReplCommand } from "../../lib/repl-commands";
 import { DEFAULT_CONTEXT_WINDOW_SIZE, AUTO_COMPACT_RESET_THRESHOLD, contextColor, shouldAutoCompact, COMPACT_COMMAND } from "../../lib/context-window";
 import { appendToHistory } from "./input-history";
 import { SlashCommandQueue } from "./slash-command-queue";
+import { useThrottledUpdate } from "../../hooks/use-throttled-update";
 import styles from "./chat-panel.module.css";
 
 
@@ -64,6 +66,8 @@ export function ChatPanel(props: ChatPanelProps) {
   const appendInputHistory = (text: string) =>
     setInputHistory(appendToHistory(inputHistory(), text));
   const [pinnedPrompt, setPinnedPrompt] = createSignal<string | null>(null);
+  const [pinnedMessage, setPinnedMessage] = createSignal<ChatMessage | null>(null);
+  const [pinnedPreviewSrc, setPinnedPreviewSrc] = createSignal<string | null>(null);
   let scrollRef: HTMLDivElement | undefined;
   let containerRef: HTMLDivElement | undefined;
 
@@ -90,6 +94,42 @@ export function ChatPanel(props: ChatPanelProps) {
         virtualizer.scrollToIndex(len - 1, { align: "end" });
       }
     });
+  }
+
+  // Sticky section header: find the last user message whose DOM element has
+  // scrolled past the top of the scroll container. Uses the virtualizer's item
+  // positions to avoid querying the DOM on every scroll event.
+  function updatePinnedMessage() {
+    if (!scrollRef) return;
+    const scrollTop = scrollRef.scrollTop;
+    const msgs = messages();
+    if (msgs.length === 0) { setPinnedMessage(null); return; }
+
+    // Find user message indices
+    const userIndices: number[] = [];
+    for (let i = 0; i < msgs.length; i++) {
+      if (msgs[i].role === "user") userIndices.push(i);
+    }
+    if (userIndices.length === 0) { setPinnedMessage(null); return; }
+
+    // Find the last user message that has scrolled above the viewport.
+    // A message is "above" when the virtualizer's item start + its measured
+    // size is <= scrollTop (i.e. its bottom edge is at or above the scroll
+    // container's visible top).
+    const items = virtualizer.getVirtualItems();
+    const itemMap = new Map(items.map(v => [v.index, v]));
+
+    let pinnedIdx = -1;
+    for (const idx of userIndices) {
+      const vItem = itemMap.get(idx);
+      // If the item isn't rendered, use estimateSize to approximate.
+      const itemStart = vItem ? vItem.start : idx * 80;
+      if (itemStart < scrollTop) {
+        pinnedIdx = idx;
+      }
+    }
+
+    setPinnedMessage(pinnedIdx >= 0 ? msgs[pinnedIdx] : null);
   }
 
   // On macOS, pasting a file triggers BOTH a Tauri drop event AND a DOM paste event.
@@ -122,19 +162,10 @@ export function ChatPanel(props: ChatPanelProps) {
     prevIsActive = now;
   });
 
-  // Throttle DOM updates during streaming to ~30fps. The parser's rAF-batched
-  // notify already limits to 60fps, but SolidJS reconciliation + virtualizer
-  // measurement on every frame still starves the main thread when 4+ panes
-  // stream simultaneously. Halving the update rate keeps the UI responsive
-  // without perceptible lag (Claude Code output is text, not video).
-  const UPDATE_THROTTLE_MS = 32;
-  let lastUpdateAt = 0;
-  let pendingMsgs: ChatMessage[] | null = null;
-  let updateTimerId: ReturnType<typeof setTimeout> | null = null;
-
   function applyUpdate(msgs: ChatMessage[]) {
     setMessages(msgs);
     scrollToBottom();
+    queueMicrotask(updatePinnedMessage);
 
     const cliType = props.tab.cliConfig.cliType;
     let costUsd = 0;
@@ -170,51 +201,29 @@ export function ChatPanel(props: ChatPanelProps) {
     }
   }
 
-  const unsubUpdate = parser.onUpdate((msgs) => {
-    if (!props.isActive) return;
-
-    const now = performance.now();
-    const elapsed = now - lastUpdateAt;
-
-    if (elapsed >= UPDATE_THROTTLE_MS) {
-      // Enough time passed — apply immediately
-      lastUpdateAt = now;
-      pendingMsgs = null;
-      if (updateTimerId !== null) { clearTimeout(updateTimerId); updateTimerId = null; }
-      applyUpdate(msgs);
-    } else {
-      // Too soon — stash and schedule a trailing update so the final state
-      // always reaches the UI even if no more parser events arrive.
-      pendingMsgs = msgs;
-      if (updateTimerId === null) {
-        updateTimerId = setTimeout(() => {
-          updateTimerId = null;
-          if (pendingMsgs) {
-            lastUpdateAt = performance.now();
-            const m = pendingMsgs;
-            pendingMsgs = null;
-            applyUpdate(m);
-          }
-        }, UPDATE_THROTTLE_MS - elapsed);
-      }
-    }
+  // Throttle parser → DOM updates to ~30fps. The parser's rAF already limits
+  // to 60fps, but SolidJS reconciliation + virtualizer measurement at that
+  // rate starves the main thread with 4+ panes streaming simultaneously.
+  const throttle = useThrottledUpdate({
+    onApply: applyUpdate,
+    isActive: () => props.isActive,
+    isDisposed: () => unmounted,
   });
-  onCleanup(() => {
-    unsubUpdate();
-    if (updateTimerId !== null) clearTimeout(updateTimerId);
-  });
-  parser.onRateLimit((info) => {
+  const unsubUpdate = parser.onUpdate(throttle.handleUpdate);
+  onCleanup(unsubUpdate);
+  const unsubRateLimit = parser.onRateLimit((info) => {
     usageStore.updateRateLimit(info);
   });
-  parser.onContextWindow((size) => {
+  onCleanup(unsubRateLimit);
+  const unsubContextWindow = parser.onContextWindow((size) => {
     setContextWindowSize(size);
   });
+  onCleanup(unsubContextWindow);
 
   // Status transitions delegated to StreamParser (avoids re-parsing the same JSON line)
   const unsubStatus = parser.onStatusChange((status) => {
     setIsStreaming(status === "streaming");
     store.updateStatus(props.tab.id, status === "streaming" ? "running" : "waiting");
-    if (status !== "streaming") setPinnedPrompt(null);
     if (status === "idle") drainPendingSlashCommand();
   });
   onCleanup(unsubStatus);
@@ -229,11 +238,12 @@ export function ChatPanel(props: ChatPanelProps) {
   // Reactive subscriptions — re-subscribe automatically when ptyId changes (e.g. after respawn)
   createEffect(() => {
     const id = ptyId();
-    // Reset auto-compact guard on respawn so the new session can trigger compact independently
+    // Reset guards on respawn so the new session starts clean
     autoCompactTriggered = false;
     slashQueue.clear();
     pendingDrainGeneration += 1;
     pendingAutoCompactGeneration += 1;
+    throttle.reset();
     const unsub = streamEventDispatcher.subscribe(id, (payload) => {
       parser.processLine(payload.data);
     });
@@ -433,7 +443,6 @@ export function ChatPanel(props: ChatPanelProps) {
 
     parser.addUserMessage(text, images);
     setAttachedImages([]);
-    setPinnedPrompt(text);
     setIsStreaming(true);
 
     await submitMessage(text, imagePayloads.length > 0 ? imagePayloads : undefined);
@@ -625,7 +634,6 @@ export function ChatPanel(props: ChatPanelProps) {
     // about to kill.
     interrupted = true;
     setIsStreaming(false);
-    setPinnedPrompt(null);
     store.updateStatus(props.tab.id, "waiting");
     // Drop any queued slash command and re-arm auto-compact so the next high-pct
     // turn can re-fire — otherwise the user is stuck with a triggered flag and
