@@ -16,9 +16,10 @@ import { effectivePtyId, isTabStreaming } from "../../types";
 import { useTabStore } from "../../stores/tab-store";
 import { useSettingsStore } from "../../stores/settings-store";
 import { useUsageStore } from "../../stores/usage-store";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { classifyStreamError } from "../../lib/classify-error";
 import { isValidTempImagePath } from "../../lib/validate-path";
+import { findStickyUserMessage } from "../../lib/find-sticky-user-message";
+import { StickyPromptHeader } from "./sticky-prompt-header";
 import { submitWithBusyRetry } from "../../lib/submit-with-busy-retry";
 import { WorktreeResetConfirm } from "../worktree/worktree-reset-confirm";
 import { TerminalModal } from "../terminal/terminal-modal";
@@ -65,11 +66,11 @@ export function ChatPanel(props: ChatPanelProps) {
   const [inputHistory, setInputHistory] = createSignal<readonly string[]>([]);
   const appendInputHistory = (text: string) =>
     setInputHistory(appendToHistory(inputHistory(), text));
-  const [pinnedPrompt, setPinnedPrompt] = createSignal<string | null>(null);
-  const [pinnedMessage, setPinnedMessage] = createSignal<ChatMessage | null>(null);
-  const [pinnedPreviewSrc, setPinnedPreviewSrc] = createSignal<string | null>(null);
+  const [stickyMessage, setStickyMessage] = createSignal<ChatMessage | null>(null);
   let scrollRef: HTMLDivElement | undefined;
   let containerRef: HTMLDivElement | undefined;
+
+  const MESSAGE_ESTIMATE_SIZE = 80;
 
   // Virtual scroller — only renders messages visible in the viewport + a
   // small overscan buffer.  With 20 panes × 100+ messages each, this keeps
@@ -77,7 +78,7 @@ export function ChatPanel(props: ChatPanelProps) {
   const virtualizer = createVirtualizer({
     get count() { return messages().length; },
     getScrollElement: () => scrollRef ?? null,
-    estimateSize: () => 80,
+    estimateSize: () => MESSAGE_ESTIMATE_SIZE,
     overscan: 5,
   });
 
@@ -96,41 +97,27 @@ export function ChatPanel(props: ChatPanelProps) {
     });
   }
 
-  // Sticky section header: find the last user message whose DOM element has
-  // scrolled past the top of the scroll container. Uses the virtualizer's item
-  // positions to avoid querying the DOM on every scroll event.
-  function updatePinnedMessage() {
-    if (!scrollRef) return;
-    const scrollTop = scrollRef.scrollTop;
-    const msgs = messages();
-    if (msgs.length === 0) { setPinnedMessage(null); return; }
+  // Sticky section header: throttled via rAF to avoid per-scroll-event work.
+  let stickyRafId: number | null = null;
 
-    // Find user message indices
-    const userIndices: number[] = [];
-    for (let i = 0; i < msgs.length; i++) {
-      if (msgs[i].role === "user") userIndices.push(i);
-    }
-    if (userIndices.length === 0) { setPinnedMessage(null); return; }
-
-    // Find the last user message that has scrolled above the viewport.
-    // A message is "above" when the virtualizer's item start + its measured
-    // size is <= scrollTop (i.e. its bottom edge is at or above the scroll
-    // container's visible top).
-    const items = virtualizer.getVirtualItems();
-    const itemMap = new Map(items.map(v => [v.index, v]));
-
-    let pinnedIdx = -1;
-    for (const idx of userIndices) {
-      const vItem = itemMap.get(idx);
-      // If the item isn't rendered, use estimateSize to approximate.
-      const itemStart = vItem ? vItem.start : idx * 80;
-      if (itemStart < scrollTop) {
-        pinnedIdx = idx;
-      }
-    }
-
-    setPinnedMessage(pinnedIdx >= 0 ? msgs[pinnedIdx] : null);
+  function scheduleStickyUpdate() {
+    if (stickyRafId !== null) return;
+    stickyRafId = requestAnimationFrame(() => {
+      stickyRafId = null;
+      if (unmounted || !scrollRef) return;
+      const result = findStickyUserMessage(
+        messages(),
+        virtualizer.getVirtualItems(),
+        scrollRef.scrollTop,
+        MESSAGE_ESTIMATE_SIZE,
+      );
+      setStickyMessage(result);
+    });
   }
+
+  onCleanup(() => {
+    if (stickyRafId !== null) { cancelAnimationFrame(stickyRafId); stickyRafId = null; }
+  });
 
   // On macOS, pasting a file triggers BOTH a Tauri drop event AND a DOM paste event.
   // The Tauri drop event fires FIRST, so we record when a drop was handled,
@@ -165,7 +152,7 @@ export function ChatPanel(props: ChatPanelProps) {
   function applyUpdate(msgs: ChatMessage[]) {
     setMessages(msgs);
     scrollToBottom();
-    queueMicrotask(updatePinnedMessage);
+    scheduleStickyUpdate();
 
     const cliType = props.tab.cliConfig.cliType;
     let costUsd = 0;
@@ -728,19 +715,7 @@ export function ChatPanel(props: ChatPanelProps) {
           </svg>
         </button>
       </Show>
-      <Show when={pinnedPrompt()}>
-        {(prompt) => (
-          <div class={styles.pinnedPrompt}>
-            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="8" cy="8" r="6.5" />
-              <path d="M8 5v3.5" />
-              <circle cx="8" cy="12" r="0.5" fill="currentColor" />
-            </svg>
-            <span class={styles.pinnedPromptText}>{prompt()}</span>
-          </div>
-        )}
-      </Show>
-      <div ref={scrollRef} class={styles.messages} onClick={(e) => {
+      <div ref={scrollRef} class={styles.messages} onScroll={scheduleStickyUpdate} onClick={(e) => {
         const link = (e.target as HTMLElement).closest("a[data-external-link]") as HTMLAnchorElement | null;
         if (link) {
           e.preventDefault();
@@ -750,6 +725,9 @@ export function ChatPanel(props: ChatPanelProps) {
           }
         }
       }}>
+        <Show when={stickyMessage()}>
+          {(msg) => <StickyPromptHeader message={msg()} />}
+        </Show>
         <Show when={messages().length === 0}>
           <div class={styles.welcome}>
             <div class={styles.welcomeIcon}>
