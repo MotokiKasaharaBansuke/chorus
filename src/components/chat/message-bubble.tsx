@@ -1,10 +1,11 @@
-import { For, Show, createMemo, createSignal, createEffect, onCleanup, Index } from "solid-js";
+import { For, Show, createMemo, createSignal, Index } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { ChatMessage, ChatBlock } from "../../types";
 import { escapeHtml, highlightDiffLine } from "../../lib/format/html";
 import { applyInline as applyInlineRaw } from "../../lib/format/inline";
 import { formatInline } from "../../lib/format/markdown";
 import { isValidTempImagePath } from "../../lib/validate-path";
+import { ImagePreviewModal } from "./image-preview-modal";
 import styles from "./chat-panel.module.css";
 
 interface MessageBubbleProps {
@@ -331,15 +332,6 @@ export function MessageBubble(props: MessageBubbleProps) {
   const msg = () => props.message;
   const [previewSrc, setPreviewSrc] = createSignal<string | null>(null);
 
-  createEffect(() => {
-    if (!previewSrc()) return;
-    const dismissOnEscape = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setPreviewSrc(null);
-    };
-    document.addEventListener("keydown", dismissOnEscape);
-    onCleanup(() => document.removeEventListener("keydown", dismissOnEscape));
-  });
-
   return (
     <div class={`${styles.message} ${styles[msg().role]}`}>
       <Show when={msg().role === "user"}>
@@ -378,27 +370,7 @@ export function MessageBubble(props: MessageBubbleProps) {
         </div>
         <Show when={previewSrc()}>
           {(src) => (
-            <div
-              class={styles.imagePreviewOverlay}
-              role="dialog"
-              aria-modal="true"
-              aria-label="Image preview"
-              onClick={() => setPreviewSrc(null)}
-            >
-              <div class={styles.imagePreviewContent} onClick={(e) => e.stopPropagation()}>
-                <img
-                  src={src()}
-                  class={styles.imagePreviewImg}
-                  alt="Preview"
-                  onError={() => setPreviewSrc(null)}
-                />
-                <button
-                  class={styles.imagePreviewClose}
-                  aria-label="Close preview"
-                  onClick={() => setPreviewSrc(null)}
-                >×</button>
-              </div>
-            </div>
+            <ImagePreviewModal src={src()} onClose={() => setPreviewSrc(null)} />
           )}
         </Show>
       </Show>

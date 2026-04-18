@@ -1,6 +1,7 @@
 import { createSignal, For, Show } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { SlashMenu, getFiltered } from "./slash-menu";
+import { ImagePreviewModal } from "./image-preview-modal";
 import { navigateHistory, type HistoryNavHandled } from "./input-history";
 import { useTabStore } from "../../stores/tab-store";
 import type { CliType, CliMode, AttachedImage } from "../../types";
@@ -211,12 +212,7 @@ export function ChatInput(props: ChatInputProps) {
       </Show>
       <Show when={previewImage()}>
         {(path) => (
-          <div class={styles.imagePreviewOverlay} onClick={() => setPreviewImage(null)}>
-            <div class={styles.imagePreviewContent} onClick={(e) => e.stopPropagation()}>
-              <img src={convertFileSrc(path())} class={styles.imagePreviewImg} alt="preview" />
-              <button class={styles.imagePreviewClose} onClick={() => setPreviewImage(null)}>×</button>
-            </div>
-          </div>
+          <ImagePreviewModal src={convertFileSrc(path())} onClose={() => setPreviewImage(null)} />
         )}
       </Show>
       <Show when={props.attachedImages.length > 0}>
