@@ -22,7 +22,7 @@ import { submitWithBusyRetry } from "../../lib/submit-with-busy-retry";
 import { WorktreeResetConfirm } from "../worktree/worktree-reset-confirm";
 import { TerminalModal } from "../terminal/terminal-modal";
 import { REPL_COMMANDS, matchReplCommand } from "../../lib/repl-commands";
-import { CONTEXT_WINDOW_SIZE, AUTO_COMPACT_RESET_THRESHOLD, contextColor, shouldAutoCompact, COMPACT_COMMAND } from "../../lib/context-window";
+import { DEFAULT_CONTEXT_WINDOW_SIZE, AUTO_COMPACT_RESET_THRESHOLD, contextColor, shouldAutoCompact, COMPACT_COMMAND } from "../../lib/context-window";
 import { appendToHistory } from "./input-history";
 import { SlashCommandQueue } from "./slash-command-queue";
 import styles from "./chat-panel.module.css";
@@ -49,8 +49,13 @@ export function ChatPanel(props: ChatPanelProps) {
   const [pastSessions, setPastSessions] = createSignal<SessionInfo[]>([]);
   const [showSessionPicker, setShowSessionPicker] = createSignal(false);
   const [showModelPicker, setShowModelPicker] = createSignal(false);
+  const usageStore = useUsageStore();
+  const parser = getOrCreateParser(props.tab.id);
   const [contextInputTokens, setContextInputTokens] = createSignal(0);
-  const contextPct = createMemo(() => contextInputTokens() / CONTEXT_WINDOW_SIZE);
+  const [contextWindowSize, setContextWindowSize] = createSignal(
+    parser.getContextWindow() ?? DEFAULT_CONTEXT_WINDOW_SIZE,
+  );
+  const contextPct = createMemo(() => contextInputTokens() / contextWindowSize());
   const contextIndicatorColor = createMemo(() => contextColor(contextPct()));
   const showContextIndicator = createMemo(() =>
     contextInputTokens() > 0 && props.tab.cliConfig.cliType === "claude-code"
@@ -58,6 +63,7 @@ export function ChatPanel(props: ChatPanelProps) {
   const [inputHistory, setInputHistory] = createSignal<readonly string[]>([]);
   const appendInputHistory = (text: string) =>
     setInputHistory(appendToHistory(inputHistory(), text));
+  const [pinnedPrompt, setPinnedPrompt] = createSignal<string | null>(null);
   let scrollRef: HTMLDivElement | undefined;
   let containerRef: HTMLDivElement | undefined;
 
@@ -71,13 +77,19 @@ export function ChatPanel(props: ChatPanelProps) {
     overscan: 5,
   });
 
+  /** Scroll to the last message. Uses queueMicrotask instead of rAF so the
+   *  scroll executes in the same frame as the SolidJS DOM update — avoids
+   *  the 1-frame positional glitch caused by nested rAFs (notifyBatched →
+   *  onUpdate → scrollToBottom). The length is re-read inside the microtask
+   *  to avoid stale captures when setMessages fires between scheduling and
+   *  execution. */
   function scrollToBottom() {
-    const len = messages().length;
-    if (len > 0) {
-      requestAnimationFrame(() => {
+    queueMicrotask(() => {
+      const len = messages().length;
+      if (len > 0) {
         virtualizer.scrollToIndex(len - 1, { align: "end" });
-      });
-    }
+      }
+    });
   }
 
   // On macOS, pasting a file triggers BOTH a Tauri drop event AND a DOM paste event.
@@ -86,10 +98,6 @@ export function ChatPanel(props: ChatPanelProps) {
   const DROP_DEDUP_WINDOW_MS = 500;
   let dropHandledAt = 0;
   let autoCompactTriggered = false;
-
-  const usageStore = useUsageStore();
-
-  const parser = getOrCreateParser(props.tab.id);
 
   // Restore messages from a surviving parser (e.g. after layout-triggered remount)
   const existing = parser.getMessages();
@@ -114,13 +122,17 @@ export function ChatPanel(props: ChatPanelProps) {
     prevIsActive = now;
   });
 
-  const unsubUpdate = parser.onUpdate((msgs) => {
-    // Skip expensive DOM work when this tab is hidden in a multi-tab group.
-    // The parser still processes events (processLine runs regardless), so
-    // no data is lost — we just defer the SolidJS signal update + <For>
-    // reconciliation + DOM mutations until the tab becomes active.
-    if (!props.isActive) return;
+  // Throttle DOM updates during streaming to ~30fps. The parser's rAF-batched
+  // notify already limits to 60fps, but SolidJS reconciliation + virtualizer
+  // measurement on every frame still starves the main thread when 4+ panes
+  // stream simultaneously. Halving the update rate keeps the UI responsive
+  // without perceptible lag (Claude Code output is text, not video).
+  const UPDATE_THROTTLE_MS = 32;
+  let lastUpdateAt = 0;
+  let pendingMsgs: ChatMessage[] | null = null;
+  let updateTimerId: ReturnType<typeof setTimeout> | null = null;
 
+  function applyUpdate(msgs: ChatMessage[]) {
     setMessages(msgs);
     scrollToBottom();
 
@@ -156,16 +168,53 @@ export function ChatPanel(props: ChatPanelProps) {
         });
       }
     }
+  }
+
+  const unsubUpdate = parser.onUpdate((msgs) => {
+    if (!props.isActive) return;
+
+    const now = performance.now();
+    const elapsed = now - lastUpdateAt;
+
+    if (elapsed >= UPDATE_THROTTLE_MS) {
+      // Enough time passed — apply immediately
+      lastUpdateAt = now;
+      pendingMsgs = null;
+      if (updateTimerId !== null) { clearTimeout(updateTimerId); updateTimerId = null; }
+      applyUpdate(msgs);
+    } else {
+      // Too soon — stash and schedule a trailing update so the final state
+      // always reaches the UI even if no more parser events arrive.
+      pendingMsgs = msgs;
+      if (updateTimerId === null) {
+        updateTimerId = setTimeout(() => {
+          updateTimerId = null;
+          if (pendingMsgs) {
+            lastUpdateAt = performance.now();
+            const m = pendingMsgs;
+            pendingMsgs = null;
+            applyUpdate(m);
+          }
+        }, UPDATE_THROTTLE_MS - elapsed);
+      }
+    }
   });
-  onCleanup(unsubUpdate);
+  onCleanup(() => {
+    unsubUpdate();
+    if (updateTimerId !== null) clearTimeout(updateTimerId);
+  });
   parser.onRateLimit((info) => {
     usageStore.updateRateLimit(info);
+  });
+  parser.onContextWindow((size) => {
+    setContextWindowSize(size);
   });
 
   // Status transitions delegated to StreamParser (avoids re-parsing the same JSON line)
   const unsubStatus = parser.onStatusChange((status) => {
     setIsStreaming(status === "streaming");
     store.updateStatus(props.tab.id, status === "streaming" ? "running" : "waiting");
+    if (status !== "streaming") setPinnedPrompt(null);
     if (status === "idle") drainPendingSlashCommand();
   });
   onCleanup(unsubStatus);
@@ -384,6 +433,7 @@ export function ChatPanel(props: ChatPanelProps) {
 
     parser.addUserMessage(text, images);
     setAttachedImages([]);
+    setPinnedPrompt(text);
     setIsStreaming(true);
 
     await submitMessage(text, imagePayloads.length > 0 ? imagePayloads : undefined);
@@ -575,6 +625,7 @@ export function ChatPanel(props: ChatPanelProps) {
     // about to kill.
     interrupted = true;
     setIsStreaming(false);
+    setPinnedPrompt(null);
     store.updateStatus(props.tab.id, "waiting");
     // Drop any queued slash command and re-arm auto-compact so the next high-pct
     // turn can re-fire — otherwise the user is stuck with a triggered flag and
@@ -669,6 +720,18 @@ export function ChatPanel(props: ChatPanelProps) {
           </svg>
         </button>
       </Show>
+      <Show when={pinnedPrompt()}>
+        {(prompt) => (
+          <div class={styles.pinnedPrompt}>
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="8" cy="8" r="6.5" />
+              <path d="M8 5v3.5" />
+              <circle cx="8" cy="12" r="0.5" fill="currentColor" />
+            </svg>
+            <span class={styles.pinnedPromptText}>{prompt()}</span>
+          </div>
+        )}
+      </Show>
       <div ref={scrollRef} class={styles.messages} onClick={(e) => {
         const link = (e.target as HTMLElement).closest("a[data-external-link]") as HTMLAnchorElement | null;
         if (link) {
@@ -726,7 +789,7 @@ export function ChatPanel(props: ChatPanelProps) {
                   <Show when={msg()}>
                     {(m) => (
                       <div
-                        ref={(el) => requestAnimationFrame(() => virtualizer.measureElement(el))}
+                        ref={(el) => queueMicrotask(() => virtualizer.measureElement(el))}
                         data-index={vItem.index}
                         style={{
                           position: "absolute",

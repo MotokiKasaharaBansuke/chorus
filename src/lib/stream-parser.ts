@@ -43,7 +43,11 @@ export class StreamParser {
   private listeners: Array<(messages: ChatMessage[]) => void> = [];
   private statusListeners: Array<(status: StreamingStatus) => void> = [];
   private rateLimitListeners: Array<(info: RateLimitInfo) => void> = [];
+  private contextWindowListeners: Array<(size: number) => void> = [];
   private isRafScheduled = false;
+  /** Context window size reported by the CLI via `modelUsage` in `result` events.
+   *  Null until the first result arrives; callers should fall back to a default. */
+  private detectedContextWindow: number | null = null;
 
   onUpdate(fn: (messages: ChatMessage[]) => void): () => void {
     this.listeners.push(fn);
@@ -61,6 +65,17 @@ export class StreamParser {
   onRateLimit(fn: (info: RateLimitInfo) => void): () => void {
     this.rateLimitListeners.push(fn);
     return () => { this.rateLimitListeners = this.rateLimitListeners.filter(l => l !== fn); };
+  }
+
+  /** Register a callback for context window size discovery.
+   *  Fires once per `result` event that contains `modelUsage.contextWindow`. */
+  onContextWindow(fn: (size: number) => void): () => void {
+    this.contextWindowListeners.push(fn);
+    return () => { this.contextWindowListeners = this.contextWindowListeners.filter(l => l !== fn); };
+  }
+
+  getContextWindow(): number | null {
+    return this.detectedContextWindow;
   }
 
   /** Return a shallow copy of the messages array, preserving individual message
@@ -358,6 +373,22 @@ export class StreamParser {
       inputTokens: totalInputTokens(usageObj),
       outputTokens: typeof usageObj?.output_tokens === "number" ? usageObj.output_tokens : undefined,
     };
+
+    // Extract contextWindow from modelUsage (e.g. {"claude-opus-4-6[1m]": {contextWindow: 1000000}})
+    const modelUsage = this.toRecord(data.modelUsage);
+    if (modelUsage) {
+      for (const key of Object.keys(modelUsage)) {
+        const entry = this.toRecord(modelUsage[key]);
+        if (entry && typeof entry.contextWindow === "number" && entry.contextWindow > 0) {
+          if (this.detectedContextWindow !== entry.contextWindow) {
+            this.detectedContextWindow = entry.contextWindow;
+            for (const fn of this.contextWindowListeners) fn(entry.contextWindow);
+          }
+          break;
+        }
+      }
+    }
+
     this.notifyBatched();
   }
 
