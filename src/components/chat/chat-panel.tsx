@@ -1,4 +1,5 @@
 import { createSignal, createEffect, createMemo, For, Show, onMount, onCleanup } from "solid-js";
+import { createVirtualizer } from "@tanstack/solid-virtual";
 import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
 import { sendMessage as sendMessageCmd, killPty, interruptPty, spawnPty, spawnEphemeralPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
 import { useReviewRequest } from "../../hooks/use-review-request";
@@ -21,7 +22,7 @@ import { submitWithBusyRetry } from "../../lib/submit-with-busy-retry";
 import { WorktreeResetConfirm } from "../worktree/worktree-reset-confirm";
 import { TerminalModal } from "../terminal/terminal-modal";
 import { REPL_COMMANDS, matchReplCommand } from "../../lib/repl-commands";
-import { CONTEXT_WINDOW_SIZE, AUTO_COMPACT_THRESHOLD, AUTO_COMPACT_RESET_THRESHOLD, contextColor, shouldAutoCompact } from "../../lib/context-window";
+import { CONTEXT_WINDOW_SIZE, AUTO_COMPACT_RESET_THRESHOLD, contextColor, shouldAutoCompact, COMPACT_COMMAND } from "../../lib/context-window";
 import { appendToHistory } from "./input-history";
 import { SlashCommandQueue } from "./slash-command-queue";
 import styles from "./chat-panel.module.css";
@@ -29,6 +30,11 @@ import styles from "./chat-panel.module.css";
 
 interface ChatPanelProps {
   tab: Tab;
+  /** When false, the panel skips expensive DOM updates (setMessages, scroll,
+   *  usage calculation) while still processing stream events so the parser
+   *  stays current. On becoming active, the latest state is flushed to the UI
+   *  in one pass. This avoids wasted work for hidden tabs in multi-tab groups. */
+  isActive: boolean;
 }
 
 export function ChatPanel(props: ChatPanelProps) {
@@ -54,6 +60,26 @@ export function ChatPanel(props: ChatPanelProps) {
     setInputHistory(appendToHistory(inputHistory(), text));
   let scrollRef: HTMLDivElement | undefined;
   let containerRef: HTMLDivElement | undefined;
+
+  // Virtual scroller — only renders messages visible in the viewport + a
+  // small overscan buffer.  With 20 panes × 100+ messages each, this keeps
+  // the DOM at ~200 nodes total instead of 2,000+.
+  const virtualizer = createVirtualizer({
+    get count() { return messages().length; },
+    getScrollElement: () => scrollRef ?? null,
+    estimateSize: () => 80,
+    overscan: 5,
+  });
+
+  function scrollToBottom() {
+    const len = messages().length;
+    if (len > 0) {
+      requestAnimationFrame(() => {
+        virtualizer.scrollToIndex(len - 1, { align: "end" });
+      });
+    }
+  }
+
   // On macOS, pasting a file triggers BOTH a Tauri drop event AND a DOM paste event.
   // The Tauri drop event fires FIRST, so we record when a drop was handled,
   // then suppress the subsequent DOM paste if it arrives within the dedup window.
@@ -69,30 +95,40 @@ export function ChatPanel(props: ChatPanelProps) {
   const existing = parser.getMessages();
   if (existing.length > 0) {
     setMessages(existing);
-    // Scroll to bottom after restoring
-    requestAnimationFrame(() => {
-      if (scrollRef) scrollRef.scrollTop = scrollRef.scrollHeight;
-    });
+    scrollToBottom();
   }
 
+  // When isActive transitions false→true, flush the latest parser state into
+  // the UI in one pass. Uses a prev-value guard so it fires only on the
+  // transition, not on every re-evaluation where isActive is already true.
+  let prevIsActive = props.isActive;
+  createEffect(() => {
+    const now = props.isActive;
+    if (now && !prevIsActive) {
+      const latest = parser.getMessages();
+      if (latest.length > 0) {
+        setMessages(latest);
+        scrollToBottom();
+      }
+    }
+    prevIsActive = now;
+  });
+
   const unsubUpdate = parser.onUpdate((msgs) => {
-    setMessages([...msgs]);
-    requestAnimationFrame(() => {
-      if (scrollRef) scrollRef.scrollTop = scrollRef.scrollHeight;
-    });
+    // Skip expensive DOM work when this tab is hidden in a multi-tab group.
+    // The parser still processes events (processLine runs regardless), so
+    // no data is lost — we just defer the SolidJS signal update + <For>
+    // reconciliation + DOM mutations until the tab becomes active.
+    if (!props.isActive) return;
+
+    setMessages(msgs);
+    scrollToBottom();
 
     const cliType = props.tab.cliConfig.cliType;
     let costUsd = 0;
     let inputTokens = 0;
     let outputTokens = 0;
     let turnCount = 0;
-    // `m.inputTokens` is `totalInputTokens(usage)` = fresh + cache-creation +
-    // cache-read, i.e. the actual context window occupancy for that turn.
-    // `lastContextTokens` keeps the most recent turn's value so the donut
-    // shows current usage; the running `inputTokens` sum is left in place
-    // for the usage-store, even though it overstates billing-relevant input
-    // (cache reads recur each turn). The dollar figure relies on `costUsd`
-    // from the CLI, so accuracy of the sum doesn't affect billing display.
     let lastContextTokens: number | undefined;
     for (const m of msgs) {
       if (m.role !== "assistant") continue;
@@ -106,23 +142,17 @@ export function ChatPanel(props: ChatPanelProps) {
       usageStore.updateTabUsage({ tabId: props.tab.id, tabTitle: props.tab.title, cliType, costUsd, inputTokens, outputTokens, turnCount });
     }
 
-    // Update context window tracking and schedule auto-compact if needed.
-    // onStatusChange("idle") fires before this rAF callback, so isStreaming() is already false
-    // when a turn completes — making it safe to check here without an extra effect.
     if (cliType === "claude-code" && lastContextTokens !== undefined) {
       setContextInputTokens(lastContextTokens);
-      // contextPct() is already updated synchronously by setContextInputTokens above
       const pct = contextPct();
       if (pct < AUTO_COMPACT_RESET_THRESHOLD) {
-        // Reset after a successful compact has brought context back down
         autoCompactTriggered = false;
       } else if (shouldAutoCompact(pct, isStreaming(), autoCompactTriggered)) {
         autoCompactTriggered = true;
         const myGen = ++pendingAutoCompactGeneration;
-        // queueMicrotask defers the async call outside the synchronous update callback
         queueMicrotask(() => {
           if (myGen !== pendingAutoCompactGeneration) return;
-          sendAsSlashCommand("compact", { silent: true });
+          sendAsSlashCommand(COMPACT_COMMAND, { silent: true });
         });
       }
     }
@@ -473,7 +503,7 @@ export function ChatPanel(props: ChatPanelProps) {
       input.click();
     },
     "resume-conversation": () => {
-      if (scrollRef) scrollRef.scrollTop = 0;
+      virtualizer.scrollToIndex(0);
       if (messages().length > 0) { setMessages([]); parser.loadSession([]); }
     },
     "model": () => setShowModelPicker(true),
@@ -684,9 +714,37 @@ export function ChatPanel(props: ChatPanelProps) {
             </Show>
           </div>
         </Show>
-        <For each={messages()}>
-          {(msg) => <MessageBubble message={msg} />}
-        </For>
+        {/* Virtualized message list — only renders messages in the viewport
+            + overscan buffer.  Absolute positioning + transform avoids layout
+            recalculations when items above the viewport change height. */}
+        <Show when={messages().length > 0}>
+          <div style={{ height: `${virtualizer.getTotalSize()}px`, width: "100%", position: "relative" }}>
+            <For each={virtualizer.getVirtualItems()}>
+              {(vItem) => {
+                const msg = () => messages()[vItem.index];
+                return (
+                  <Show when={msg()}>
+                    {(m) => (
+                      <div
+                        ref={(el) => requestAnimationFrame(() => virtualizer.measureElement(el))}
+                        data-index={vItem.index}
+                        style={{
+                          position: "absolute",
+                          top: 0,
+                          left: 0,
+                          width: "100%",
+                          transform: `translateY(${vItem.start}px)`,
+                        }}
+                      >
+                        <MessageBubble message={m()} />
+                      </div>
+                    )}
+                  </Show>
+                );
+              }}
+            </For>
+          </div>
+        </Show>
       </div>
       <Show when={isStreaming()}>
         <BusySpinner />
@@ -730,7 +788,7 @@ export function ChatPanel(props: ChatPanelProps) {
             ? {
                 pct: contextPct(),
                 color: contextIndicatorColor(),
-                onCompact: () => sendAsSlashCommand("compact"),
+                onCompact: () => sendAsSlashCommand(COMPACT_COMMAND),
               }
             : undefined
         }

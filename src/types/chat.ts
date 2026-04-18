@@ -16,7 +16,10 @@ export type ChatBlock =
 
 export interface ChatMessage {
   role: "assistant" | "user" | "system";
-  blocks: ChatBlock[];
+  /** Treat as frozen after creation — buildSnapshot() returns shallow copies
+   *  that share block references, so in-place mutation (e.g. push) would
+   *  corrupt every snapshot. Always spread: `[...msg.blocks, newBlock]`. */
+  blocks: readonly ChatBlock[];
   isStreaming: boolean;
   model?: string;
   costUsd?: number;
