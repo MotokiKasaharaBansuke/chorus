@@ -16,15 +16,17 @@ import { effectivePtyId, isTabStreaming } from "../../types";
 import { useTabStore } from "../../stores/tab-store";
 import { useSettingsStore } from "../../stores/settings-store";
 import { useUsageStore } from "../../stores/usage-store";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { classifyStreamError } from "../../lib/classify-error";
 import { isValidTempImagePath } from "../../lib/validate-path";
 import { submitWithBusyRetry } from "../../lib/submit-with-busy-retry";
 import { WorktreeResetConfirm } from "../worktree/worktree-reset-confirm";
 import { TerminalModal } from "../terminal/terminal-modal";
 import { REPL_COMMANDS, matchReplCommand } from "../../lib/repl-commands";
-import { CONTEXT_WINDOW_SIZE, AUTO_COMPACT_RESET_THRESHOLD, contextColor, shouldAutoCompact, COMPACT_COMMAND } from "../../lib/context-window";
+import { DEFAULT_CONTEXT_WINDOW_SIZE, AUTO_COMPACT_RESET_THRESHOLD, contextColor, shouldAutoCompact, COMPACT_COMMAND } from "../../lib/context-window";
 import { appendToHistory } from "./input-history";
 import { SlashCommandQueue } from "./slash-command-queue";
+import { useThrottledUpdate } from "../../hooks/use-throttled-update";
 import styles from "./chat-panel.module.css";
 
 
@@ -49,8 +51,13 @@ export function ChatPanel(props: ChatPanelProps) {
   const [pastSessions, setPastSessions] = createSignal<SessionInfo[]>([]);
   const [showSessionPicker, setShowSessionPicker] = createSignal(false);
   const [showModelPicker, setShowModelPicker] = createSignal(false);
+  const usageStore = useUsageStore();
+  const parser = getOrCreateParser(props.tab.id);
   const [contextInputTokens, setContextInputTokens] = createSignal(0);
-  const contextPct = createMemo(() => contextInputTokens() / CONTEXT_WINDOW_SIZE);
+  const [contextWindowSize, setContextWindowSize] = createSignal(
+    parser.getContextWindow() ?? DEFAULT_CONTEXT_WINDOW_SIZE,
+  );
+  const contextPct = createMemo(() => contextInputTokens() / contextWindowSize());
   const contextIndicatorColor = createMemo(() => contextColor(contextPct()));
   const showContextIndicator = createMemo(() =>
     contextInputTokens() > 0 && props.tab.cliConfig.cliType === "claude-code"
@@ -58,6 +65,9 @@ export function ChatPanel(props: ChatPanelProps) {
   const [inputHistory, setInputHistory] = createSignal<readonly string[]>([]);
   const appendInputHistory = (text: string) =>
     setInputHistory(appendToHistory(inputHistory(), text));
+  const [pinnedPrompt, setPinnedPrompt] = createSignal<string | null>(null);
+  const [pinnedMessage, setPinnedMessage] = createSignal<ChatMessage | null>(null);
+  const [pinnedPreviewSrc, setPinnedPreviewSrc] = createSignal<string | null>(null);
   let scrollRef: HTMLDivElement | undefined;
   let containerRef: HTMLDivElement | undefined;
 
@@ -71,13 +81,55 @@ export function ChatPanel(props: ChatPanelProps) {
     overscan: 5,
   });
 
+  /** Scroll to the last message. Uses queueMicrotask instead of rAF so the
+   *  scroll executes in the same frame as the SolidJS DOM update — avoids
+   *  the 1-frame positional glitch caused by nested rAFs (notifyBatched →
+   *  onUpdate → scrollToBottom). The length is re-read inside the microtask
+   *  to avoid stale captures when setMessages fires between scheduling and
+   *  execution. */
   function scrollToBottom() {
-    const len = messages().length;
-    if (len > 0) {
-      requestAnimationFrame(() => {
+    queueMicrotask(() => {
+      const len = messages().length;
+      if (len > 0) {
         virtualizer.scrollToIndex(len - 1, { align: "end" });
-      });
+      }
+    });
+  }
+
+  // Sticky section header: find the last user message whose DOM element has
+  // scrolled past the top of the scroll container. Uses the virtualizer's item
+  // positions to avoid querying the DOM on every scroll event.
+  function updatePinnedMessage() {
+    if (!scrollRef) return;
+    const scrollTop = scrollRef.scrollTop;
+    const msgs = messages();
+    if (msgs.length === 0) { setPinnedMessage(null); return; }
+
+    // Find user message indices
+    const userIndices: number[] = [];
+    for (let i = 0; i < msgs.length; i++) {
+      if (msgs[i].role === "user") userIndices.push(i);
     }
+    if (userIndices.length === 0) { setPinnedMessage(null); return; }
+
+    // Find the last user message that has scrolled above the viewport.
+    // A message is "above" when the virtualizer's item start + its measured
+    // size is <= scrollTop (i.e. its bottom edge is at or above the scroll
+    // container's visible top).
+    const items = virtualizer.getVirtualItems();
+    const itemMap = new Map(items.map(v => [v.index, v]));
+
+    let pinnedIdx = -1;
+    for (const idx of userIndices) {
+      const vItem = itemMap.get(idx);
+      // If the item isn't rendered, use estimateSize to approximate.
+      const itemStart = vItem ? vItem.start : idx * 80;
+      if (itemStart < scrollTop) {
+        pinnedIdx = idx;
+      }
+    }
+
+    setPinnedMessage(pinnedIdx >= 0 ? msgs[pinnedIdx] : null);
   }
 
   // On macOS, pasting a file triggers BOTH a Tauri drop event AND a DOM paste event.
@@ -86,10 +138,6 @@ export function ChatPanel(props: ChatPanelProps) {
   const DROP_DEDUP_WINDOW_MS = 500;
   let dropHandledAt = 0;
   let autoCompactTriggered = false;
-
-  const usageStore = useUsageStore();
-
-  const parser = getOrCreateParser(props.tab.id);
 
   // Restore messages from a surviving parser (e.g. after layout-triggered remount)
   const existing = parser.getMessages();
@@ -114,15 +162,10 @@ export function ChatPanel(props: ChatPanelProps) {
     prevIsActive = now;
   });
 
-  const unsubUpdate = parser.onUpdate((msgs) => {
-    // Skip expensive DOM work when this tab is hidden in a multi-tab group.
-    // The parser still processes events (processLine runs regardless), so
-    // no data is lost — we just defer the SolidJS signal update + <For>
-    // reconciliation + DOM mutations until the tab becomes active.
-    if (!props.isActive) return;
-
+  function applyUpdate(msgs: ChatMessage[]) {
     setMessages(msgs);
     scrollToBottom();
+    queueMicrotask(updatePinnedMessage);
 
     const cliType = props.tab.cliConfig.cliType;
     let costUsd = 0;
@@ -156,11 +199,26 @@ export function ChatPanel(props: ChatPanelProps) {
         });
       }
     }
+  }
+
+  // Throttle parser → DOM updates to ~30fps. The parser's rAF already limits
+  // to 60fps, but SolidJS reconciliation + virtualizer measurement at that
+  // rate starves the main thread with 4+ panes streaming simultaneously.
+  const throttle = useThrottledUpdate({
+    onApply: applyUpdate,
+    isActive: () => props.isActive,
+    isDisposed: () => unmounted,
   });
+  const unsubUpdate = parser.onUpdate(throttle.handleUpdate);
   onCleanup(unsubUpdate);
-  parser.onRateLimit((info) => {
+  const unsubRateLimit = parser.onRateLimit((info) => {
     usageStore.updateRateLimit(info);
   });
+  onCleanup(unsubRateLimit);
+  const unsubContextWindow = parser.onContextWindow((size) => {
+    setContextWindowSize(size);
+  });
+  onCleanup(unsubContextWindow);
 
   // Status transitions delegated to StreamParser (avoids re-parsing the same JSON line)
   const unsubStatus = parser.onStatusChange((status) => {
@@ -180,11 +238,12 @@ export function ChatPanel(props: ChatPanelProps) {
   // Reactive subscriptions — re-subscribe automatically when ptyId changes (e.g. after respawn)
   createEffect(() => {
     const id = ptyId();
-    // Reset auto-compact guard on respawn so the new session can trigger compact independently
+    // Reset guards on respawn so the new session starts clean
     autoCompactTriggered = false;
     slashQueue.clear();
     pendingDrainGeneration += 1;
     pendingAutoCompactGeneration += 1;
+    throttle.reset();
     const unsub = streamEventDispatcher.subscribe(id, (payload) => {
       parser.processLine(payload.data);
     });
@@ -669,6 +728,18 @@ export function ChatPanel(props: ChatPanelProps) {
           </svg>
         </button>
       </Show>
+      <Show when={pinnedPrompt()}>
+        {(prompt) => (
+          <div class={styles.pinnedPrompt}>
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="8" cy="8" r="6.5" />
+              <path d="M8 5v3.5" />
+              <circle cx="8" cy="12" r="0.5" fill="currentColor" />
+            </svg>
+            <span class={styles.pinnedPromptText}>{prompt()}</span>
+          </div>
+        )}
+      </Show>
       <div ref={scrollRef} class={styles.messages} onClick={(e) => {
         const link = (e.target as HTMLElement).closest("a[data-external-link]") as HTMLAnchorElement | null;
         if (link) {
@@ -726,7 +797,7 @@ export function ChatPanel(props: ChatPanelProps) {
                   <Show when={msg()}>
                     {(m) => (
                       <div
-                        ref={(el) => requestAnimationFrame(() => virtualizer.measureElement(el))}
+                        ref={(el) => queueMicrotask(() => virtualizer.measureElement(el))}
                         data-index={vItem.index}
                         style={{
                           position: "absolute",
