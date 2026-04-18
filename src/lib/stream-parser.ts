@@ -374,22 +374,29 @@ export class StreamParser {
       outputTokens: typeof usageObj?.output_tokens === "number" ? usageObj.output_tokens : undefined,
     };
 
-    // Extract contextWindow from modelUsage (e.g. {"claude-opus-4-6[1m]": {contextWindow: 1000000}})
-    const modelUsage = this.toRecord(data.modelUsage);
-    if (modelUsage) {
-      for (const key of Object.keys(modelUsage)) {
-        const entry = this.toRecord(modelUsage[key]);
-        if (entry && typeof entry.contextWindow === "number" && entry.contextWindow > 0) {
-          if (this.detectedContextWindow !== entry.contextWindow) {
-            this.detectedContextWindow = entry.contextWindow;
-            for (const fn of this.contextWindowListeners) fn(entry.contextWindow);
-          }
-          break;
-        }
-      }
-    }
-
+    this.updateContextWindow(data);
     this.notifyBatched();
+  }
+
+  /** Extract contextWindow from the `modelUsage` map in a `result` event.
+   *  Uses the first model entry with a valid finite contextWindow value. */
+  private updateContextWindow(data: Record<string, unknown>) {
+    const modelUsage = this.toRecord(data.modelUsage);
+    if (!modelUsage) return;
+
+    const entry = Object.values(modelUsage)
+      .map(v => this.toRecord(v))
+      .find(e => e !== undefined
+        && typeof e.contextWindow === "number"
+        && Number.isFinite(e.contextWindow)
+        && e.contextWindow > 0);
+    if (!entry) return;
+
+    const size = entry.contextWindow as number;
+    if (this.detectedContextWindow === size) return;
+
+    this.detectedContextWindow = size;
+    for (const fn of this.contextWindowListeners) fn(size);
   }
 
   private handleTurnComplete(_data: Record<string, unknown>) {
