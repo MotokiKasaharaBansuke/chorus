@@ -63,8 +63,14 @@ export class StreamParser {
     return () => { this.rateLimitListeners = this.rateLimitListeners.filter(l => l !== fn); };
   }
 
+  /** Return a shallow copy of the messages array, preserving individual message
+   *  references so that SolidJS `<For>` only re-renders items whose reference
+   *  actually changed (i.e. messages modified via spread in handleResult/
+   *  handleTurnComplete/handleUserToolResult). Without this, every update
+   *  re-renders ALL MessageBubbles — with 8 panes × 50+ messages the main
+   *  thread starves and the app freezes. */
   private buildSnapshot(): ChatMessage[] {
-    return this.messages.map(m => ({ ...m, blocks: [...m.blocks] }));
+    return [...this.messages];
   }
 
   /** Immediate notify — used for user-initiated actions (send message, load session, etc.) */
@@ -74,8 +80,12 @@ export class StreamParser {
   }
 
   /** rAF-batched notify — used during streaming so multiple events per frame produce one DOM update.
-   *  Falls back to immediate notify in environments without requestAnimationFrame (e.g. tests). */
+   *  Falls back to immediate notify in environments without requestAnimationFrame (e.g. tests).
+   *  Skips scheduling entirely when there are no listeners (e.g. hidden tab whose ChatPanel
+   *  returns early from onUpdate) — avoids wasted rAF callbacks and snapshot allocations
+   *  across 20 concurrent panes. */
   private notifyBatched() {
+    if (this.listeners.length === 0) return;
     if (typeof requestAnimationFrame === "undefined") {
       this.notify();
       return;
@@ -84,6 +94,7 @@ export class StreamParser {
     this.isRafScheduled = true;
     requestAnimationFrame(() => {
       this.isRafScheduled = false;
+      if (this.listeners.length === 0) return;
       const snapshot = this.buildSnapshot();
       for (const fn of this.listeners) fn(snapshot);
     });

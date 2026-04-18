@@ -15,3 +15,17 @@ export function contextColor(pct: number): string {
 export function shouldAutoCompact(pct: number, isStreaming: boolean, triggered: boolean): boolean {
   return pct >= AUTO_COMPACT_THRESHOLD && !isStreaming && !triggered;
 }
+
+/** Command string for `/compact` with context-preservation instructions.
+ *
+ *  Without this, Claude Code's default compact creates a generic summary that
+ *  lacks task-specific details — causing "what should I continue?" responses
+ *  when the user types "続けて" (continue) after compact. */
+export const COMPACT_COMMAND = [
+  "compact",
+  "Preserve: current task and its goal,",
+  "files being edited with paths,",
+  "implementation progress and remaining steps,",
+  "any pending decisions or blockers.",
+  "Be specific enough that the conversation can resume without asking what to continue.",
+].join(" ");

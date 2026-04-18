@@ -322,14 +322,16 @@ describe("StreamParser.onUpdate", () => {
     expect(received).toHaveLength(1);
   });
 
-  it("snapshot is independent from internal state (deep copy)", () => {
+  it("snapshot array is independent from internal state (shallow copy)", () => {
     const parser = new StreamParser();
     let snapshot: ReturnType<typeof parser.getMessages> = [];
     parser.onUpdate(msgs => { snapshot = msgs; });
     parser.addUserMessage("original");
     const firstSnapshot = snapshot;
     parser.addUserMessage("second");
-    // First snapshot should still have length 1 (not mutated by subsequent updates)
+    // First snapshot array should still have length 1 — shallow copy
+    // means the array is a distinct reference, even though individual
+    // message objects are shared (not cloned).
     expect(firstSnapshot).toHaveLength(1);
   });
 });

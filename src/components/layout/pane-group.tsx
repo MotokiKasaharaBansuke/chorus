@@ -130,14 +130,15 @@ export function PaneGroup(props: PaneGroupProps) {
   const isFocused = () => store.focusedGroupId === props.node.id;
   const needsTrafficLightPad = () => edges().top && edges().left && !sidebarStore.isOpen;
 
-  function renderContent(tab: Tab) {
+  function renderContent(tab: Tab, isActive: boolean) {
     if (tab.cliConfig.cliType === "file-viewer" && tab.filePath) {
+      // FileViewer is static content — no streaming updates to skip when inactive.
       return <FileViewer path={tab.filePath} onClose={() => props.onCloseTab(tab.id)} contentOverride={tab.contentOverride} />;
     }
     if (tab.cliConfig.cliType === "claude-code" || tab.cliConfig.cliType === "codex") {
-      return <ChatPanel tab={tab} />;
+      return <ChatPanel tab={tab} isActive={isActive} />;
     }
-    return <TerminalPanel tab={tab} isActive={true} />;
+    return <TerminalPanel tab={tab} isActive={isActive} />;
   }
 
   function edgeToSplit(edge: DropEdge): { direction: SplitDirection; side: "before" | "after" } | null {
@@ -338,7 +339,7 @@ export function PaneGroup(props: PaneGroupProps) {
                     style={{ display: isActive() ? "flex" : "none" }}
                     data-tab-id={tabId}
                   >
-                    {renderContent(t())}
+                    {renderContent(t(), isActive())}
                   </div>
                 )}
               </Show>
