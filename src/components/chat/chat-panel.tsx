@@ -70,7 +70,7 @@ export function ChatPanel(props: ChatPanelProps) {
   let scrollRef: HTMLDivElement | undefined;
   let containerRef: HTMLDivElement | undefined;
 
-  const MESSAGE_ESTIMATE_SIZE = 80;
+  const MESSAGE_ESTIMATED_HEIGHT = 80;
 
   // Virtual scroller — only renders messages visible in the viewport + a
   // small overscan buffer.  With 20 panes × 100+ messages each, this keeps
@@ -78,7 +78,7 @@ export function ChatPanel(props: ChatPanelProps) {
   const virtualizer = createVirtualizer({
     get count() { return messages().length; },
     getScrollElement: () => scrollRef ?? null,
-    estimateSize: () => MESSAGE_ESTIMATE_SIZE,
+    estimateSize: () => MESSAGE_ESTIMATED_HEIGHT,
     overscan: 5,
   });
 
@@ -109,7 +109,7 @@ export function ChatPanel(props: ChatPanelProps) {
         messages(),
         virtualizer.getVirtualItems(),
         scrollRef.scrollTop,
-        MESSAGE_ESTIMATE_SIZE,
+        MESSAGE_ESTIMATED_HEIGHT,
         { clientHeight: scrollRef.clientHeight, scrollHeight: scrollRef.scrollHeight },
       );
       setStickyMessage(result);

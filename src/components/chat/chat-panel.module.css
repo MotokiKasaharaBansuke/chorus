@@ -2,8 +2,11 @@
 
 /* === Messages === */
 .messages {
+  --messages-pad-top: 12px;
+  --messages-pad-x: 16px;
   flex: 1; overflow-y: auto; overflow-x: hidden;
-  display: flex; flex-direction: column; gap: 0; padding: 12px 16px 32px;
+  display: flex; flex-direction: column; gap: 0;
+  padding: var(--messages-pad-top) var(--messages-pad-x) 32px;
   min-height: 0; /* critical for flex scroll */
 }
 
@@ -730,19 +733,19 @@
 /* === Sticky prompt header === */
 /* Zero-height sticky slot: keeps the header stuck at the scroll viewport top
    without taking up flow space, so the virtualizer's item positions are unaffected.
-   Negative margins mirror .messages padding (12px 16px) to extend full-width. */
+   Negative margins use the CSS variables defined on .messages to stay in sync. */
 .stickyHeaderSlot {
   position: sticky;
   top: 0;
   height: 0;
   overflow: visible;
   z-index: 10;
-  margin: -12px -16px 0;
+  margin: calc(-1 * var(--messages-pad-top)) calc(-1 * var(--messages-pad-x)) 0;
 }
 .stickyHeader {
   background: #222;
   border-bottom: 1px solid #2d2d2d;
-  padding: 8px 16px;
+  padding: 8px var(--messages-pad-x);
   animation: fadeIn 0.15s ease-out;
 }
 .stickyHeaderContent {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { findStickyUserMessage } from "./find-sticky-user-message";
+import { findStickyUserMessage, BOTTOM_PROXIMITY_THRESHOLD_PX } from "./find-sticky-user-message";
 import type { ChatMessage } from "../types";
 
 function makeMsg(role: ChatMessage["role"], text = ""): ChatMessage {
@@ -83,5 +83,29 @@ describe("findStickyUserMessage", () => {
       { index: 3, start: 120 },
     ];
     expect(findStickyUserMessage(msgs, items, 60, 80)).toBe(msgs[1]);
+  });
+
+  it("returns null when scrolled to bottom (within threshold)", () => {
+    const msgs = [makeMsg("user", "q1"), makeMsg("assistant", "a1")];
+    const items = [{ index: 0, start: 0 }, { index: 1, start: 80 }];
+    // scrollTop=100, clientHeight=400, scrollHeight=500 → distance=0
+    const scrollInfo = { clientHeight: 400, scrollHeight: 500 };
+    expect(findStickyUserMessage(msgs, items, 100, 80, scrollInfo)).toBeNull();
+  });
+
+  it("returns null when near bottom (within 80px threshold)", () => {
+    const msgs = [makeMsg("user", "q1"), makeMsg("assistant", "a1")];
+    const items = [{ index: 0, start: 0 }, { index: 1, start: 80 }];
+    // scrollTop=350, clientHeight=400, scrollHeight=800 → distance=50 < 80
+    const scrollInfo = { clientHeight: 400, scrollHeight: 800 };
+    expect(findStickyUserMessage(msgs, items, 350, 80, scrollInfo)).toBeNull();
+  });
+
+  it("returns sticky message when scrolled up from bottom", () => {
+    const msgs = [makeMsg("user", "q1"), makeMsg("assistant", "a1")];
+    const items = [{ index: 0, start: 0 }, { index: 1, start: 80 }];
+    // scrollTop=50, clientHeight=400, scrollHeight=800 → distance=350 > 80
+    const scrollInfo = { clientHeight: 400, scrollHeight: 800 };
+    expect(findStickyUserMessage(msgs, items, 50, 80, scrollInfo)).toBe(msgs[0]);
   });
 });
