@@ -140,6 +140,17 @@ impl PtyManager {
         self.sessions.lock().keys().cloned().collect()
     }
 
+    /// Returns the CLI session ID (UUID) for a stream session.
+    /// This is the session ID passed to `--session-id` / `--resume`.
+    pub fn get_stream_session_id(&self, id: &str) -> Result<String, AppError> {
+        let sessions = self.sessions.lock();
+        match sessions.get(id) {
+            Some(Session::Stream(s)) => Ok(s.session_id.clone()),
+            Some(Session::Pty(_)) => Err(AppError::PtyWriteFailed("Not a stream session".into())),
+            None => Err(AppError::PtyNotFound(id.to_string())),
+        }
+    }
+
     /// Returns (id, cli_type_str) pairs for sessions not in `keep`.
     pub fn list_zombie_infos(&self, keep: &[String]) -> Vec<(String, String)> {
         let sessions = self.sessions.lock();
@@ -335,6 +346,21 @@ mod tests {
     fn interrupt_stream_returns_not_found_for_missing_id() {
         let mgr = make_manager_with_streams(&["a"]);
         let result = mgr.interrupt_stream("nonexistent");
+        assert!(matches!(result, Err(AppError::PtyNotFound(_))));
+    }
+
+    #[test]
+    fn get_stream_session_id_returns_uuid() {
+        let mgr = make_manager_with_streams(&["a"]);
+        let sid = mgr.get_stream_session_id("a").expect("should return session id");
+        assert!(!sid.is_empty());
+        assert_eq!(sid, stream_session_id(&mgr, "a"));
+    }
+
+    #[test]
+    fn get_stream_session_id_not_found() {
+        let mgr = make_manager_with_streams(&["a"]);
+        let result = mgr.get_stream_session_id("nonexistent");
         assert!(matches!(result, Err(AppError::PtyNotFound(_))));
     }
 }
