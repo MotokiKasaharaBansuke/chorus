@@ -9,7 +9,7 @@ const MAX_BUFFER_BYTES: usize = 256 * 1024;
 /// Without this, each chunk becomes its own `pty-output` event — with 20 busy
 /// panes emitting hundreds of chunks per second, the webview IPC queue
 /// saturates and blocks `write_pty` invokes, causing visible input lag.
-const BATCH_FLUSH_TIMEOUT: Duration = Duration::from_millis(8);
+const BATCH_FLUSH_TIMEOUT: Duration = Duration::from_millis(16);
 
 #[derive(Clone, Serialize)]
 pub struct PtyOutputPayload {
@@ -20,8 +20,8 @@ pub struct PtyOutputPayload {
 /// Per-session output buffer.
 ///
 /// Uses an mpsc channel instead of Mutex+sleep: the flush thread wakes up
-/// immediately when data arrives (not on a fixed 16ms timer), reducing latency
-/// for all 20 sessions running concurrently.
+/// immediately when data arrives (not on a fixed polling timer), reducing
+/// latency for all 20 sessions running concurrently.
 pub struct OutputBuffer {
     tx: mpsc::Sender<Vec<u8>>,
 }

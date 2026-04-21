@@ -46,7 +46,7 @@ describe("useThrottledUpdate", () => {
     handleUpdate(msg("first"));
     expect(onApply).toHaveBeenCalledTimes(1);
 
-    // Fire again within 32ms — should be deferred
+    // Fire again within 48ms — should be deferred
     vi.advanceTimersByTime(10);
     handleUpdate(msg("second"));
     expect(onApply).toHaveBeenCalledTimes(1);
@@ -56,8 +56,8 @@ describe("useThrottledUpdate", () => {
     handleUpdate(msg("third"));
     expect(onApply).toHaveBeenCalledTimes(1);
 
-    // Trailing timer fires at ~32ms from the first call
-    vi.advanceTimersByTime(32);
+    // Trailing timer fires at ~48ms from the first call
+    vi.advanceTimersByTime(48);
     expect(onApply).toHaveBeenCalledTimes(2);
     expect(onApply).toHaveBeenLastCalledWith(msg("third"));
   });
@@ -67,7 +67,7 @@ describe("useThrottledUpdate", () => {
     handleUpdate(msg("first"));
     expect(onApply).toHaveBeenCalledTimes(1);
 
-    vi.advanceTimersByTime(40);
+    vi.advanceTimersByTime(55);
     handleUpdate(msg("second"));
     expect(onApply).toHaveBeenCalledTimes(2);
     expect(onApply).toHaveBeenLastCalledWith(msg("second"));
@@ -93,7 +93,7 @@ describe("useThrottledUpdate", () => {
     vi.advanceTimersByTime(10);
     handleUpdate(msg("second"));
     disposed = true;
-    vi.advanceTimersByTime(32);
+    vi.advanceTimersByTime(48);
     // Trailing timer should bail out due to disposal
     expect(onApply).toHaveBeenCalledTimes(1);
   });
@@ -117,7 +117,7 @@ describe("useThrottledUpdate", () => {
     expect(onApply).toHaveBeenLastCalledWith(msg("third"));
 
     // Trailing timer from "second" should NOT fire after reset
-    vi.advanceTimersByTime(32);
+    vi.advanceTimersByTime(48);
     expect(onApply).toHaveBeenCalledTimes(2);
   });
 
