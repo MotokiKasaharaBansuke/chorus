@@ -1,7 +1,7 @@
 import { createSignal, createEffect, createMemo, For, Show, onMount, onCleanup } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
-import { sendMessage as sendMessageCmd, killPty, interruptPty, spawnPty, spawnEphemeralPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
+import { sendMessage as sendMessageCmd, killPty, interruptPty, spawnPty, getStreamSessionId, spawnEphemeralPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
 import { useReviewRequest } from "../../hooks/use-review-request";
 import { useSendReview } from "../../hooks/use-send-review";
 import { getOrCreateParser } from "../../lib/stream-parser-registry";
@@ -82,18 +82,18 @@ export function ChatPanel(props: ChatPanelProps) {
     overscan: 5,
   });
 
-  /** Scroll to the last message. Uses queueMicrotask instead of rAF so the
-   *  scroll executes in the same frame as the SolidJS DOM update — avoids
-   *  the 1-frame positional glitch caused by nested rAFs (notifyBatched →
-   *  onUpdate → scrollToBottom). The length is re-read inside the microtask
-   *  to avoid stale captures when setMessages fires between scheduling and
-   *  execution. */
+  /** Scroll to the last message. Uses double-rAF so the scroll executes
+   *  AFTER virtualizer.measureElement has updated item sizes in the first
+   *  rAF — this eliminates the layout shift caused by scrolling to a
+   *  position based on estimateSize before actual measurements arrive. */
   function scrollToBottom() {
-    queueMicrotask(() => {
-      const len = messages().length;
-      if (len > 0) {
-        virtualizer.scrollToIndex(len - 1, { align: "end" });
-      }
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const len = messages().length;
+        if (len > 0) {
+          virtualizer.scrollToIndex(len - 1, { align: "end" });
+        }
+      });
     });
   }
 
@@ -110,6 +110,7 @@ export function ChatPanel(props: ChatPanelProps) {
         virtualizer.getVirtualItems(),
         scrollRef.scrollTop,
         MESSAGE_ESTIMATE_SIZE,
+        { clientHeight: scrollRef.clientHeight, scrollHeight: scrollRef.scrollHeight },
       );
       setStickyMessage(result);
     });
@@ -334,6 +335,19 @@ export function ChatPanel(props: ChatPanelProps) {
 
   type SendResult = "sent" | "busy" | "error";
 
+  /** Save the CLI's session UUID so session.json can restore the conversation.
+   *  Captures targetPtyId at call time to guard against ptyId changing before
+   *  the async IPC resolves (e.g. a second respawn). */
+  function captureSessionIdIfNeeded(targetPtyId: string) {
+    if (props.tab.lastSessionId) return;
+    const tabId = props.tab.id;
+    getStreamSessionId(targetPtyId)
+      .then(sessionId => {
+        if (ptyId() === targetPtyId) store.updateLastSessionId(tabId, sessionId);
+      })
+      .catch(() => {});
+  }
+
   /** Send a message to the PTY, respawning it once if the session is gone.
    *  Spinner lifecycle is managed by the caller (submitMessage) — this
    *  function only reports the outcome. */
@@ -342,19 +356,16 @@ export function ChatPanel(props: ChatPanelProps) {
       await sendMessageCmd(ptyId(), message, images);
       if (isCancelled()) return "error";
       store.updateStatus(props.tab.id, "running");
+      captureSessionIdIfNeeded(ptyId());
       return "sent";
     } catch (error: unknown) {
       const kind = classifyStreamError(error);
 
-      // Session is busy — keep spinner visible. Caller (submitWithBusyRetry)
-      // decides whether to retry; no user-visible message here so retries
-      // don't spam the chat.
       if (kind === "busy") {
         store.updateStatus(props.tab.id, "running");
         return "busy";
       }
 
-      // Session not found — respawn (e.g. after app restart with restored tabs)
       if (kind !== "not_found") {
         store.updateStatus(props.tab.id, "error");
         parser.addUserMessage("[Error: Failed to send message.]");
@@ -369,12 +380,9 @@ export function ChatPanel(props: ChatPanelProps) {
       }
       try {
         lastRespawnAt = now;
-        // Kill old session first to prevent orphaned sessions leaking in PtyManager
         await killPty(ptyId()).catch(() => {});
         if (isCancelled()) return "error";
         const newId = await spawnPty(props.tab.cliConfig);
-        // Bail if the tab was closed mid-respawn (cleanup the new PTY we
-        // just spawned to avoid an orphan).
         if (isCancelled() || !store.getTab(props.tab.id)) {
           await killPty(newId).catch(() => {});
           return "error";
@@ -383,6 +391,7 @@ export function ChatPanel(props: ChatPanelProps) {
         await sendMessageCmd(newId, message, images);
         if (isCancelled()) return "error";
         store.updateStatus(props.tab.id, "running");
+        captureSessionIdIfNeeded(newId);
         return "sent";
       } catch (retryError: unknown) {
         store.updateStatus(props.tab.id, "error");
@@ -726,7 +735,11 @@ export function ChatPanel(props: ChatPanelProps) {
         }
       }}>
         <Show when={stickyMessage()}>
-          {(msg) => <StickyPromptHeader message={msg()} />}
+          {(msg) => (
+            <div class={styles.stickyHeaderSlot}>
+              <StickyPromptHeader message={msg()} />
+            </div>
+          )}
         </Show>
         <Show when={messages().length === 0}>
           <div class={styles.welcome}>
@@ -775,7 +788,7 @@ export function ChatPanel(props: ChatPanelProps) {
                   <Show when={msg()}>
                     {(m) => (
                       <div
-                        ref={(el) => queueMicrotask(() => virtualizer.measureElement(el))}
+                        ref={(el) => requestAnimationFrame(() => { if (el.isConnected) virtualizer.measureElement(el); })}
                         data-index={vItem.index}
                         style={{
                           position: "absolute",

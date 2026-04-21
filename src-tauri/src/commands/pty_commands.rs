@@ -154,6 +154,14 @@ pub fn list_session_ids(
 }
 
 #[tauri::command]
+pub fn get_stream_session_id(
+    pty_id: String,
+    state: State<'_, PtyManager>,
+) -> Result<String, AppError> {
+    state.get_stream_session_id(&pty_id)
+}
+
+#[tauri::command]
 pub fn kill_zombie_sessions(
     keep_ids: Vec<String>,
     state: State<'_, PtyManager>,

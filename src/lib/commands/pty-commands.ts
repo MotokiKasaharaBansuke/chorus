@@ -75,6 +75,10 @@ export async function interruptPty(ptyId: string): Promise<void> {
   return invoke("interrupt_pty", { ptyId });
 }
 
+export async function getStreamSessionId(ptyId: string): Promise<string> {
+  return invoke<string>("get_stream_session_id", { ptyId });
+}
+
 export async function listSessionIds(): Promise<string[]> {
   return invoke<string[]>("list_session_ids");
 }
