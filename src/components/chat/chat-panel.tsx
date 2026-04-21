@@ -1,7 +1,7 @@
 import { createSignal, createEffect, createMemo, For, Show, onMount, onCleanup } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
-import { sendMessage as sendMessageCmd, killPty, interruptPty, spawnPty, getStreamSessionId, spawnEphemeralPty, saveTempImage, importImageFile, deleteTempImage, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
+import { sendMessage as sendMessageCmd, killPty, interruptPty, spawnPty, getStreamSessionId, spawnEphemeralPty, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
 import { useReviewRequest } from "../../hooks/use-review-request";
 import { useSendReview } from "../../hooks/use-send-review";
 import { getOrCreateParser } from "../../lib/stream-parser-registry";
@@ -11,7 +11,7 @@ import { ModelPicker } from "./model-picker";
 import { ChatInput } from "./chat-input";
 import { SessionPicker } from "./session-picker";
 import { ClawdIcon, CodexIcon } from "../icons";
-import type { Tab, ChatMessage, AttachedImage } from "../../types";
+import type { Tab, ChatMessage } from "../../types";
 import { effectivePtyId, isTabStreaming } from "../../types";
 import { useTabStore } from "../../stores/tab-store";
 import { useSettingsStore } from "../../stores/settings-store";
@@ -28,6 +28,7 @@ import { DEFAULT_CONTEXT_WINDOW_SIZE, AUTO_COMPACT_RESET_THRESHOLD, contextColor
 import { appendToHistory } from "./input-history";
 import { SlashCommandQueue } from "./slash-command-queue";
 import { useThrottledUpdate } from "../../hooks/use-throttled-update";
+import { useImageAttachment } from "../../hooks/use-image-attachment";
 import styles from "./chat-panel.module.css";
 
 
@@ -47,8 +48,7 @@ export function ChatPanel(props: ChatPanelProps) {
   const ptyId = () => effectivePtyId(props.tab);
   const [messages, setMessages] = createSignal<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = createSignal(isTabStreaming(props.tab.status));
-  const [attachedImages, setAttachedImages] = createSignal<AttachedImage[]>([]);
-  const [isDragOver, setIsDragOver] = createSignal(false);
+  const images = useImageAttachment({ tabId: props.tab.id });
   const [pastSessions, setPastSessions] = createSignal<SessionInfo[]>([]);
   const [showSessionPicker, setShowSessionPicker] = createSignal(false);
   const [showModelPicker, setShowModelPicker] = createSignal(false);
@@ -83,17 +83,40 @@ export function ChatPanel(props: ChatPanelProps) {
   });
 
   /** Scroll to the last message. Uses double-rAF so the scroll executes
-   *  AFTER virtualizer.measureElement has updated item sizes in the first
-   *  rAF — this eliminates the layout shift caused by scrolling to a
-   *  position based on estimateSize before actual measurements arrive. */
+   *  AFTER batchMeasure has updated item sizes in the first rAF — this
+   *  eliminates layout shift caused by scrolling with estimateSize before
+   *  actual measurements arrive. The outer rAF coalesces multiple calls
+   *  per frame into a single scroll. */
+  let scrollRafId: number | null = null;
   function scrollToBottom() {
-    requestAnimationFrame(() => {
+    if (scrollRafId !== null) return;
+    scrollRafId = requestAnimationFrame(() => {
+      scrollRafId = null;
       requestAnimationFrame(() => {
+        if (unmounted) return;
         const len = messages().length;
         if (len > 0) {
           virtualizer.scrollToIndex(len - 1, { align: "end" });
         }
       });
+    });
+  }
+
+  // Batch virtualizer measurements: instead of scheduling one rAF per item,
+  // collect refs and measure them all in a single rAF callback.
+  let measureBatch: HTMLElement[] = [];
+  let measureRafId: number | null = null;
+
+  function batchMeasure(el: HTMLElement) {
+    measureBatch.push(el);
+    if (measureRafId !== null) return;
+    measureRafId = requestAnimationFrame(() => {
+      measureRafId = null;
+      const batch = measureBatch;
+      measureBatch = [];
+      for (const e of batch) {
+        if (e.isConnected) virtualizer.measureElement(e);
+      }
     });
   }
 
@@ -117,14 +140,12 @@ export function ChatPanel(props: ChatPanelProps) {
   }
 
   onCleanup(() => {
+    if (scrollRafId !== null) { cancelAnimationFrame(scrollRafId); scrollRafId = null; }
+    if (measureRafId !== null) { cancelAnimationFrame(measureRafId); measureRafId = null; }
+    measureBatch = [];
     if (stickyRafId !== null) { cancelAnimationFrame(stickyRafId); stickyRafId = null; }
   });
 
-  // On macOS, pasting a file triggers BOTH a Tauri drop event AND a DOM paste event.
-  // The Tauri drop event fires FIRST, so we record when a drop was handled,
-  // then suppress the subsequent DOM paste if it arrives within the dedup window.
-  const DROP_DEDUP_WINDOW_MS = 500;
-  let dropHandledAt = 0;
   let autoCompactTriggered = false;
 
   // Restore messages from a surviving parser (e.g. after layout-triggered remount)
@@ -189,9 +210,9 @@ export function ChatPanel(props: ChatPanelProps) {
     }
   }
 
-  // Throttle parser → DOM updates to ~30fps. The parser's rAF already limits
-  // to 60fps, but SolidJS reconciliation + virtualizer measurement at that
-  // rate starves the main thread with 4+ panes streaming simultaneously.
+  // Throttle parser → DOM updates to ~20fps. The parser's rAF already limits
+  // to 60fps, but SolidJS reconciliation + virtualizer measurement at higher
+  // rates starves the main thread with 20 panes streaming simultaneously.
   const throttle = useThrottledUpdate({
     onApply: applyUpdate,
     isActive: () => props.isActive,
@@ -275,38 +296,6 @@ export function ChatPanel(props: ChatPanelProps) {
   window.addEventListener("mlm-refresh-tab", handleRefreshEvent);
   onCleanup(() => window.removeEventListener("mlm-refresh-tab", handleRefreshEvent));
 
-  // Image drop events dispatched from App.tsx — co-located with cleanup via createEffect
-  createEffect(() => {
-    async function handleImageDrop(e: Event) {
-      if (!(e instanceof CustomEvent)) return;
-      const { tabId, paths } = e.detail ?? {};
-      if (tabId !== props.tab.id || !Array.isArray(paths)) return;
-      dropHandledAt = Date.now();
-      for (const p of paths) {
-        if (typeof p !== "string") continue;
-        try {
-          const imported = await importImageFile(p);
-          setAttachedImages(prev =>
-            prev.some(img => img.path === imported.path)
-              ? prev
-              : [...prev, { name: p.split("/").pop() ?? "image", path: imported.path, mediaType: imported.mediaType }]
-          );
-        } catch { /* unsupported format or read error — skip */ }
-      }
-    }
-    window.addEventListener("mlm-image-drop", handleImageDrop);
-    onCleanup(() => window.removeEventListener("mlm-image-drop", handleImageDrop));
-  });
-
-  createEffect(() => {
-    function handleDragState(e: Event) {
-      if (!(e instanceof CustomEvent)) return;
-      const { tabId, over } = e.detail ?? {};
-      setIsDragOver(tabId === props.tab.id && over === true);
-    }
-    window.addEventListener("mlm-drag-state", handleDragState);
-    onCleanup(() => window.removeEventListener("mlm-drag-state", handleDragState));
-  });
 
   // Throttle PTY respawns: at most once per 5 seconds
   let lastRespawnAt = 0;
@@ -432,80 +421,18 @@ export function ChatPanel(props: ChatPanelProps) {
       await handleReplCommand(replId);
       return;
     }
-    const images = attachedImages();
-    const imagePayloads = images
+    const attached = images.attachedImages();
+    const imagePayloads = attached
       .filter(img => isValidTempImagePath(img.path) && img.mediaType)
       .map(img => ({ path: img.path, mediaType: img.mediaType }));
 
-    parser.addUserMessage(text, images);
-    setAttachedImages([]);
+    parser.addUserMessage(text, attached);
+    images.clearAll();
     setIsStreaming(true);
 
     await submitMessage(text, imagePayloads.length > 0 ? imagePayloads : undefined);
     // Temp files are cleaned up by the Rust reader thread after the CLI process
     // exits, not here — the CLI may still be reading them when this returns.
-  }
-
-  async function handleImageFile(file: File) {
-    const WEB_SAFE = new Set(["png", "jpeg", "jpg", "gif", "webp"]);
-    const ext = (file.type.split("/")[1] ?? "png").toLowerCase();
-    const isWebSafe = WEB_SAFE.has(ext);
-
-    try {
-      let base64: string;
-      let saveExt: string;
-
-      if (isWebSafe) {
-        base64 = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(
-            typeof reader.result === "string" ? (reader.result.split(",")[1] ?? "") : ""
-          );
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-        saveExt = ext === "jpg" ? "jpeg" : ext;
-      } else {
-        // Convert TIFF / BMP / other non-web formats to PNG via canvas
-        base64 = await new Promise<string>((resolve, reject) => {
-          const url = URL.createObjectURL(file);
-          const img = new Image();
-          img.onload = () => {
-            URL.revokeObjectURL(url);
-            const canvas = document.createElement("canvas");
-            canvas.width = img.naturalWidth;
-            canvas.height = img.naturalHeight;
-            canvas.getContext("2d")?.drawImage(img, 0, 0);
-            resolve(canvas.toDataURL("image/png").split(",")[1] ?? "");
-          };
-          img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("load failed")); };
-          img.src = url;
-        });
-        saveExt = "png";
-      }
-
-      const path = await saveTempImage(base64, saveExt);
-      const name = file.name || `screenshot.${saveExt}`;
-      const mediaType = `image/${saveExt}`;
-      setAttachedImages(prev => [...prev, { name, path, mediaType }]);
-    } catch { /* ignore */ }
-  }
-
-  function handlePaste(e: ClipboardEvent) {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    // Prefer image/png, fall back to first available image type.
-    // macOS puts the same image in multiple formats (tiff + png) so we take only one.
-    const imageItems = Array.from(items).filter(i => i.type.startsWith("image/"));
-    const preferred = imageItems.find(i => i.type === "image/png") ?? imageItems[0];
-    if (preferred) {
-      e.preventDefault();
-      // On macOS, pasting a file fires the Tauri drop event FIRST, then this paste event.
-      // If a drop was handled within the dedup window, skip to avoid duplicating the image.
-      if (Date.now() - dropHandledAt < DROP_DEDUP_WINDOW_MS) return;
-      const file = preferred.getAsFile();
-      if (file) handleImageFile(file);
-    }
   }
 
   const [resetConfirm, setResetConfirm] = createSignal<{ isDirty: boolean } | null>(null);
@@ -549,14 +476,7 @@ export function ChatPanel(props: ChatPanelProps) {
         .catch((): boolean => true)
         .then((isDirty) => setResetConfirm({ isDirty }));
     },
-    "attach-file": () => {
-      const input = document.createElement("input");
-      input.type = "file";
-      input.accept = "image/*";
-      input.multiple = true;
-      input.onchange = () => { if (input.files) Array.from(input.files).forEach(handleImageFile); };
-      input.click();
-    },
+    "attach-file": () => images.openFilePicker(),
     "resume-conversation": () => {
       virtualizer.scrollToIndex(0);
       if (messages().length > 0) { setMessages([]); parser.loadSession([]); }
@@ -707,7 +627,7 @@ export function ChatPanel(props: ChatPanelProps) {
           onClose={() => setShowModelPicker(false)}
         />
       </Show>
-      <Show when={isDragOver()}>
+      <Show when={images.isDragOver()}>
         <div class={styles.dropOverlay}>
           <span>Drop files here</span>
         </div>
@@ -788,7 +708,7 @@ export function ChatPanel(props: ChatPanelProps) {
                   <Show when={msg()}>
                     {(m) => (
                       <div
-                        ref={(el) => requestAnimationFrame(() => { if (el.isConnected) virtualizer.measureElement(el); })}
+                        ref={(el) => batchMeasure(el)}
                         data-index={vItem.index}
                         style={{
                           position: "absolute",
@@ -831,15 +751,11 @@ export function ChatPanel(props: ChatPanelProps) {
         mode={props.tab.cliConfig.mode}
         workingDir={props.tab.cliConfig.workingDir}
         isStreaming={isStreaming()}
-        attachedImages={attachedImages()}
-        onRemoveImage={(idx) => {
-          const img = attachedImages()[idx];
-          if (img) deleteTempImage(img.path).catch(() => {});
-          setAttachedImages(prev => prev.filter((_, i) => i !== idx));
-        }}
+        attachedImages={images.attachedImages()}
+        onRemoveImage={images.removeImage}
         onSubmit={handleSubmitFromInput}
         onSlashCommand={selectSlashCommand}
-        onPaste={handlePaste}
+        onPaste={images.handlePaste}
         onInterrupt={handleInterrupt}
         onRequestReview={review.requestReview}
         isReviewInProgress={review.isReviewInProgress()}
