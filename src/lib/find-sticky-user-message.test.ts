@@ -104,8 +104,32 @@ describe("findStickyUserMessage", () => {
   it("returns sticky message when scrolled up from bottom", () => {
     const msgs = [makeMsg("user", "q1"), makeMsg("assistant", "a1")];
     const items = [{ index: 0, start: 0 }, { index: 1, start: 80 }];
-    // scrollTop=50, clientHeight=400, scrollHeight=800 → distance=350 > 80
+    // scrollTop=50, clientHeight=400, scrollHeight=800 → distance=350 > threshold
     const scrollInfo = { clientHeight: 400, scrollHeight: 800 };
     expect(findStickyUserMessage(msgs, items, 50, 80, scrollInfo)).toBe(msgs[0]);
+  });
+
+  it("shows sticky at exact threshold boundary (distance === threshold)", () => {
+    const msgs = [makeMsg("user", "q1"), makeMsg("assistant", "a1")];
+    const items = [{ index: 0, start: 0 }, { index: 1, start: 80 }];
+    // distance = 800 - 400 - (400 - THRESHOLD) = THRESHOLD → not < threshold, so show
+    const scrollTop = 800 - 400 - BOTTOM_PROXIMITY_THRESHOLD_PX;
+    const scrollInfo = { clientHeight: 400, scrollHeight: 800 };
+    expect(findStickyUserMessage(msgs, items, scrollTop, 80, scrollInfo)).toBe(msgs[0]);
+  });
+
+  it("handles elastic overscroll (negative distance clamped to 0)", () => {
+    const msgs = [makeMsg("user", "q1"), makeMsg("assistant", "a1")];
+    const items = [{ index: 0, start: 0 }, { index: 1, start: 80 }];
+    // scrollTop=500 > scrollHeight-clientHeight=400 → raw distance=-100, clamped to 0
+    const scrollInfo = { clientHeight: 400, scrollHeight: 800 };
+    expect(findStickyUserMessage(msgs, items, 500, 80, scrollInfo)).toBeNull();
+  });
+
+  it("handles zero-size container (not yet measured)", () => {
+    const msgs = [makeMsg("user", "q1"), makeMsg("assistant", "a1")];
+    const items = [{ index: 0, start: 0 }, { index: 1, start: 80 }];
+    const scrollInfo = { clientHeight: 0, scrollHeight: 0 };
+    expect(findStickyUserMessage(msgs, items, 0, 80, scrollInfo)).toBeNull();
   });
 });
