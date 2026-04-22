@@ -11,7 +11,7 @@ import { ModelPicker } from "./model-picker";
 import { ChatInput } from "./chat-input";
 import { SessionPicker } from "./session-picker";
 import { ClawdIcon, CodexIcon } from "../icons";
-import type { Tab, ChatMessage, ChatBlock } from "../../types";
+import type { Tab, ChatMessage } from "../../types";
 import { effectivePtyId, isTabStreaming } from "../../types";
 import { useTabStore } from "../../stores/tab-store";
 import { useSettingsStore } from "../../stores/settings-store";
@@ -27,6 +27,7 @@ import { appendToHistory } from "./input-history";
 import { SlashCommandQueue } from "./slash-command-queue";
 import { useThrottledUpdate } from "../../hooks/use-throttled-update";
 import { useImageAttachment } from "../../hooks/use-image-attachment";
+import { findStickyPromptText } from "../../lib/find-sticky-prompt-text";
 import styles from "./chat-panel.module.css";
 
 
@@ -128,25 +129,12 @@ export function ChatPanel(props: ChatPanelProps) {
     stickyRafId = requestAnimationFrame(() => {
       stickyRafId = null;
       if (unmounted || !scrollRef) return;
-      const st = scrollRef.scrollTop;
-      const distToBottom = scrollRef.scrollHeight - scrollRef.clientHeight - st;
-      if (distToBottom < 80) { setStickyPrompt(null); return; }
-      const msgs = messages();
-      const items = virtualizer.getVirtualItems();
-      const itemMap = new Map(items.map(v => [v.index, v.start]));
-      let text: string | null = null;
-      for (let i = 0; i < msgs.length; i++) {
-        if (msgs[i].role !== "user") continue;
-        const start = itemMap.get(i) ?? i * MESSAGE_ESTIMATED_HEIGHT;
-        if (start < st) {
-          const blocks = msgs[i].blocks;
-          text = blocks
-            .filter((b): b is ChatBlock & { kind: "text" } => b.kind === "text")
-            .map(b => b.text)
-            .join("\n");
-        }
-      }
-      setStickyPrompt(text);
+      setStickyPrompt(findStickyPromptText(
+        messages(),
+        virtualizer.getVirtualItems(),
+        scrollRef,
+        MESSAGE_ESTIMATED_HEIGHT,
+      ));
     });
   }
 
