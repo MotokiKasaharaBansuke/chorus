@@ -450,6 +450,8 @@ impl StreamSession {
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
             drop(bytes); // free raw bytes before writing the (potentially large) b64 string
 
+            // NOTE: serde_json::to_string wraps the value in quotes (e.g. "image/png"),
+            // which is intentional — the surrounding JSON template omits them.
             let media_type_json = serde_json::to_string(&img.media_type)
                 .map_err(|e| AppError::PtyWriteFailed(format!("JSON escape failed: {e}")))?;
             w.write_all(br#"{"type":"image","source":{"type":"base64","media_type":"#).map_err(write_err)?;
@@ -460,7 +462,9 @@ impl StreamSession {
             // b64 is dropped here
         }
 
-        // Append the text content part
+        // Append the text content part.
+        // NOTE: serde_json::to_string wraps the value in quotes and escapes
+        // special characters, which is intentional for the manual JSON template.
         let text_json = serde_json::to_string(message)
             .map_err(|e| AppError::PtyWriteFailed(format!("JSON escape failed: {e}")))?;
         if !images.is_empty() {
