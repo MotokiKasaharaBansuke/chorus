@@ -105,29 +105,34 @@ function App() {
     if (dir) sidebarStore.setWorkingDir(dir);
   });
 
+  function buildCurrentSession() {
+    const tabs = tabStore.tabs;
+    const layout = tabStore.layout;
+    if (!layout || tabs.length === 0) return null;
+    const tabMap = Object.fromEntries(tabs.map(t => [t.id, t]));
+    return buildSavedSession(
+      tabMap, layout, tabStore.focusedGroupId,
+      sidebarStore.isOpen, sidebarStore.width, sidebarStore.workingDir,
+      quickLaunchMode(), settingsStore.reviewCliType,
+    );
+  }
+
   // Auto-save session on state changes (debounced)
   createEffect(() => {
     // Track reactive dependencies
-    const layout = tabStore.layout;
-    const tabs = tabStore.tabs;
-    if (!layout || tabs.length === 0) return;
-
+    void tabStore.layout;
+    void tabStore.tabs;
     const timer = setTimeout(() => {
-      const tabMap = Object.fromEntries(tabs.map(t => [t.id, t]));
-      const session = buildSavedSession(
-        tabMap,
-        layout,
-        tabStore.focusedGroupId,
-        sidebarStore.isOpen,
-        sidebarStore.width,
-        sidebarStore.workingDir,
-        quickLaunchMode(),
-        settingsStore.reviewCliType,
-      );
+      const session = buildCurrentSession();
       if (session) persistSession(session).catch(() => {});
     }, 500);
-    // Cleanup runs both on effect re-execution and component unmount
     return () => clearTimeout(timer);
+  });
+
+  // Ensure session is saved immediately before the window closes.
+  window.addEventListener("beforeunload", () => {
+    const session = buildCurrentSession();
+    if (session) persistSession(session).catch(() => {});
   });
 
   // --- IPC: open directory in existing instance (from mlm CLI) ---
