@@ -41,6 +41,48 @@ vi.stubGlobal("FileReader", class MockFileReader {
   }
 });
 
+/** Mock Image element: reports 800×600 by default (under MAX_IMAGE_DIMENSION). */
+let mockImageWidth = 800;
+let mockImageHeight = 600;
+
+vi.stubGlobal("Image", class MockImage {
+  naturalWidth = mockImageWidth;
+  naturalHeight = mockImageHeight;
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  set src(_v: string) {
+    // Re-read at load time so per-test overrides take effect
+    this.naturalWidth = mockImageWidth;
+    this.naturalHeight = mockImageHeight;
+    queueMicrotask(() => this.onload?.());
+  }
+});
+
+vi.stubGlobal("URL", {
+  createObjectURL: () => "blob:mock",
+  revokeObjectURL: () => {},
+});
+
+/** Stub canvas for the resize path */
+const mockCanvasCtx = {
+  drawImage: vi.fn(),
+};
+vi.stubGlobal("document", {
+  ...globalThis.document,
+  createElement: (tag: string) => {
+    if (tag === "canvas") {
+      return {
+        width: 0,
+        height: 0,
+        getContext: () => mockCanvasCtx,
+        toDataURL: () => "data:image/png;base64,cmVzaXplZA==",
+      };
+    }
+    // file input for openFilePicker
+    return { type: "", accept: "", multiple: false, click: vi.fn(), onchange: null };
+  },
+});
+
 // Stub solid-js reactivity
 const cleanupFns: Array<() => void> = [];
 vi.mock("solid-js", () => ({
@@ -68,7 +110,7 @@ vi.mock("../lib/commands", () => ({
   deleteTempImage: (...args: unknown[]) => mockDeleteTempImage(...args),
 }));
 
-import { useImageAttachment, DROP_DEDUP_WINDOW_MS } from "./use-image-attachment";
+import { useImageAttachment, DROP_DEDUP_WINDOW_MS, scaleToFit, MAX_IMAGE_DIMENSION } from "./use-image-attachment";
 
 describe("useImageAttachment", () => {
   beforeEach(() => {
@@ -80,6 +122,9 @@ describe("useImageAttachment", () => {
     windowStub = new WindowStub();
     vi.stubGlobal("window", windowStub);
     mockDeleteTempImage.mockResolvedValue(undefined);
+    // Reset image dimensions (prevents leaking between tests)
+    mockImageWidth = 800;
+    mockImageHeight = 600;
   });
 
   function createHook(tabId = "tab-1") {
@@ -330,5 +375,80 @@ describe("useImageAttachment", () => {
     it("is exported and equals 500", () => {
       expect(DROP_DEDUP_WINDOW_MS).toBe(500);
     });
+  });
+
+  describe("handleImageFile — resize path", () => {
+    it("resizes oversized images via canvas", async () => {
+      mockImageWidth = 4000;
+      mockImageHeight = 3000;
+      const hook = createHook();
+      mockSaveTempImage.mockResolvedValue("/tmp/chorus-images/resized.png");
+
+      await hook.handleImageFile(new File(["data"], "big.png", { type: "image/png" }));
+
+      // The canvas path produces "cmVzaXplZA==" from our mock
+      expect(mockSaveTempImage).toHaveBeenCalledWith("cmVzaXplZA==", "png");
+      expect(mockCanvasCtx.drawImage).toHaveBeenCalled();
+    });
+
+    it("skips canvas for small web-safe images (fast path)", async () => {
+      mockImageWidth = 800;
+      mockImageHeight = 600;
+      mockCanvasCtx.drawImage.mockClear();
+      const hook = createHook();
+      mockSaveTempImage.mockResolvedValue("/tmp/chorus-images/small.png");
+
+      await hook.handleImageFile(new File(["data"], "small.png", { type: "image/png" }));
+
+      // FileReader path produces "dGVzdA==" from our mock
+      expect(mockSaveTempImage).toHaveBeenCalledWith("dGVzdA==", "png");
+      expect(mockCanvasCtx.drawImage).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe("scaleToFit", () => {
+  it("returns original dimensions when within max", () => {
+    expect(scaleToFit(1000, 800, 2048)).toEqual({ width: 1000, height: 800 });
+  });
+
+  it("scales landscape image to fit max dimension", () => {
+    const result = scaleToFit(4096, 2048, 2048);
+    expect(result.width).toBe(2048);
+    expect(result.height).toBe(1024);
+  });
+
+  it("scales portrait image to fit max dimension", () => {
+    const result = scaleToFit(1500, 3000, 2048);
+    expect(result.width).toBe(1024);
+    expect(result.height).toBe(2048);
+  });
+
+  it("scales square image", () => {
+    const result = scaleToFit(4000, 4000, 2048);
+    expect(result.width).toBe(2048);
+    expect(result.height).toBe(2048);
+  });
+
+  it("handles exactly-at-max dimensions", () => {
+    expect(scaleToFit(2048, 2048, 2048)).toEqual({ width: 2048, height: 2048 });
+  });
+
+  it("handles one dimension at max, other under", () => {
+    expect(scaleToFit(2048, 1000, 2048)).toEqual({ width: 2048, height: 1000 });
+  });
+
+  it("returns 0x0 for zero-dimension input", () => {
+    expect(scaleToFit(0, 600, 2048)).toEqual({ width: 0, height: 0 });
+    expect(scaleToFit(800, 0, 2048)).toEqual({ width: 0, height: 0 });
+    expect(scaleToFit(0, 0, 2048)).toEqual({ width: 0, height: 0 });
+  });
+
+  it("returns 0x0 for negative dimensions", () => {
+    expect(scaleToFit(-1, 600, 2048)).toEqual({ width: 0, height: 0 });
+  });
+
+  it("exports MAX_IMAGE_DIMENSION as 2048", () => {
+    expect(MAX_IMAGE_DIMENSION).toBe(2048);
   });
 });

@@ -250,32 +250,26 @@ impl StreamSession {
 
         let has_images = images.is_some_and(|imgs| !imgs.is_empty());
         let imgs = images.unwrap_or(&[]);
-        // Claude Code: read files now (O_NOFOLLOW, size-capped) and send via stdin.
+        // Claude Code: validate paths now, read+encode during stdin write (one at a time).
         // Codex: validate paths only — the CLI reads files itself via --image flags.
         let use_stream_input = has_images && self.cli_type == CliType::ClaudeCode;
 
-        // Pre-read image data for Claude Code (atomic validate + read with O_NOFOLLOW).
-        // For Codex, only validate paths — the CLI reads the files directly.
-        let read_images: Vec<(String, Vec<u8>)>;
-        let image_paths: Vec<String>;
-        if use_stream_input {
-            read_images = Self::validate_and_read_images(imgs)?;
-            image_paths = read_images.iter().map(|(p, _)| p.clone()).collect();
-        } else if has_images {
-            image_paths = Self::validate_image_paths(imgs)?;
-            read_images = Vec::new();
+        // Validate all image paths/types upfront (cheap). Actual file reads are
+        // deferred to write_stream_json_input so only one image is in memory at a time.
+        let image_paths = if has_images {
+            Self::validate_image_paths(imgs)?
         } else {
-            image_paths = Vec::new();
-            read_images = Vec::new();
-        }
+            Vec::new()
+        };
 
         let (mut child, stdin, stdout, stderr) = self.spawn_cli_process(message, use_stream_input, &image_paths)?;
 
-        // Write stream-json input to stdin for Claude Code image attachments
+        // Write stream-json input to stdin for Claude Code image attachments.
+        // Images are read and base64-encoded one at a time to limit peak memory.
         if use_stream_input {
             match stdin {
                 Some(stdin_handle) => {
-                    if let Err(e) = Self::write_stream_json_input(stdin_handle, message, imgs, &read_images) {
+                    if let Err(e) = Self::write_stream_json_input(stdin_handle, message, imgs) {
                         let _ = child.kill();
                         return Err(e);
                     }
@@ -416,19 +410,7 @@ impl StreamSession {
         Ok(bytes)
     }
 
-    /// Validate all image attachments, read their data, and return (path, bytes) pairs.
-    /// Paths are returned for cleanup; bytes are used for stream-json encoding.
-    fn validate_and_read_images(images: &[ImageAttachment]) -> Result<Vec<(String, Vec<u8>)>, AppError> {
-        let mut results = Vec::with_capacity(images.len());
-        for img in images {
-            Self::assert_media_type(&img.media_type)?;
-            let bytes = Self::validate_and_read_image(&img.path)?;
-            results.push((img.path.clone(), bytes));
-        }
-        Ok(results)
-    }
-
-    /// Validate image paths without reading (for Codex, which passes paths to --image).
+    /// Validate all image attachments (media type + path) without reading file contents.
     fn validate_image_paths(images: &[ImageAttachment]) -> Result<Vec<String>, AppError> {
         let mut paths = Vec::with_capacity(images.len());
         for img in images {
@@ -440,49 +422,57 @@ impl StreamSession {
     }
 
     /// Write a stream-json user message to stdin, then drop stdin so the CLI
-    /// processes the input. Uses pre-read image bytes (already validated and
-    /// size-capped by `validate_and_read_images`) to avoid TOCTOU issues.
+    /// processes the input.  Images are read and base64-encoded **one at a time**
+    /// so peak memory is proportional to the largest single image, not the sum.
     fn write_stream_json_input(
         stdin: std::process::ChildStdin,
         message: &str,
         images: &[ImageAttachment],
-        read_images: &[(String, Vec<u8>)],
     ) -> Result<(), AppError> {
         use base64::Engine;
-        debug_assert_eq!(images.len(), read_images.len(), "images and read_images must have equal length");
+        use std::io::Write as _;
 
-        let mut content = Vec::new();
-        for (img, (_path, bytes)) in images.iter().zip(read_images.iter()) {
-            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-            content.push(serde_json::json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": img.media_type,
-                    "data": b64,
-                }
-            }));
-        }
-        content.push(serde_json::json!({
-            "type": "text",
-            "text": message,
-        }));
+        let write_err = |e: std::io::Error| AppError::PtyWriteFailed(format!("stdin write failed: {e}"));
 
-        let input_line = serde_json::json!({
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": content,
+        let mut w = std::io::BufWriter::new(stdin);
+
+        // Build JSON manually so each image's bytes can be freed before the next
+        // is loaded. The outer structure is:
+        //   {"type":"user","message":{"role":"user","content":[...images...,{text}]}}
+        w.write_all(br#"{"type":"user","message":{"role":"user","content":["#).map_err(write_err)?;
+
+        for (i, img) in images.iter().enumerate() {
+            if i > 0 {
+                w.write_all(b",").map_err(write_err)?;
             }
-        });
+            // Read one image, encode, write, then drop — only one in memory at a time.
+            let bytes = Self::validate_and_read_image(&img.path)?;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            drop(bytes); // free raw bytes before writing the (potentially large) b64 string
 
-        let mut writer = std::io::BufWriter::new(stdin);
-        serde_json::to_writer(&mut writer, &input_line)
-            .map_err(|e| AppError::PtyWriteFailed(format!("Failed to write stream-json input: {e}")))?;
-        writer.write_all(b"\n")
-            .map_err(|e| AppError::PtyWriteFailed(format!("Failed to write newline: {e}")))?;
-        writer.flush()
-            .map_err(|e| AppError::PtyWriteFailed(format!("Failed to flush stdin: {e}")))?;
+            let media_type_json = serde_json::to_string(&img.media_type)
+                .map_err(|e| AppError::PtyWriteFailed(format!("JSON escape failed: {e}")))?;
+            w.write_all(br#"{"type":"image","source":{"type":"base64","media_type":"#).map_err(write_err)?;
+            w.write_all(media_type_json.as_bytes()).map_err(write_err)?;
+            w.write_all(br#","data":""#).map_err(write_err)?;
+            w.write_all(b64.as_bytes()).map_err(write_err)?;
+            w.write_all(br#""}}"#).map_err(write_err)?;
+            // b64 is dropped here
+        }
+
+        // Append the text content part
+        let text_json = serde_json::to_string(message)
+            .map_err(|e| AppError::PtyWriteFailed(format!("JSON escape failed: {e}")))?;
+        if !images.is_empty() {
+            w.write_all(b",").map_err(write_err)?;
+        }
+        w.write_all(br#"{"type":"text","text":"#).map_err(write_err)?;
+        w.write_all(text_json.as_bytes()).map_err(write_err)?;
+        w.write_all(br#"}"#).map_err(write_err)?;
+
+        // Close content array and outer objects
+        w.write_all(b"]}}\n").map_err(write_err)?;
+        w.flush().map_err(write_err)?;
         // stdin is dropped here, closing the pipe
         Ok(())
     }
