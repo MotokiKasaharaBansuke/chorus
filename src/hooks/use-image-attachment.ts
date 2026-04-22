@@ -12,15 +12,6 @@ interface UseImageAttachmentOptions {
   tabId: string;
 }
 
-function loadImage(src: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error("Image load failed"));
-    img.src = src;
-  });
-}
-
 function readFileAsBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -44,37 +35,38 @@ export function scaleToFit(
 }
 
 function drawToCanvas(
-  img: HTMLImageElement,
+  source: CanvasImageSource,
   width: number,
   height: number,
   mimeType: string,
-  quality?: number,
 ): string {
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("canvas 2d context unavailable");
-  ctx.drawImage(img, 0, 0, width, height);
-  return canvas.toDataURL(mimeType, quality).split(",")[1] ?? "";
+  ctx.drawImage(source, 0, 0, width, height);
+  return canvas.toDataURL(mimeType).split(",")[1] ?? "";
 }
 
 /**
  * Resize the image if it exceeds MAX_IMAGE_DIMENSION, and convert
  * non-web-safe formats to PNG.  Small web-safe images skip the canvas
  * entirely for a faster path.
+ *
+ * Uses `createImageBitmap` instead of `new Image()` + blob URL to avoid
+ * being blocked by CSP `img-src` restrictions (blob: is not in our CSP).
  */
 async function compressImage(
   file: File,
   ext: string,
   isWebSafe: boolean,
 ): Promise<{ base64: string; saveExt: string }> {
-  const url = URL.createObjectURL(file);
+  const bitmap = await createImageBitmap(file);
   try {
-    const img = await loadImage(url);
     const needsResize =
-      img.naturalWidth > MAX_IMAGE_DIMENSION ||
-      img.naturalHeight > MAX_IMAGE_DIMENSION;
+      bitmap.width > MAX_IMAGE_DIMENSION ||
+      bitmap.height > MAX_IMAGE_DIMENSION;
 
     // Web-safe and small enough: fast path — no canvas overhead
     if (isWebSafe && !needsResize) {
@@ -86,15 +78,15 @@ async function compressImage(
 
     // Canvas path: resize and/or convert
     const { width, height } = needsResize
-      ? scaleToFit(img.naturalWidth, img.naturalHeight, MAX_IMAGE_DIMENSION)
-      : { width: img.naturalWidth, height: img.naturalHeight };
+      ? scaleToFit(bitmap.width, bitmap.height, MAX_IMAGE_DIMENSION)
+      : { width: bitmap.width, height: bitmap.height };
 
     const saveExt = isWebSafe ? (ext === "jpg" ? "jpeg" : ext) : "png";
     const mimeType = `image/${saveExt}`;
-    const base64 = drawToCanvas(img, width, height, mimeType);
+    const base64 = drawToCanvas(bitmap, width, height, mimeType);
     return { base64, saveExt };
   } finally {
-    URL.revokeObjectURL(url);
+    bitmap.close();
   }
 }
 
