@@ -45,23 +45,14 @@ vi.stubGlobal("FileReader", class MockFileReader {
 let mockImageWidth = 800;
 let mockImageHeight = 600;
 
-vi.stubGlobal("Image", class MockImage {
-  naturalWidth = mockImageWidth;
-  naturalHeight = mockImageHeight;
-  onload: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  set src(_v: string) {
-    // Re-read at load time so per-test overrides take effect
-    this.naturalWidth = mockImageWidth;
-    this.naturalHeight = mockImageHeight;
-    queueMicrotask(() => this.onload?.());
-  }
-});
-
-vi.stubGlobal("URL", {
-  createObjectURL: () => "blob:mock",
-  revokeObjectURL: () => {},
-});
+/** Mock createImageBitmap: resolves with width/height from mockImageWidth/Height. */
+vi.stubGlobal("createImageBitmap", (_source: unknown) =>
+  Promise.resolve({
+    width: mockImageWidth,
+    height: mockImageHeight,
+    close: vi.fn(),
+  }),
+);
 
 /** Stub canvas for the resize path */
 const mockCanvasCtx = {
