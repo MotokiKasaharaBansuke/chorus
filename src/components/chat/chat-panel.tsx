@@ -1,4 +1,4 @@
-import { createSignal, createEffect, createMemo, For, Show, onMount, onCleanup } from "solid-js";
+import { createSignal, createEffect, on, createMemo, For, Index, Show, onMount, onCleanup } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
 import { sendMessage as sendMessageCmd, killPty, interruptPty, spawnPty, getStreamSessionId, spawnEphemeralPty, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
@@ -712,21 +712,40 @@ export function ChatPanel(props: ChatPanelProps) {
             recalculations when items above the viewport change height. */}
         <Show when={messages().length > 0}>
           <div style={{ height: `${virtualizer.getTotalSize()}px`, width: "100%", position: "relative" }}>
-            <For each={virtualizer.getVirtualItems()}>
+            {/* <Index> reuses DOM nodes instead of recreating them on every
+                virtualizer recalculation. With <For>, every recalc destroyed
+                all elements — breaking ResizeObserver observation and leaving
+                a one-frame gap where items used stale estimated heights.
+                During streaming, this accumulated into persistent text overlap. */}
+            <Index each={virtualizer.getVirtualItems()}>
               {(vItem) => {
-                const msg = () => messages()[vItem.index];
+                const msg = () => messages()[vItem().index];
+                let elRef: HTMLElement | undefined;
+
+                // Re-measure when a different message occupies this slot
+                // (e.g. after scroll or message insertion). defer: true skips
+                // the initial run so the ref callback handles first measurement.
+                createEffect(on(
+                  () => vItem().index,
+                  () => { if (elRef) batchMeasure(elRef); },
+                  { defer: true },
+                ));
+
                 return (
                   <Show when={msg()}>
                     {(m) => (
                       <div
-                        ref={(el) => batchMeasure(el)}
-                        data-index={vItem.index}
+                        ref={(el) => {
+                          elRef = el;
+                          batchMeasure(el);
+                        }}
+                        data-index={vItem().index}
                         style={{
                           position: "absolute",
                           top: 0,
                           left: 0,
                           width: "100%",
-                          transform: `translateY(${vItem.start}px)`,
+                          transform: `translateY(${vItem().start}px)`,
                         }}
                       >
                         <MessageBubble message={m()} />
@@ -735,7 +754,7 @@ export function ChatPanel(props: ChatPanelProps) {
                   </Show>
                 );
               }}
-            </For>
+            </Index>
           </div>
         </Show>
       </div>
