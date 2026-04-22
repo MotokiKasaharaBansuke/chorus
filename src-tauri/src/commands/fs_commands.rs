@@ -79,10 +79,16 @@ fn home_dir() -> Result<std::path::PathBuf, AppError> {
 
 /// List past Claude Code sessions for a project directory
 #[tauri::command]
+/// Encode a working directory path to match Claude Code's project directory naming.
+/// Claude Code converts both slashes and underscores to dashes.
+fn encode_project_dir(working_dir: &str) -> String {
+    working_dir.replace('/', "-").replace('_', "-")
+}
+
+#[tauri::command]
 pub fn list_sessions(working_dir: String) -> Result<Vec<SessionInfo>, AppError> {
     let home = home_dir()?;
-    // Claude Code stores sessions with dir path encoded (slashes → dashes)
-    let encoded = working_dir.replace('/', "-");
+    let encoded = encode_project_dir(&working_dir);
     let allowed_root = home.join(".claude").join("projects");
     let dir = allowed_root.join(&encoded);
 
@@ -182,7 +188,7 @@ pub fn read_session(working_dir: String, session_id: String) -> Result<Vec<Strin
         return Err(AppError::FileSystemError("Invalid session id".into()));
     }
     let home = home_dir()?;
-    let encoded = working_dir.replace('/', "-");
+    let encoded = encode_project_dir(&working_dir);
     // Guard against path traversal via working_dir encoding
     if encoded.contains("..") {
         return Err(AppError::FileSystemError("Invalid working directory".into()));

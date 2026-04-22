@@ -11,15 +11,13 @@ import { ModelPicker } from "./model-picker";
 import { ChatInput } from "./chat-input";
 import { SessionPicker } from "./session-picker";
 import { ClawdIcon, CodexIcon } from "../icons";
-import type { Tab, ChatMessage } from "../../types";
+import type { Tab, ChatMessage, ChatBlock } from "../../types";
 import { effectivePtyId, isTabStreaming } from "../../types";
 import { useTabStore } from "../../stores/tab-store";
 import { useSettingsStore } from "../../stores/settings-store";
 import { useUsageStore } from "../../stores/usage-store";
 import { classifyStreamError } from "../../lib/classify-error";
 import { isValidTempImagePath } from "../../lib/validate-path";
-import { findStickyUserMessage } from "../../lib/find-sticky-user-message";
-import { StickyPromptHeader } from "./sticky-prompt-header";
 import { submitWithBusyRetry } from "../../lib/submit-with-busy-retry";
 import { WorktreeResetConfirm } from "../worktree/worktree-reset-confirm";
 import { TerminalModal } from "../terminal/terminal-modal";
@@ -66,7 +64,7 @@ export function ChatPanel(props: ChatPanelProps) {
   const [inputHistory, setInputHistory] = createSignal<readonly string[]>([]);
   const appendInputHistory = (text: string) =>
     setInputHistory(appendToHistory(inputHistory(), text));
-  const [stickyMessage, setStickyMessage] = createSignal<ChatMessage | null>(null);
+  const [stickyPrompt, setStickyPrompt] = createSignal<string | null>(null);
   let scrollRef: HTMLDivElement | undefined;
   let containerRef: HTMLDivElement | undefined;
 
@@ -90,6 +88,9 @@ export function ChatPanel(props: ChatPanelProps) {
   let scrollRafId: number | null = null;
   function scrollToBottom() {
     if (scrollRafId !== null) return;
+    // Clear sticky overlay immediately — we're about to be at the bottom
+    // where the overlay should never appear.
+    setStickyPrompt(null);
     scrollRafId = requestAnimationFrame(() => {
       scrollRafId = null;
       requestAnimationFrame(() => {
@@ -120,30 +121,40 @@ export function ChatPanel(props: ChatPanelProps) {
     });
   }
 
-  // Sticky section header: throttled via rAF to avoid per-scroll-event work.
+  // Sticky prompt overlay: find the last user message scrolled past the top.
   let stickyRafId: number | null = null;
-
   function scheduleStickyUpdate() {
     if (stickyRafId !== null) return;
     stickyRafId = requestAnimationFrame(() => {
       stickyRafId = null;
       if (unmounted || !scrollRef) return;
-      const result = findStickyUserMessage(
-        messages(),
-        virtualizer.getVirtualItems(),
-        scrollRef.scrollTop,
-        MESSAGE_ESTIMATED_HEIGHT,
-        { clientHeight: scrollRef.clientHeight, scrollHeight: scrollRef.scrollHeight },
-      );
-      setStickyMessage(result);
+      const st = scrollRef.scrollTop;
+      const distToBottom = scrollRef.scrollHeight - scrollRef.clientHeight - st;
+      if (distToBottom < 80) { setStickyPrompt(null); return; }
+      const msgs = messages();
+      const items = virtualizer.getVirtualItems();
+      const itemMap = new Map(items.map(v => [v.index, v.start]));
+      let text: string | null = null;
+      for (let i = 0; i < msgs.length; i++) {
+        if (msgs[i].role !== "user") continue;
+        const start = itemMap.get(i) ?? i * MESSAGE_ESTIMATED_HEIGHT;
+        if (start < st) {
+          const blocks = msgs[i].blocks;
+          text = blocks
+            .filter((b): b is ChatBlock & { kind: "text" } => b.kind === "text")
+            .map(b => b.text)
+            .join("\n");
+        }
+      }
+      setStickyPrompt(text);
     });
   }
 
   onCleanup(() => {
     if (scrollRafId !== null) { cancelAnimationFrame(scrollRafId); scrollRafId = null; }
+    if (stickyRafId !== null) { cancelAnimationFrame(stickyRafId); stickyRafId = null; }
     if (measureRafId !== null) { cancelAnimationFrame(measureRafId); measureRafId = null; }
     measureBatch = [];
-    if (stickyRafId !== null) { cancelAnimationFrame(stickyRafId); stickyRafId = null; }
   });
 
   let autoCompactTriggered = false;
@@ -174,7 +185,6 @@ export function ChatPanel(props: ChatPanelProps) {
   function applyUpdate(msgs: ChatMessage[]) {
     setMessages(msgs);
     scrollToBottom();
-    scheduleStickyUpdate();
 
     const cliType = props.tab.cliConfig.cliType;
     let costUsd = 0;
@@ -253,6 +263,9 @@ export function ChatPanel(props: ChatPanelProps) {
     pendingDrainGeneration += 1;
     pendingAutoCompactGeneration += 1;
     throttle.reset();
+    // Eagerly capture session ID so session.json can restore the conversation
+    // even if the user never sends a message before closing the app.
+    captureSessionIdIfNeeded(id);
     const unsub = streamEventDispatcher.subscribe(id, (payload) => {
       parser.processLine(payload.data);
     });
@@ -277,12 +290,22 @@ export function ChatPanel(props: ChatPanelProps) {
       }
     } catch { /* ignore */ }
 
-    // Auto-restore last session content on mount (e.g. after app restart)
-    const lastId = props.tab.lastSessionId;
-    if (lastId) {
+    // Auto-restore last session content on mount (e.g. after app restart).
+    // Try lastSessionId first, then fall back to the most recent session.
+    const candidates = [
+      props.tab.lastSessionId,
+      pastSessions().length > 0 ? pastSessions()[0].sessionId : undefined,
+    ].filter((id): id is string => !!id);
+
+    for (const id of candidates) {
       try {
-        parser.loadSession(await fetchSessionLines(props.tab, lastId));
-      } catch { /* session may have been deleted */ }
+        const lines = await fetchSessionLines(props.tab, id);
+        if (lines.length > 0) {
+          parser.loadSession(lines);
+          store.updateLastSessionId(props.tab.id, id);
+          break;
+        }
+      } catch { /* session file may not exist — try next candidate */ }
     }
   });
 
@@ -644,6 +667,13 @@ export function ChatPanel(props: ChatPanelProps) {
           </svg>
         </button>
       </Show>
+      <Show when={stickyPrompt()}>
+        {(text) => (
+          <div class={styles.stickyOverlay}>
+            <span class={styles.stickyOverlayText}>{text()}</span>
+          </div>
+        )}
+      </Show>
       <div ref={scrollRef} class={styles.messages} onScroll={scheduleStickyUpdate} onClick={(e) => {
         const link = (e.target as HTMLElement).closest("a[data-external-link]") as HTMLAnchorElement | null;
         if (link) {
@@ -654,13 +684,6 @@ export function ChatPanel(props: ChatPanelProps) {
           }
         }
       }}>
-        <Show when={stickyMessage()}>
-          {(msg) => (
-            <div class={styles.stickyHeaderSlot}>
-              <StickyPromptHeader message={msg()} />
-            </div>
-          )}
-        </Show>
         <Show when={messages().length === 0}>
           <div class={styles.welcome}>
             <div class={styles.welcomeIcon}>

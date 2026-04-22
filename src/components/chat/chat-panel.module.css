@@ -1,4 +1,4 @@
-.container { display: flex; flex-direction: column; flex: 1; overflow: hidden; background: var(--bg, #1a1a1a); position: relative; padding-bottom: 8px; --chat-font-size: var(--global-chat-font-size, 11px); }
+.container { display: flex; flex-direction: column; flex: 1; overflow: hidden; background: var(--bg, #1a1a1a); position: relative; padding-bottom: 8px; --chat-font-size: var(--global-chat-font-size, 11px); container-type: inline-size; }
 
 /* === Messages === */
 .messages {
@@ -502,8 +502,7 @@
 .contextTooltip {
   position: absolute;
   bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
+  right: -8px;
   background: #2a2a2a;
   border: 1px solid #444;
   border-radius: 8px;
@@ -522,8 +521,7 @@
   content: "";
   position: absolute;
   top: 100%;
-  left: 50%;
-  transform: translateX(-50%);
+  right: 12px;
   border: 5px solid transparent;
   border-top-color: #444;
 }
@@ -730,30 +728,21 @@
   padding: 24px 16px; color: #555; font-size: 13px; text-align: center;
 }
 
-/* === Sticky prompt header === */
-/* Zero-height sticky slot: keeps the header stuck at the scroll viewport top
-   without taking up flow space, so the virtualizer's item positions are unaffected.
-   Negative margins use the CSS variables defined on .messages to stay in sync. */
-.stickyHeaderSlot {
-  position: sticky;
+/* === Sticky prompt overlay === */
+/* Positioned above the scroll container (not inside it), so it never
+   conflicts with the virtualizer's absolute-positioned items. */
+.stickyOverlay {
+  position: absolute;
   top: 0;
-  height: 0;
-  overflow: visible;
+  left: 0;
+  right: 0;
   z-index: 10;
-  margin: calc(-1 * var(--messages-pad-top)) calc(-1 * var(--messages-pad-x)) 0;
+  background-image:
+    linear-gradient(to bottom, var(--bg, #1a1a1a) calc(100% - 12px), transparent 100%);
+  padding: 10px var(--messages-pad-x, 16px) 16px;
+  pointer-events: none;
 }
-.stickyHeader {
-  background: #222;
-  border-bottom: 1px solid #2d2d2d;
-  padding: 8px var(--messages-pad-x);
-  animation: fadeIn 0.15s ease-out;
-}
-.stickyHeaderContent {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.stickyHeaderText {
+.stickyOverlayText {
   font-size: var(--chat-font-size);
   color: #bbb;
   line-height: 1.5;
@@ -763,39 +752,19 @@
   overflow: hidden;
   overflow-wrap: break-word;
 }
-.stickyHeaderImages {
-  display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  scrollbar-width: thin;
+
+/* === Narrow pane adjustments === */
+@container (max-width: 480px) {
+  .messages { --messages-pad-x: 10px; }
+  .timelineRow { padding-left: 18px; }
+  .timelineRow::before { left: 4px; }
+  .timelineRow::after { left: 6px; }
 }
-.stickyHeaderThumb {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  background: #2a2a2a;
-  border: 1px solid #333;
-  border-radius: 4px;
-  padding: 3px 6px;
-  cursor: pointer;
-  transition: background 0.1s;
-  max-width: 200px;
-}
-.stickyHeaderThumb:hover { background: #333; }
-.stickyHeaderThumbImg {
-  width: 28px;
-  height: 28px;
-  object-fit: cover;
-  border-radius: 3px;
-  flex-shrink: 0;
-}
-.stickyHeaderThumbLabel {
-  font-size: 10px;
-  color: #888;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+@container (max-width: 320px) {
+  .messages { --messages-pad-x: 6px; }
+  .timelineRow { padding-left: 14px; }
+  .timelineRow::before { left: 2px; }
+  .timelineRow::after { left: 4px; }
 }
 
 /* === Animations === */
