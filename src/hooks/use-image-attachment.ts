@@ -5,8 +5,97 @@ import type { AttachedImage } from "../types";
 const WEB_SAFE_EXTS = new Set(["png", "jpeg", "jpg", "gif", "webp"]);
 export const DROP_DEDUP_WINDOW_MS = 500;
 
+/** Claude API processes images at max 1568px internally; 2048 leaves margin for detail. */
+export const MAX_IMAGE_DIMENSION = 2048;
+
 interface UseImageAttachmentOptions {
   tabId: string;
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Image load failed"));
+    img.src = src;
+  });
+}
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(
+      typeof reader.result === "string" ? (reader.result.split(",")[1] ?? "") : "",
+    );
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+export function scaleToFit(
+  w: number,
+  h: number,
+  max: number,
+): { width: number; height: number } {
+  if (w <= 0 || h <= 0) return { width: 0, height: 0 };
+  if (w <= max && h <= max) return { width: w, height: h };
+  const ratio = Math.min(max / w, max / h);
+  return { width: Math.round(w * ratio), height: Math.round(h * ratio) };
+}
+
+function drawToCanvas(
+  img: HTMLImageElement,
+  width: number,
+  height: number,
+  mimeType: string,
+  quality?: number,
+): string {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("canvas 2d context unavailable");
+  ctx.drawImage(img, 0, 0, width, height);
+  return canvas.toDataURL(mimeType, quality).split(",")[1] ?? "";
+}
+
+/**
+ * Resize the image if it exceeds MAX_IMAGE_DIMENSION, and convert
+ * non-web-safe formats to PNG.  Small web-safe images skip the canvas
+ * entirely for a faster path.
+ */
+async function compressImage(
+  file: File,
+  ext: string,
+  isWebSafe: boolean,
+): Promise<{ base64: string; saveExt: string }> {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await loadImage(url);
+    const needsResize =
+      img.naturalWidth > MAX_IMAGE_DIMENSION ||
+      img.naturalHeight > MAX_IMAGE_DIMENSION;
+
+    // Web-safe and small enough: fast path — no canvas overhead
+    if (isWebSafe && !needsResize) {
+      return {
+        base64: await readFileAsBase64(file),
+        saveExt: ext === "jpg" ? "jpeg" : ext,
+      };
+    }
+
+    // Canvas path: resize and/or convert
+    const { width, height } = needsResize
+      ? scaleToFit(img.naturalWidth, img.naturalHeight, MAX_IMAGE_DIMENSION)
+      : { width: img.naturalWidth, height: img.naturalHeight };
+
+    const saveExt = isWebSafe ? (ext === "jpg" ? "jpeg" : ext) : "png";
+    const mimeType = `image/${saveExt}`;
+    const base64 = drawToCanvas(img, width, height, mimeType);
+    return { base64, saveExt };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 export function useImageAttachment(options: UseImageAttachmentOptions) {
@@ -19,39 +108,7 @@ export function useImageAttachment(options: UseImageAttachmentOptions) {
     const isWebSafe = WEB_SAFE_EXTS.has(ext);
 
     try {
-      let base64: string;
-      let saveExt: string;
-
-      if (isWebSafe) {
-        base64 = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(
-            typeof reader.result === "string" ? (reader.result.split(",")[1] ?? "") : "",
-          );
-          reader.onerror = reject;
-          reader.readAsDataURL(file);
-        });
-        saveExt = ext === "jpg" ? "jpeg" : ext;
-      } else {
-        base64 = await new Promise<string>((resolve, reject) => {
-          const url = URL.createObjectURL(file);
-          const img = new Image();
-          img.onload = () => {
-            URL.revokeObjectURL(url);
-            const canvas = document.createElement("canvas");
-            canvas.width = img.naturalWidth;
-            canvas.height = img.naturalHeight;
-            const ctx = canvas.getContext("2d");
-            if (!ctx) { reject(new Error("canvas 2d context unavailable")); return; }
-            ctx.drawImage(img, 0, 0);
-            resolve(canvas.toDataURL("image/png").split(",")[1] ?? "");
-          };
-          img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("load failed")); };
-          img.src = url;
-        });
-        saveExt = "png";
-      }
-
+      const { base64, saveExt } = await compressImage(file, ext, isWebSafe);
       const path = await saveTempImage(base64, saveExt);
       const name = file.name || `screenshot.${saveExt}`;
       const mediaType = `image/${saveExt}`;
