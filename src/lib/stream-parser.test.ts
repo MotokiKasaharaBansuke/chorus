@@ -593,3 +593,134 @@ describe("totalInputTokens", () => {
     expect(totalInputTokens(null)).toBeUndefined();
   });
 });
+
+// ---- getUsageSnapshot: incremental accumulation ----
+
+describe("StreamParser.getUsageSnapshot", () => {
+  it("starts with zero values", () => {
+    const parser = new StreamParser();
+    const snap = parser.getUsageSnapshot();
+    expect(snap.costUsd).toBe(0);
+    expect(snap.inputTokens).toBe(0);
+    expect(snap.outputTokens).toBe(0);
+    expect(snap.turnCount).toBe(0);
+    expect(snap.lastContextTokens).toBeUndefined();
+    expect(snap.isCompacted).toBe(false);
+  });
+
+  it("accumulates across multiple result events", () => {
+    const parser = new StreamParser();
+    parser.processLine(assistantLine("first"));
+    parser.processLine(resultLine(0.01, 100, 1000, 200));
+    parser.processLine(assistantLine("second"));
+    parser.processLine(resultLine(0.02, 150, 3000, 300));
+
+    const snap = parser.getUsageSnapshot();
+    expect(snap.costUsd).toBeCloseTo(0.03);
+    expect(snap.inputTokens).toBe(4000);
+    expect(snap.outputTokens).toBe(500);
+    expect(snap.turnCount).toBe(2);
+    expect(snap.lastContextTokens).toBe(3000);
+  });
+
+  it("resets on loadSession", () => {
+    const parser = new StreamParser();
+    parser.processLine(assistantLine("msg"));
+    parser.processLine(resultLine(0.05, 200, 5000, 500));
+    expect(parser.getUsageSnapshot().turnCount).toBe(1);
+
+    parser.loadSession([userLine("fresh")]);
+    const snap = parser.getUsageSnapshot();
+    expect(snap.turnCount).toBe(0);
+    expect(snap.costUsd).toBe(0);
+    expect(snap.lastContextTokens).toBeUndefined();
+  });
+});
+
+// ---- compaction detection ----
+
+describe("StreamParser compaction detection", () => {
+  it("detects compaction when context tokens drop >40%", () => {
+    const parser = new StreamParser();
+    parser.processLine(assistantLine("before"));
+    parser.processLine(resultLine(0.01, 100, 100000, 200));
+    expect(parser.getUsageSnapshot().isCompacted).toBe(false);
+
+    parser.processLine(assistantLine("after compact"));
+    parser.processLine(resultLine(0.01, 100, 30000, 200)); // 70% drop
+
+    expect(parser.getUsageSnapshot().isCompacted).toBe(true);
+    expect(parser.getUsageSnapshot().lastContextTokens).toBe(30000);
+  });
+
+  it("does not flag compaction for small decreases", () => {
+    const parser = new StreamParser();
+    parser.processLine(assistantLine("msg1"));
+    parser.processLine(resultLine(0.01, 100, 100000, 200));
+    parser.processLine(assistantLine("msg2"));
+    parser.processLine(resultLine(0.01, 100, 80000, 200)); // 20% drop — normal
+
+    expect(parser.getUsageSnapshot().isCompacted).toBe(false);
+  });
+
+  it("resets compacted flag when tokens increase again", () => {
+    const parser = new StreamParser();
+    parser.processLine(assistantLine("before"));
+    parser.processLine(resultLine(0.01, 100, 100000, 200));
+    parser.processLine(assistantLine("compacted"));
+    parser.processLine(resultLine(0.01, 100, 30000, 200));
+    expect(parser.getUsageSnapshot().isCompacted).toBe(true);
+
+    parser.processLine(assistantLine("resumed work"));
+    parser.processLine(resultLine(0.01, 100, 40000, 200)); // increased
+    expect(parser.getUsageSnapshot().isCompacted).toBe(false);
+  });
+
+  it("does not flag compaction at exactly the boundary (60% of prev)", () => {
+    const parser = new StreamParser();
+    parser.processLine(assistantLine("msg1"));
+    parser.processLine(resultLine(0.01, 100, 100000, 200));
+    parser.processLine(assistantLine("msg2"));
+    // 60000 = 100000 * 0.6 — exactly at boundary, not below
+    parser.processLine(resultLine(0.01, 100, 60000, 200));
+    expect(parser.getUsageSnapshot().isCompacted).toBe(false);
+  });
+
+  it("flags compaction just below the boundary", () => {
+    const parser = new StreamParser();
+    parser.processLine(assistantLine("msg1"));
+    parser.processLine(resultLine(0.01, 100, 100000, 200));
+    parser.processLine(assistantLine("msg2"));
+    // 59999 < 100000 * 0.6 — just below boundary
+    parser.processLine(resultLine(0.01, 100, 59999, 200));
+    expect(parser.getUsageSnapshot().isCompacted).toBe(true);
+  });
+});
+
+// ---- getLastUserPrompt ----
+
+describe("StreamParser.getLastUserPrompt", () => {
+  it("returns undefined when no user messages exist", () => {
+    const parser = new StreamParser();
+    expect(parser.getLastUserPrompt()).toBeUndefined();
+  });
+
+  it("returns the text of the last user message", () => {
+    const parser = new StreamParser();
+    parser.processLine(JSON.stringify({
+      type: "system", subtype: "init",
+    }));
+    parser.loadSession([userLine("first"), assistantLine("reply"), userLine("second")]);
+    expect(parser.getLastUserPrompt()).toBe("second");
+  });
+
+  it("skips non-text blocks in user messages", () => {
+    const parser = new StreamParser();
+    const imgUser = JSON.stringify({
+      type: "user",
+      message: { role: "user", content: [{ type: "image", source: {} }] },
+    });
+    parser.loadSession([imgUser, userLine("text msg")]);
+    expect(parser.getLastUserPrompt()).toBe("text msg");
+  });
+});
