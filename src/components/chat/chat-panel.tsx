@@ -718,11 +718,16 @@ export function ChatPanel(props: ChatPanelProps) {
                 const msg = () => messages()[vItem().index];
                 let elRef: HTMLElement | undefined;
 
-                // Re-measure when a different message occupies this slot
-                // (e.g. after scroll or message insertion). defer: true skips
-                // the initial run so the ref callback handles first measurement.
+                // Re-measure when:
+                //  - a different message occupies this slot (scroll / insertion)
+                //  - the message object changes (streaming adds blocks, result
+                //    event updates metadata)
+                // Without msg(), the virtualizer uses stale cached heights and
+                // items below the changed message overlap during streaming.
+                // defer: true skips the initial run — the ref callback handles
+                // first measurement.
                 createEffect(on(
-                  () => vItem().index,
+                  () => [vItem().index, msg()] as const,
                   () => { if (elRef) batchMeasure(elRef); },
                   { defer: true },
                 ));
