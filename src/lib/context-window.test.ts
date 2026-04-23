@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   contextColor,
   shouldAutoCompact,
+  buildCompactCommand,
+  COMPACTION_DETECT_RATIO,
   DEFAULT_CONTEXT_WINDOW_SIZE,
   AUTO_COMPACT_THRESHOLD,
   AUTO_COMPACT_RESET_THRESHOLD,
@@ -90,5 +92,42 @@ describe("constants", () => {
   it("thresholds are ordered: reset < warn < compact", () => {
     expect(AUTO_COMPACT_RESET_THRESHOLD).toBeLessThan(CONTEXT_WARN_THRESHOLD);
     expect(CONTEXT_WARN_THRESHOLD).toBeLessThan(AUTO_COMPACT_THRESHOLD);
+  });
+
+  it("COMPACTION_DETECT_RATIO is 0.6 (40%+ drop triggers detection)", () => {
+    expect(COMPACTION_DETECT_RATIO).toBe(0.6);
+  });
+});
+
+describe("buildCompactCommand", () => {
+  it("returns base compact command without prompt", () => {
+    const cmd = buildCompactCommand();
+    expect(cmd).toContain("compact");
+    expect(cmd).toContain("Preserve:");
+    expect(cmd).not.toContain("last request");
+  });
+
+  it("returns deterministic output without args", () => {
+    expect(buildCompactCommand()).toBe(buildCompactCommand());
+  });
+
+  it("includes user prompt when provided", () => {
+    const cmd = buildCompactCommand("fix the login bug");
+    expect(cmd).toContain("compact");
+    expect(cmd).toContain('The user\'s last request was: "fix the login bug"');
+  });
+
+  it("truncates long prompts to 200 chars", () => {
+    const longPrompt = "x".repeat(300);
+    const cmd = buildCompactCommand(longPrompt);
+    expect(cmd).toContain("x".repeat(200) + "...");
+    expect(cmd).not.toContain("x".repeat(201));
+  });
+
+  it("does not truncate prompts at exactly 200 chars", () => {
+    const exact = "y".repeat(200);
+    const cmd = buildCompactCommand(exact);
+    expect(cmd).toContain(`"${exact}"`);
+    expect(cmd).not.toContain("...");
   });
 });

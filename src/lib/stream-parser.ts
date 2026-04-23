@@ -1,5 +1,6 @@
 import type { ChatMessage, ChatBlock } from "../types";
 import type { RateLimitInfo } from "../types/usage";
+import { COMPACTION_DETECT_RATIO } from "./context-window";
 
 type StreamingStatus = "streaming" | "idle";
 
@@ -37,6 +38,27 @@ export function totalInputTokens(usage: Record<string, unknown> | null | undefin
   }, undefined);
 }
 
+/** Incrementally accumulated usage stats — updated in handleResult() so
+ *  callers never need to iterate all messages. */
+export interface UsageSnapshot {
+  costUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  turnCount: number;
+  /** Input tokens from the most recent result event (= current context occupancy). */
+  lastContextTokens: number | undefined;
+  /** True when context tokens dropped significantly (compaction detected).
+   *  Reset to false after the next result event where tokens increase again. */
+  isCompacted: boolean;
+}
+
+function createEmptyUsageSnapshot(): UsageSnapshot {
+  return {
+    costUsd: 0, inputTokens: 0, outputTokens: 0, turnCount: 0,
+    lastContextTokens: undefined, isCompacted: false,
+  };
+}
+
 /** Manages streaming state for a single chat session (Claude Code or Codex) */
 export class StreamParser {
   private messages: ChatMessage[] = [];
@@ -48,6 +70,9 @@ export class StreamParser {
   /** Context window size reported by the CLI via `modelUsage` in `result` events.
    *  Null until the first result arrives; callers should fall back to a default. */
   private detectedContextWindow: number | null = null;
+
+  /** Incrementally accumulated usage — updated only in handleResult(). */
+  private usage: UsageSnapshot = createEmptyUsageSnapshot();
 
   onUpdate(fn: (messages: ChatMessage[]) => void): () => void {
     this.listeners.push(fn);
@@ -76,6 +101,26 @@ export class StreamParser {
 
   getContextWindow(): number | null {
     return this.detectedContextWindow;
+  }
+
+  /** O(1) access to accumulated usage stats. Updated incrementally in
+   *  handleResult() — callers never need to iterate all messages. */
+  getUsageSnapshot(): Readonly<UsageSnapshot> {
+    return this.usage;
+  }
+
+  /** Extract the text of the last user message (for auto-compact context).
+   *  Returns undefined if no user messages exist. */
+  getLastUserPrompt(): string | undefined {
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      if (this.messages[i].role !== "user") continue;
+      const text = this.messages[i].blocks
+        .filter((b): b is Extract<typeof b, { kind: "text" }> => b.kind === "text")
+        .map(b => b.text)
+        .join("\n");
+      if (text) return text;
+    }
+    return undefined;
   }
 
   /** Return a shallow copy of the messages array, preserving individual message
@@ -134,6 +179,7 @@ export class StreamParser {
   /** Load past session from JSONL lines (supports Claude Code and Codex formats) */
   loadSession(lines: string[]) {
     this.messages = [];
+    this.usage = createEmptyUsageSnapshot();
     for (const line of lines) {
       try {
         const parsed: unknown = JSON.parse(line);
@@ -366,13 +412,31 @@ export class StreamParser {
     if (idx === -1) { this.notifyBatched(); return; }
 
     const usageObj = this.toRecord(data.usage);
+    const costUsd = typeof data.total_cost_usd === "number" ? data.total_cost_usd : undefined;
+    const inTok = totalInputTokens(usageObj);
+    const outTok = typeof usageObj?.output_tokens === "number" ? usageObj.output_tokens : undefined;
+
     this.messages[idx] = {
       ...this.messages[idx],
-      costUsd: typeof data.total_cost_usd === "number" ? data.total_cost_usd : undefined,
+      costUsd,
       durationMs: typeof data.duration_ms === "number" ? data.duration_ms : undefined,
-      inputTokens: totalInputTokens(usageObj),
-      outputTokens: typeof usageObj?.output_tokens === "number" ? usageObj.output_tokens : undefined,
+      inputTokens: inTok,
+      outputTokens: outTok,
     };
+
+    // Incrementally accumulate usage — O(1) per result event.
+    this.usage.turnCount++;
+    this.usage.costUsd += costUsd ?? 0;
+    this.usage.inputTokens += inTok ?? 0;
+    this.usage.outputTokens += outTok ?? 0;
+
+    // Detect compaction: context tokens dropped by >40% from last result.
+    // This happens when Claude Code runs `/compact` (auto or manual).
+    const prev = this.usage.lastContextTokens;
+    if (inTok !== undefined) {
+      this.usage.isCompacted = prev !== undefined && inTok < prev * COMPACTION_DETECT_RATIO;
+      this.usage.lastContextTokens = inTok;
+    }
 
     this.updateContextWindow(data);
     this.notifyBatched();

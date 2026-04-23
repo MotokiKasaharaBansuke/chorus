@@ -22,7 +22,7 @@ import { submitWithBusyRetry } from "../../lib/submit-with-busy-retry";
 import { WorktreeResetConfirm } from "../worktree/worktree-reset-confirm";
 import { TerminalModal } from "../terminal/terminal-modal";
 import { REPL_COMMANDS, matchReplCommand } from "../../lib/repl-commands";
-import { DEFAULT_CONTEXT_WINDOW_SIZE, AUTO_COMPACT_RESET_THRESHOLD, contextColor, shouldAutoCompact, COMPACT_COMMAND } from "../../lib/context-window";
+import { DEFAULT_CONTEXT_WINDOW_SIZE, AUTO_COMPACT_RESET_THRESHOLD, contextColor, shouldAutoCompact, buildCompactCommand } from "../../lib/context-window";
 import { appendToHistory } from "./input-history";
 import { SlashCommandQueue } from "./slash-command-queue";
 import { useThrottledUpdate } from "../../hooks/use-throttled-update";
@@ -174,35 +174,31 @@ export function ChatPanel(props: ChatPanelProps) {
     setMessages(msgs);
     scrollToBottom();
 
+    // O(1) — usage stats are accumulated incrementally inside StreamParser.
     const cliType = props.tab.cliConfig.cliType;
-    let costUsd = 0;
-    let inputTokens = 0;
-    let outputTokens = 0;
-    let turnCount = 0;
-    let lastContextTokens: number | undefined;
-    for (const m of msgs) {
-      if (m.role !== "assistant") continue;
-      turnCount++;
-      costUsd += m.costUsd ?? 0;
-      inputTokens += m.inputTokens ?? 0;
-      outputTokens += m.outputTokens ?? 0;
-      if (m.inputTokens !== undefined) lastContextTokens = m.inputTokens;
-    }
+    const usage = parser.getUsageSnapshot();
     if (cliType === "claude-code" || cliType === "codex") {
-      usageStore.updateTabUsage({ tabId: props.tab.id, tabTitle: props.tab.title, cliType, costUsd, inputTokens, outputTokens, turnCount });
+      usageStore.updateTabUsage({
+        tabId: props.tab.id, tabTitle: props.tab.title, cliType,
+        costUsd: usage.costUsd, inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens, turnCount: usage.turnCount,
+      });
     }
 
-    if (cliType === "claude-code" && lastContextTokens !== undefined) {
-      setContextInputTokens(lastContextTokens);
+    if (cliType === "claude-code" && usage.lastContextTokens !== undefined) {
+      setContextInputTokens(usage.lastContextTokens);
       const pct = contextPct();
-      if (pct < AUTO_COMPACT_RESET_THRESHOLD) {
+      // Reset auto-compact latch when context drops below threshold OR
+      // when compaction is detected (context tokens dropped >40%).
+      if (pct < AUTO_COMPACT_RESET_THRESHOLD || usage.isCompacted) {
         autoCompactTriggered = false;
       } else if (shouldAutoCompact(pct, isStreaming(), autoCompactTriggered)) {
         autoCompactTriggered = true;
         const myGen = ++pendingAutoCompactGeneration;
+        const cmd = buildCompactCommand(parser.getLastUserPrompt());
         queueMicrotask(() => {
           if (myGen !== pendingAutoCompactGeneration) return;
-          sendAsSlashCommand(COMPACT_COMMAND, { silent: true });
+          sendAsSlashCommand(cmd, { silent: true });
         });
       }
     }
@@ -796,7 +792,7 @@ export function ChatPanel(props: ChatPanelProps) {
             ? {
                 pct: contextPct(),
                 color: contextIndicatorColor(),
-                onCompact: () => sendAsSlashCommand(COMPACT_COMMAND),
+                onCompact: () => sendAsSlashCommand(buildCompactCommand(parser.getLastUserPrompt())),
               }
             : undefined
         }
