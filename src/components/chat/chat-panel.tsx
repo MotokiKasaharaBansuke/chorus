@@ -81,6 +81,21 @@ export function ChatPanel(props: ChatPanelProps) {
     overscan: 5,
   });
 
+  /** Whether the scroll position is near the bottom. When the user scrolls
+   *  up during streaming, auto-scroll is suppressed to prevent the virtualizer
+   *  from fighting the user's scroll position (which causes visual corruption
+   *  — items rendered at intermediate translateY positions).
+   *  Skips recalculation while scrollToBottom's double-rAF is pending, since
+   *  the scroll hasn't executed yet and the stale position would reset the flag. */
+  let isNearBottom = true;
+  const NEAR_BOTTOM_THRESHOLD_PX = 60;
+
+  function updateIsNearBottom() {
+    if (!scrollRef || scrollRafId !== null) return;
+    const { scrollTop, scrollHeight, clientHeight } = scrollRef;
+    isNearBottom = scrollHeight - scrollTop - clientHeight < NEAR_BOTTOM_THRESHOLD_PX;
+  }
+
   /** Scroll to the last message. Uses double-rAF so the scroll executes
    *  AFTER batchMeasure has updated item sizes in the first rAF — this
    *  eliminates layout shift caused by scrolling with estimateSize before
@@ -92,6 +107,7 @@ export function ChatPanel(props: ChatPanelProps) {
     // Clear sticky overlay immediately — we're about to be at the bottom
     // where the overlay should never appear.
     setStickyPrompt(null);
+    isNearBottom = true;
     scrollRafId = requestAnimationFrame(() => {
       scrollRafId = null;
       requestAnimationFrame(() => {
@@ -104,18 +120,22 @@ export function ChatPanel(props: ChatPanelProps) {
     });
   }
 
-  // Batch virtualizer measurements: instead of scheduling one rAF per item,
-  // collect refs and measure them all in a single rAF callback.
-  let measureBatch: HTMLElement[] = [];
-  let measureRafId: number | null = null;
+  // Batch virtualizer measurements into a single microtask so they complete
+  // before the browser paints.  The previous requestAnimationFrame approach
+  // left a one-frame window where items were positioned using stale estimated
+  // heights, causing visible text overlap during scroll.
+  let measureBatch = new Set<HTMLElement>();
+  let measureScheduled = false;
 
   function batchMeasure(el: HTMLElement) {
-    measureBatch.push(el);
-    if (measureRafId !== null) return;
-    measureRafId = requestAnimationFrame(() => {
-      measureRafId = null;
+    measureBatch.add(el);
+    if (measureScheduled) return;
+    measureScheduled = true;
+    queueMicrotask(() => {
+      measureScheduled = false;
+      if (unmounted) { measureBatch.clear(); return; }
       const batch = measureBatch;
-      measureBatch = [];
+      measureBatch = new Set();
       for (const e of batch) {
         if (e.isConnected) virtualizer.measureElement(e);
       }
@@ -123,8 +143,11 @@ export function ChatPanel(props: ChatPanelProps) {
   }
 
   // Sticky prompt overlay: find the last user message scrolled past the top.
+  // Also updates isNearBottom so streaming auto-scroll is suppressed while
+  // the user is reading earlier messages.
   let stickyRafId: number | null = null;
   function scheduleStickyUpdate() {
+    updateIsNearBottom();
     if (stickyRafId !== null) return;
     stickyRafId = requestAnimationFrame(() => {
       stickyRafId = null;
@@ -141,11 +164,16 @@ export function ChatPanel(props: ChatPanelProps) {
   onCleanup(() => {
     if (scrollRafId !== null) { cancelAnimationFrame(scrollRafId); scrollRafId = null; }
     if (stickyRafId !== null) { cancelAnimationFrame(stickyRafId); stickyRafId = null; }
-    if (measureRafId !== null) { cancelAnimationFrame(measureRafId); measureRafId = null; }
-    measureBatch = [];
+    measureBatch.clear();
+    measureScheduled = false;
   });
 
   let autoCompactTriggered = false;
+  /** High-water mark for context tokens. Context usage is monotonically
+   *  increasing during a conversation — fluctuations are measurement noise
+   *  (cache variance, sub-model calls). Using the max prevents the donut
+   *  color from jittering at threshold boundaries. Reset on compaction. */
+  let contextHighWater = 0;
 
   // Restore messages from a surviving parser (e.g. after layout-triggered remount)
   const existing = parser.getMessages();
@@ -172,7 +200,7 @@ export function ChatPanel(props: ChatPanelProps) {
 
   function applyUpdate(msgs: ChatMessage[]) {
     setMessages(msgs);
-    scrollToBottom();
+    if (isNearBottom) scrollToBottom();
 
     // O(1) — usage stats are accumulated incrementally inside StreamParser.
     const cliType = props.tab.cliConfig.cliType;
@@ -186,7 +214,15 @@ export function ChatPanel(props: ChatPanelProps) {
     }
 
     if (cliType === "claude-code" && usage.lastContextTokens !== undefined) {
-      setContextInputTokens(usage.lastContextTokens);
+      // Use high-water mark to stabilise the donut colour — context is
+      // monotonically increasing within a conversation, so any decrease
+      // without compaction is cache variance / sub-model noise.
+      if (usage.isCompacted) {
+        contextHighWater = usage.lastContextTokens;
+      } else {
+        contextHighWater = Math.max(contextHighWater, usage.lastContextTokens);
+      }
+      setContextInputTokens(contextHighWater);
       const pct = contextPct();
       // Reset auto-compact latch when context drops below threshold OR
       // when compaction is detected (context tokens dropped >40%).
@@ -243,6 +279,7 @@ export function ChatPanel(props: ChatPanelProps) {
     const id = ptyId();
     // Reset guards on respawn so the new session starts clean
     autoCompactTriggered = false;
+    contextHighWater = 0;
     slashQueue.clear();
     pendingDrainGeneration += 1;
     pendingAutoCompactGeneration += 1;
@@ -435,6 +472,7 @@ export function ChatPanel(props: ChatPanelProps) {
 
     parser.addUserMessage(text, attached);
     images.clearAll();
+    isNearBottom = true;
     setIsStreaming(true);
 
     await submitMessage(text, imagePayloads.length > 0 ? imagePayloads : undefined);
@@ -510,6 +548,7 @@ export function ChatPanel(props: ChatPanelProps) {
     }
     const command = `/${id}`;
     if (!silent) parser.addUserMessage(command);
+    isNearBottom = true;
     setIsStreaming(true);
     await submitMessage(command);
   }
@@ -718,11 +757,16 @@ export function ChatPanel(props: ChatPanelProps) {
                 const msg = () => messages()[vItem().index];
                 let elRef: HTMLElement | undefined;
 
-                // Re-measure when a different message occupies this slot
-                // (e.g. after scroll or message insertion). defer: true skips
-                // the initial run so the ref callback handles first measurement.
+                // Re-measure when:
+                //  - a different message occupies this slot (scroll / insertion)
+                //  - the message object changes (streaming adds blocks, result
+                //    event updates metadata)
+                // Without msg(), the virtualizer uses stale cached heights and
+                // items below the changed message overlap during streaming.
+                // defer: true skips the initial run — the ref callback handles
+                // first measurement.
                 createEffect(on(
-                  () => vItem().index,
+                  () => [vItem().index, msg()] as const,
                   () => { if (elRef) batchMeasure(elRef); },
                   { defer: true },
                 ));
@@ -792,6 +836,8 @@ export function ChatPanel(props: ChatPanelProps) {
             ? {
                 pct: contextPct(),
                 color: contextIndicatorColor(),
+                tokens: contextInputTokens(),
+                windowSize: contextWindowSize(),
                 onCompact: () => sendAsSlashCommand(buildCompactCommand(parser.getLastUserPrompt())),
               }
             : undefined
