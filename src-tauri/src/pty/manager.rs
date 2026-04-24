@@ -5,7 +5,7 @@ use tauri::AppHandle;
 
 use crate::cli::registry::CliType;
 use crate::error::AppError;
-use super::session::{PtySession, StreamSession};
+use super::session::{PtySession, SessionFlags, StreamSession};
 
 const MAX_TABS: usize = 20;
 
@@ -51,11 +51,12 @@ impl PtyManager {
         base_args: Vec<String>,
         working_dir: String,
         extra_env: HashMap<String, String>,
+        flags: SessionFlags,
     ) -> Result<(), AppError> {
         if self.sessions.lock().len() >= MAX_TABS {
             return Err(AppError::PtySpawnFailed(format!("Maximum tabs ({MAX_TABS}) reached")));
         }
-        let session = StreamSession::new(cli_type, command, base_args, working_dir, extra_env);
+        let session = StreamSession::new(cli_type, command, base_args, working_dir, extra_env, flags);
         self.sessions.lock().insert(id.to_string(), Session::Stream(Arc::new(session)));
         tracing::info!(session_id = id, "Stream session created");
         Ok(())
@@ -233,6 +234,7 @@ mod tests {
                 vec![],
                 "/tmp".into(),
                 HashMap::new(),
+                Default::default(),
             )
             .expect("create_stream should succeed");
         }

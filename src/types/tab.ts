@@ -13,6 +13,13 @@ export interface CliConfig {
   workingDir: string;
 }
 
+/** Flags controlling fork, resume-at, and mirror behavior for stream sessions. */
+export interface SessionFlags {
+  forkSession?: boolean;
+  resumeSessionAt?: string;
+  sessionMirror?: boolean;
+}
+
 /** Auto-created worktree metadata attached to a Tab by the auto-worktree flow. */
 export interface TabWorktree {
   path: string;

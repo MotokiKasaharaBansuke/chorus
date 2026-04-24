@@ -1,4 +1,4 @@
-import type { CliConfig, CliMode, ReviewCliType, TabWorktree, LayoutNode, PaneGroupNode, SplitNode, Tab } from "../types";
+import type { CliConfig, CliMode, ReviewCliType, SessionFlags, TabWorktree, LayoutNode, PaneGroupNode, SplitNode, Tab } from "../types";
 import { saveSession, loadSession } from "./commands/session-commands";
 import { spawnPty } from "./commands";
 
@@ -158,9 +158,16 @@ export async function restoreSession(data: string): Promise<RestoredWorkspace | 
     return null;
   }
 
-  // Spawn PTYs for all tabs in parallel
+  // Spawn PTYs for all tabs in parallel.
+  // When a tab has a lastSessionId, resume that session so the CLI
+  // restores conversation context from the previous app session.
   const spawnResults = await Promise.allSettled(
-    session.tabs.map(t => spawnPty(t.cliConfig))
+    session.tabs.map(t => {
+      const flags: SessionFlags | undefined = t.lastSessionId && t.lastSessionId.length > 0
+        ? { resumeSessionAt: t.lastSessionId }
+        : undefined;
+      return spawnPty(t.cliConfig, undefined, undefined, flags);
+    })
   );
 
   const newIds: string[] = [];
