@@ -5,7 +5,7 @@ use tauri::{AppHandle, State};
 use crate::cli::registry::{CliMode, CliType, find_binary, resolve_command};
 use crate::error::AppError;
 use crate::pty::manager::PtyManager;
-use crate::pty::session::ImageAttachment;
+use crate::pty::session::{ImageAttachment, SessionFlags};
 
 const MAX_WRITE_SIZE: usize = 1_048_576;
 const MAX_IMAGE_ATTACHMENTS: usize = 10;
@@ -33,6 +33,8 @@ pub struct PtySpawnConfig {
     pub command_override: Option<String>,
     /// Arguments for the overridden command.
     pub args_override: Option<Vec<String>>,
+    /// Session flags for fork, resume-at, and mirror behavior.
+    pub session_flags: Option<SessionFlags>,
 }
 
 #[tauri::command]
@@ -70,8 +72,9 @@ pub fn spawn_pty(
 
     if config.cli_type.uses_stream_session() {
         let extra_env: HashMap<String, String> = HashMap::new();
+        let flags = config.session_flags.unwrap_or_default();
         // Claude Code / Codex: create stream session (no process yet, spawned per message)
-        state.create_stream(&id, config.cli_type, command, args, config.working_dir, extra_env)?;
+        state.create_stream(&id, config.cli_type, command, args, config.working_dir, extra_env, flags)?;
     } else {
         // Shell: spawn traditional PTY
         let cols = config.cols.unwrap_or(120);

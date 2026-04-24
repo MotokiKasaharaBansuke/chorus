@@ -4,6 +4,7 @@ export type {
   ReviewCliType,
   CliMode,
   CliConfig,
+  SessionFlags,
   Tab,
   TabWorktree,
   TabStoreState,

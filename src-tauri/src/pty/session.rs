@@ -109,6 +109,32 @@ impl PtySession {
     pub fn kill(&mut self) { let _ = self.child.kill(); }
 }
 
+/// Session flags controlling fork, resume-at, and mirror behavior.
+/// All fields default to off/None for backward compatibility.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFlags {
+    /// When true, the first message includes `--fork-session` alongside `--resume`.
+    #[serde(default)]
+    pub fork_session: bool,
+    /// When set, the first message uses `--resume <this_id>` instead of
+    /// `--session-id <new_uuid>`. Combined with `fork_session` to fork from a
+    /// specific parent session.
+    pub resume_session_at: Option<String>,
+    /// When true, `--session-mirror` is appended to every CLI invocation.
+    #[serde(default)]
+    pub session_mirror: bool,
+}
+
+/// Validate that a session ID is UUID-like: alphanumeric + dashes, max 64 chars.
+/// Rejects crafted values that could be interpreted as CLI flags (e.g. "--flag").
+fn is_valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && !id.starts_with('-') // reject values that look like CLI flags
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
 /// Stream session for chat-based CLIs (Claude Code, Codex).
 /// Each user message spawns the CLI in non-interactive mode and streams output back.
 /// - Claude Code: `claude -p "msg" --session-id <id> --output-format stream-json`
@@ -128,6 +154,11 @@ pub struct StreamSession {
     child_pid: Arc<Mutex<Option<u32>>>,
     /// Whether the first message has been sent (for Claude Code --resume flag)
     has_session: Arc<AtomicBool>,
+    /// Session flags for fork, resume-at, and mirror behavior.
+    session_flags: SessionFlags,
+    /// Whether the initial resume/fork has been consumed. After the first
+    /// message, subsequent messages use plain `--resume <session_id>`.
+    initial_resume_done: Arc<AtomicBool>,
 }
 
 impl StreamSession {
@@ -137,7 +168,17 @@ impl StreamSession {
         base_args: Vec<String>,
         working_dir: String,
         extra_env: HashMap<String, String>,
+        flags: SessionFlags,
     ) -> Self {
+        // Sanitize: strip resume_session_at if it fails UUID-like validation.
+        // This prevents argument injection via crafted session IDs.
+        let flags = SessionFlags {
+            resume_session_at: flags.resume_session_at.filter(|id| is_valid_session_id(id)),
+            ..flags
+        };
+        // When resume_session_at is set, the first message should use --resume
+        // (not --session-id), so start with has_session = true.
+        let has_session = flags.resume_session_at.is_some();
         Self {
             cli_type,
             command,
@@ -147,7 +188,9 @@ impl StreamSession {
             session_id: uuid::Uuid::new_v4().to_string(),
             extra_env,
             running_since: Arc::new(Mutex::new(None)),
-            has_session: Arc::new(AtomicBool::new(false)),
+            has_session: Arc::new(AtomicBool::new(has_session)),
+            session_flags: flags,
+            initial_resume_done: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -187,14 +230,29 @@ impl StreamSession {
                     args.push("--input-format".into());
                     args.push("stream-json".into());
                 }
-                // First message: --session-id UUID creates a new session
-                // Subsequent messages: --resume UUID resumes that specific session
-                if self.has_session.load(Ordering::Acquire) {
+                // Session ID / resume logic:
+                // - Default (no flags): first msg → --session-id UUID, then --resume UUID
+                // - resume_session_at: first msg → --resume <parent_id>, then --resume <own_id>
+                // - fork_session + resume_session_at: first msg → --resume <parent_id> --fork-session
+                let pending_parent = self.session_flags.resume_session_at.as_deref()
+                    .filter(|_| !self.initial_resume_done.load(Ordering::Acquire));
+
+                if let Some(parent_id) = pending_parent {
                     args.push("--resume".into());
+                    args.push(parent_id.to_owned());
+                    if self.session_flags.fork_session {
+                        args.push("--fork-session".into());
+                    }
+                } else if self.has_session.load(Ordering::Acquire) {
+                    args.push("--resume".into());
+                    args.push(self.session_id.clone());
                 } else {
                     args.push("--session-id".into());
+                    args.push(self.session_id.clone());
                 }
-                args.push(self.session_id.clone());
+                if self.session_flags.session_mirror {
+                    args.push("--session-mirror".into());
+                }
             }
             CliType::Codex => {
                 // base_args already starts with ["exec", ...flags]
@@ -287,6 +345,9 @@ impl StreamSession {
         // Mark session as created so subsequent messages use --resume
         // (set AFTER successful stdin write to avoid --resume on a never-started session)
         self.has_session.store(true, Ordering::Release);
+        // Mark initial resume/fork as consumed so subsequent messages use
+        // plain --resume <own_session_id> instead of the parent's ID.
+        self.initial_resume_done.store(true, Ordering::Release);
         self.start_reader_thread(pane_id, child, stdout, stderr, app, guard, image_paths);
         Ok(())
     }
@@ -843,14 +904,18 @@ fn is_sensitive_env_key(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_sensitive_env_key, StreamSession};
+    use super::{is_sensitive_env_key, SessionFlags, StreamSession};
     use crate::cli::registry::CliType;
     use std::sync::atomic::Ordering;
 
     // ---- build_args ----
 
     fn make_session(cli_type: CliType) -> StreamSession {
-        StreamSession::new(cli_type, "claude".into(), vec![], "/tmp".into(), Default::default())
+        StreamSession::new(cli_type, "claude".into(), vec![], "/tmp".into(), Default::default(), Default::default())
+    }
+
+    fn make_session_with_flags(cli_type: CliType, flags: SessionFlags) -> StreamSession {
+        StreamSession::new(cli_type, "claude".into(), vec![], "/tmp".into(), Default::default(), flags)
     }
 
     #[test]
@@ -898,6 +963,107 @@ mod tests {
         let args = session.build_args("hello", false, &[]);
         assert!(args.contains(&"--resume".to_string()));
         assert!(!args.contains(&"--session-id".to_string()));
+    }
+
+    // ---- session flags ----
+
+    #[test]
+    fn build_args_fork_session_includes_fork_and_resume_parent() {
+        let flags = SessionFlags {
+            fork_session: true,
+            resume_session_at: Some("parent-session-id".into()),
+            ..Default::default()
+        };
+        let session = make_session_with_flags(CliType::ClaudeCode, flags);
+        let args = session.build_args("hello", false, &[]);
+        // First message should use --resume <parent_id> --fork-session
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"parent-session-id".to_string()));
+        assert!(args.contains(&"--fork-session".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
+    }
+
+    #[test]
+    fn build_args_fork_session_subsequent_uses_own_session_id() {
+        let flags = SessionFlags {
+            fork_session: true,
+            resume_session_at: Some("parent-session-id".into()),
+            ..Default::default()
+        };
+        let session = make_session_with_flags(CliType::ClaudeCode, flags);
+        // Simulate first message completed
+        session.has_session.store(true, Ordering::Release);
+        session.initial_resume_done.store(true, Ordering::Release);
+        let args = session.build_args("hello", false, &[]);
+        // Subsequent message should use --resume <own_id>, not parent
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&session.session_id));
+        assert!(!args.contains(&"parent-session-id".to_string()));
+        assert!(!args.contains(&"--fork-session".to_string()));
+    }
+
+    #[test]
+    fn build_args_resume_session_at_uses_resume_from_start() {
+        let flags = SessionFlags {
+            resume_session_at: Some("existing-session-id".into()),
+            ..Default::default()
+        };
+        let session = make_session_with_flags(CliType::ClaudeCode, flags);
+        let args = session.build_args("hello", false, &[]);
+        // First message should use --resume <existing_id> (not --session-id)
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"existing-session-id".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
+        assert!(!args.contains(&"--fork-session".to_string()));
+    }
+
+    #[test]
+    fn build_args_session_mirror_flag() {
+        let flags = SessionFlags {
+            session_mirror: true,
+            ..Default::default()
+        };
+        let session = make_session_with_flags(CliType::ClaudeCode, flags);
+        let args = session.build_args("hello", false, &[]);
+        assert!(args.contains(&"--session-mirror".to_string()));
+    }
+
+    #[test]
+    fn invalid_resume_session_at_is_stripped() {
+        // Crafted values (e.g. "--flag-injection") should be rejected
+        let flags = SessionFlags {
+            resume_session_at: Some("--malicious-flag".into()),
+            ..Default::default()
+        };
+        let session = make_session_with_flags(CliType::ClaudeCode, flags);
+        let args = session.build_args("hello", false, &[]);
+        // Should fall back to --session-id (fresh session) since resume_session_at was invalid
+        assert!(args.contains(&"--session-id".to_string()));
+        assert!(!args.contains(&"--resume".to_string()));
+        assert!(!args.contains(&"--malicious-flag".to_string()));
+    }
+
+    #[test]
+    fn empty_resume_session_at_is_stripped() {
+        let flags = SessionFlags {
+            resume_session_at: Some("".into()),
+            ..Default::default()
+        };
+        let session = make_session_with_flags(CliType::ClaudeCode, flags);
+        let args = session.build_args("hello", false, &[]);
+        assert!(args.contains(&"--session-id".to_string()));
+        assert!(!args.contains(&"--resume".to_string()));
+    }
+
+    #[test]
+    fn build_args_default_flags_match_existing_behavior() {
+        let session = make_session(CliType::ClaudeCode);
+        let args = session.build_args("hello", false, &[]);
+        // Default: --session-id on first message, no fork/mirror flags
+        assert!(args.contains(&"--session-id".to_string()));
+        assert!(!args.contains(&"--resume".to_string()));
+        assert!(!args.contains(&"--fork-session".to_string()));
+        assert!(!args.contains(&"--session-mirror".to_string()));
     }
 
     // ---- expand_tilde ----

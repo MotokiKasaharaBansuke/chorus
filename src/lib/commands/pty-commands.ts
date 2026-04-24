@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CliConfig } from "../../types";
+import type { CliConfig, SessionFlags } from "../../types";
 
 interface PtySpawnConfig {
   cliType: string;
@@ -10,12 +10,14 @@ interface PtySpawnConfig {
   rows?: number;
   commandOverride?: string;
   argsOverride?: string[];
+  sessionFlags?: SessionFlags;
 }
 
 export async function spawnPty(
   config: CliConfig,
   cols?: number,
   rows?: number,
+  sessionFlags?: SessionFlags,
 ): Promise<string> {
   return invoke<string>("spawn_pty", {
     config: {
@@ -25,6 +27,7 @@ export async function spawnPty(
       workingDir: config.workingDir,
       cols,
       rows,
+      sessionFlags,
     } satisfies PtySpawnConfig,
   });
 }

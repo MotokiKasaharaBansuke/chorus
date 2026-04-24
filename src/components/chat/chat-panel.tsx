@@ -11,7 +11,7 @@ import { ModelPicker } from "./model-picker";
 import { ChatInput } from "./chat-input";
 import { SessionPicker } from "./session-picker";
 import { ClawdIcon, CodexIcon } from "../icons";
-import type { Tab, ChatMessage } from "../../types";
+import type { Tab, ChatMessage, SessionFlags } from "../../types";
 import { effectivePtyId, isTabStreaming } from "../../types";
 import { useTabStore } from "../../stores/tab-store";
 import { useSettingsStore } from "../../stores/settings-store";
@@ -120,19 +120,18 @@ export function ChatPanel(props: ChatPanelProps) {
     });
   }
 
-  // Batch virtualizer measurements into a single microtask so they complete
-  // before the browser paints.  The previous requestAnimationFrame approach
-  // left a one-frame window where items were positioned using stale estimated
-  // heights, causing visible text overlap during scroll.
+  // Batch virtualizer measurements into a single rAF callback. Using
+  // queueMicrotask here causes an infinite loop: measureElement triggers
+  // SolidJS reactivity → createEffect → batchMeasure → microtask → repeat.
+  // rAF naturally breaks the cycle by deferring to the next frame.
   let measureBatch = new Set<HTMLElement>();
-  let measureScheduled = false;
+  let measureRafId: number | null = null;
 
   function batchMeasure(el: HTMLElement) {
     measureBatch.add(el);
-    if (measureScheduled) return;
-    measureScheduled = true;
-    queueMicrotask(() => {
-      measureScheduled = false;
+    if (measureRafId !== null) return;
+    measureRafId = requestAnimationFrame(() => {
+      measureRafId = null;
       if (unmounted) { measureBatch.clear(); return; }
       const batch = measureBatch;
       measureBatch = new Set();
@@ -164,8 +163,8 @@ export function ChatPanel(props: ChatPanelProps) {
   onCleanup(() => {
     if (scrollRafId !== null) { cancelAnimationFrame(scrollRafId); scrollRafId = null; }
     if (stickyRafId !== null) { cancelAnimationFrame(stickyRafId); stickyRafId = null; }
+    if (measureRafId !== null) { cancelAnimationFrame(measureRafId); measureRafId = null; }
     measureBatch.clear();
-    measureScheduled = false;
   });
 
   let autoCompactTriggered = false;
@@ -415,7 +414,12 @@ export function ChatPanel(props: ChatPanelProps) {
         lastRespawnAt = now;
         await killPty(ptyId()).catch(() => {});
         if (isCancelled()) return "error";
-        const newId = await spawnPty(props.tab.cliConfig);
+        // Fork from the last session to preserve context across respawn
+        const lastSid = props.tab.lastSessionId;
+        const flags: SessionFlags | undefined = lastSid && lastSid.length > 0
+          ? { forkSession: true, resumeSessionAt: lastSid }
+          : undefined;
+        const newId = await spawnPty(props.tab.cliConfig, undefined, undefined, flags);
         if (isCancelled() || !store.getTab(props.tab.id)) {
           await killPty(newId).catch(() => {});
           return "error";
@@ -757,16 +761,16 @@ export function ChatPanel(props: ChatPanelProps) {
                 const msg = () => messages()[vItem().index];
                 let elRef: HTMLElement | undefined;
 
-                // Re-measure when:
-                //  - a different message occupies this slot (scroll / insertion)
-                //  - the message object changes (streaming adds blocks, result
-                //    event updates metadata)
-                // Without msg(), the virtualizer uses stale cached heights and
-                // items below the changed message overlap during streaming.
-                // defer: true skips the initial run — the ref callback handles
-                // first measurement.
+                // Re-measure when a different message occupies this slot
+                // (e.g. after scroll or message insertion). Content-driven
+                // height changes are handled by the ResizeObserver that
+                // measureElement sets up — no need to track msg() here
+                // (doing so fires the effect on every streaming update,
+                // causing runaway RAF cycles → white screen).
+                // defer: true skips the initial run — the ref callback
+                // handles first measurement.
                 createEffect(on(
-                  () => [vItem().index, msg()] as const,
+                  () => vItem().index,
                   () => { if (elRef) batchMeasure(elRef); },
                   { defer: true },
                 ));
