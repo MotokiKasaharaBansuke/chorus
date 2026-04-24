@@ -310,22 +310,28 @@ export function ChatPanel(props: ChatPanelProps) {
       }
     } catch { /* ignore */ }
 
-    // Auto-restore last session content on mount (e.g. after app restart).
-    // Try lastSessionId first, then fall back to the most recent session.
-    const candidates = [
-      props.tab.lastSessionId,
-      pastSessions().length > 0 ? pastSessions()[0].sessionId : undefined,
-    ].filter((id): id is string => !!id);
+    // When the CLI session was resumed via --resume (e.g. after app restart),
+    // skip loading old messages into the UI — the CLI already has context.
+    // This avoids replaying old tool calls and messages in the chat view,
+    // matching the VS Code extension's behavior.
+    if (!props.tab.sessionResumed) {
+      // Auto-restore last session content on mount.
+      // Try lastSessionId first, then fall back to the most recent session.
+      const candidates = [
+        props.tab.lastSessionId,
+        pastSessions().length > 0 ? pastSessions()[0].sessionId : undefined,
+      ].filter((id): id is string => !!id);
 
-    for (const id of candidates) {
-      try {
-        const lines = await fetchSessionLines(props.tab, id);
-        if (lines.length > 0) {
-          parser.loadSession(lines);
-          store.updateLastSessionId(props.tab.id, id);
-          break;
-        }
-      } catch { /* session file may not exist — try next candidate */ }
+      for (const id of candidates) {
+        try {
+          const lines = await fetchSessionLines(props.tab, id);
+          if (lines.length > 0) {
+            parser.loadSession(lines);
+            store.updateLastSessionId(props.tab.id, id);
+            break;
+          }
+        } catch { /* session file may not exist — try next candidate */ }
+      }
     }
   });
 

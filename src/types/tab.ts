@@ -36,6 +36,7 @@ export interface Tab {
   filePath?: string;
   lastSessionId?: string; // last loaded past session (for restore)
   ptyId?: string; // current PTY ID (differs from tab.id after PTY respawn)
+  sessionResumed?: boolean; // CLI session resumed via --resume; skip UI loadSession
   contentOverride?: string; // inline content for read-only tabs (tool output)
   sourceTabId?: string; // tab that requested this review (for "send back" feature)
   worktree?: TabWorktree; // present when this pane was opened with auto-worktree
