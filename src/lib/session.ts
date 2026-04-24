@@ -184,6 +184,9 @@ export async function restoreSession(data: string): Promise<RestoredWorkspace | 
         status: "idle",
         cliConfig: { ...saved.cliConfig },
         lastSessionId: saved.lastSessionId,
+        // When CLI session is resumed via --resume, skip UI loadSession
+        // to avoid replaying old tool calls and messages in the chat view.
+        sessionResumed: saved.lastSessionId != null && saved.lastSessionId.length > 0,
         worktree: saved.worktree,
       };
     } else {
