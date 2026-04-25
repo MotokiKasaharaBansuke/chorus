@@ -245,6 +245,8 @@ export class StreamParser {
           }
         } else if (type === "assistant") {
           this.handleAssistant(data);
+        } else if (type === "result") {
+          this.updateContextWindow(data);
 
         // --- Codex format ---
         } else if (type === "event_msg") {

@@ -1,8 +1,6 @@
 import { For, Show, createSignal, createEffect, onMount, onCleanup } from "solid-js";
 import { useTabStore } from "../../stores/tab-store";
-import { ChatPanel } from "../chat/chat-panel";
-import { TerminalPanel } from "../terminal/terminal-panel";
-import { FileViewer } from "../sidebar/file-viewer";
+import { useContentPool } from "./content-pool";
 import { StatusIndicator } from "../status/status-indicator";
 import { ClawdIcon, CodexIcon, TerminalIcon } from "../icons";
 import { useSidebarStore } from "../../stores/sidebar-store";
@@ -130,16 +128,7 @@ export function PaneGroup(props: PaneGroupProps) {
   const isFocused = () => store.focusedGroupId === props.node.id;
   const needsTrafficLightPad = () => edges().top && edges().left && !sidebarStore.isOpen;
 
-  function renderContent(tab: Tab, isActive: boolean) {
-    if (tab.cliConfig.cliType === "file-viewer" && tab.filePath) {
-      // FileViewer is static content — no streaming updates to skip when inactive.
-      return <FileViewer path={tab.filePath} onClose={() => props.onCloseTab(tab.id)} contentOverride={tab.contentOverride} />;
-    }
-    if (tab.cliConfig.cliType === "claude-code" || tab.cliConfig.cliType === "codex") {
-      return <ChatPanel tab={tab} isActive={isActive} />;
-    }
-    return <TerminalPanel tab={tab} isActive={isActive} />;
-  }
+  const pool = useContentPool();
 
   function edgeToSplit(edge: DropEdge): { direction: SplitDirection; side: "before" | "after" } | null {
     switch (edge) {
@@ -329,20 +318,25 @@ export function PaneGroup(props: PaneGroupProps) {
 
         <For each={props.node.tabIds}>
           {(tabId) => {
-            const tab = () => store.getTab(tabId);
             const isActive = () => props.node.activeTabId === tabId;
+            let slotRef: HTMLDivElement | undefined;
+
+            createEffect(() => {
+              pool.version(); // subscribe to pool ref changes
+              if (!slotRef) return;
+              const contentEl = pool.getContentEl(tabId);
+              if (contentEl && contentEl.parentNode !== slotRef) {
+                slotRef.appendChild(contentEl);
+              }
+            });
+
             return (
-              <Show when={tab()}>
-                {(t) => (
-                  <div
-                    class={styles.contentPanel}
-                    style={{ display: isActive() ? "flex" : "none" }}
-                    data-tab-id={tabId}
-                  >
-                    {renderContent(t(), isActive())}
-                  </div>
-                )}
-              </Show>
+              <div
+                ref={slotRef}
+                class={styles.contentPanel}
+                style={{ display: isActive() ? "flex" : "none" }}
+                data-tab-id={tabId}
+              />
             );
           }}
         </For>
