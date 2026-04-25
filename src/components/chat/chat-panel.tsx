@@ -22,7 +22,7 @@ import { submitWithBusyRetry } from "../../lib/submit-with-busy-retry";
 import { WorktreeResetConfirm } from "../worktree/worktree-reset-confirm";
 import { TerminalModal } from "../terminal/terminal-modal";
 import { REPL_COMMANDS, matchReplCommand } from "../../lib/repl-commands";
-import { DEFAULT_CONTEXT_WINDOW_SIZE, AUTO_COMPACT_RESET_THRESHOLD, contextColor, shouldAutoCompact, buildCompactCommand } from "../../lib/context-window";
+import { AUTO_COMPACT_RESET_THRESHOLD, contextColor, shouldAutoCompact, buildCompactCommand } from "../../lib/context-window";
 import { appendToHistory } from "./input-history";
 import { SlashCommandQueue } from "./slash-command-queue";
 import { useThrottledUpdate } from "../../hooks/use-throttled-update";
@@ -54,13 +54,16 @@ export function ChatPanel(props: ChatPanelProps) {
   const usageStore = useUsageStore();
   const parser = getOrCreateParser(props.tab.id);
   const [contextInputTokens, setContextInputTokens] = createSignal(0);
-  const [contextWindowSize, setContextWindowSize] = createSignal(
-    parser.getContextWindow() ?? DEFAULT_CONTEXT_WINDOW_SIZE,
+  const [contextWindowSize, setContextWindowSize] = createSignal<number | null>(
+    parser.getContextWindow(),
   );
-  const contextPct = createMemo(() => contextInputTokens() / contextWindowSize());
+  const contextPct = createMemo(() => {
+    const size = contextWindowSize();
+    return size ? contextInputTokens() / size : 0;
+  });
   const contextIndicatorColor = createMemo(() => contextColor(contextPct()));
   const showContextIndicator = createMemo(() =>
-    contextInputTokens() > 0 && props.tab.cliConfig.cliType === "claude-code"
+    contextInputTokens() > 0 && contextWindowSize() !== null && props.tab.cliConfig.cliType === "claude-code"
   );
   const [inputHistory, setInputHistory] = createSignal<readonly string[]>([]);
   const appendInputHistory = (text: string) =>
@@ -212,7 +215,7 @@ export function ChatPanel(props: ChatPanelProps) {
       });
     }
 
-    if (cliType === "claude-code" && usage.lastContextTokens !== undefined) {
+    if (cliType === "claude-code" && usage.lastContextTokens !== undefined && contextWindowSize() !== null) {
       // Use high-water mark to stabilise the donut colour — context is
       // monotonically increasing within a conversation, so any decrease
       // without compaction is cache variance / sub-model noise.
@@ -254,6 +257,9 @@ export function ChatPanel(props: ChatPanelProps) {
   });
   onCleanup(unsubRateLimit);
   const unsubContextWindow = parser.onContextWindow((size) => {
+    // Reset high-water when context window is first detected (null→value),
+    // preventing a stale accumulated value from causing an immediate spike.
+    if (contextWindowSize() === null) contextHighWater = 0;
     setContextWindowSize(size);
   });
   onCleanup(unsubContextWindow);
@@ -842,7 +848,7 @@ export function ChatPanel(props: ChatPanelProps) {
                 pct: contextPct(),
                 color: contextIndicatorColor(),
                 tokens: contextInputTokens(),
-                windowSize: contextWindowSize(),
+                windowSize: contextWindowSize() ?? 0,
                 onCompact: () => sendAsSlashCommand(buildCompactCommand(parser.getLastUserPrompt())),
               }
             : undefined

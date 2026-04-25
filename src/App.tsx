@@ -12,10 +12,11 @@ import type { ZombieSessionInfo } from "./lib/commands";
 import { buildSavedSession, persistSession, restoreSession, tryLoadSession } from "./lib/session";
 import { spawnPaneWithWorktree } from "./lib/worktree/spawn-pane";
 import { decideCloseAction } from "./lib/worktree/decide-close-action";
-import { MIN_PANE_PX } from "./lib/layout/layout-tree";
+import { MIN_PANE_PX, getAllPaneGroups, findPaneGroupContainingTab } from "./lib/layout/layout-tree";
 import { TerminalPanel } from "./components/terminal/terminal-panel";
 import { Sidebar } from "./components/sidebar/sidebar";
 import { LayoutRenderer } from "./components/layout/layout-renderer";
+import { ContentPool } from "./components/layout/content-pool";
 import { CliSettingsModal } from "./components/settings/cli-settings-modal";
 import { WorktreeSettingsModal } from "./components/worktree/worktree-settings-modal";
 import { WorktreeErrorDialog } from "./components/worktree/worktree-error-dialog";
@@ -58,6 +59,19 @@ function App() {
   const [zombieSessions, setZombieSessions] = createSignal<ZombieSessionInfo[]>([]);
   const [isActiveTabStale, setIsActiveTabStale] = createSignal(false);
   let spawningCount = 0;
+
+  const layoutTabIds = createMemo(() => {
+    const layout = tabStore.layout;
+    if (!layout) return [] as string[];
+    return getAllPaneGroups(layout).flatMap(g => g.tabIds);
+  });
+
+  const isLayoutTabActive = (tabId: string): boolean => {
+    const layout = tabStore.layout;
+    if (!layout) return false;
+    const group = findPaneGroupContainingTab(layout, tabId);
+    return group?.activeTabId === tabId;
+  };
 
   function spawnPtyForTab(config: CliConfig): Promise<string> {
     return spawnPty(config);
@@ -625,22 +639,29 @@ function App() {
         </Show>
         <div class="main-area">
           <div class="content-split">
-            <div class="layout-area">
-              <Show when={tabStore.layout} fallback={
-                <div class="empty-state">
-                  <img src={chorusIcon} alt="" class="empty-logo" />
-                  <h2>Chorus</h2>
-                  <p class="empty-sub">Run AI coding assistants side by side</p>
-                  <div class="empty-shortcuts">
-                    <div class="shortcut-row"><kbd>⌘1</kbd><span>Claude Code</span></div>
-                    <div class="shortcut-row"><kbd>⌘2</kbd><span>Codex</span></div>
-                    <div class="shortcut-row"><kbd>⌘T</kbd><span>New pane</span></div>
-                    <div class="shortcut-row"><kbd>⌘B</kbd><span>Toggle sidebar</span></div>
+            <div class="layout-area" style={{ position: "relative" }}>
+              <ContentPool
+                tabIds={layoutTabIds}
+                getTab={(id) => tabStore.getTab(id)}
+                isTabActive={isLayoutTabActive}
+                onCloseTab={handleCloseTab}
+              >
+                <Show when={tabStore.layout} fallback={
+                  <div class="empty-state">
+                    <img src={chorusIcon} alt="" class="empty-logo" />
+                    <h2>Chorus</h2>
+                    <p class="empty-sub">Run AI coding assistants side by side</p>
+                    <div class="empty-shortcuts">
+                      <div class="shortcut-row"><kbd>⌘1</kbd><span>Claude Code</span></div>
+                      <div class="shortcut-row"><kbd>⌘2</kbd><span>Codex</span></div>
+                      <div class="shortcut-row"><kbd>⌘T</kbd><span>New pane</span></div>
+                      <div class="shortcut-row"><kbd>⌘B</kbd><span>Toggle sidebar</span></div>
+                    </div>
                   </div>
-                </div>
-              }>
-                <LayoutRenderer onCloseTab={handleCloseTab} onRestartTab={handleRestartTab} />
-              </Show>
+                }>
+                  <LayoutRenderer onCloseTab={handleCloseTab} onRestartTab={handleRestartTab} />
+                </Show>
+              </ContentPool>
             </div>
             <Show when={bottomTerminal.showTerminal()}>
               <div class="bottom-terminal" style={{ height: `${bottomTerminal.termHeight()}px` }}>
