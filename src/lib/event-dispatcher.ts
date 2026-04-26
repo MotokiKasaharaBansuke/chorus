@@ -7,6 +7,42 @@ interface BatchSource<T> {
   unpack: (payload: unknown) => T[];
 }
 
+/** Process batch items in chunks, yielding to the event loop between chunks
+ *  so rendering and user input can proceed.  Without this, a large batch
+ *  from 2+ concurrent panes blocks the main thread for 10-20ms per event —
+ *  enough to starve the browser and cause crashes on resource-limited devices. */
+const BATCH_CHUNK_SIZE = 8;
+
+/** Generation counter incremented on each new batch — used to abandon
+ *  in-flight chunked processing when a newer batch arrives or the handler
+ *  is unsubscribed between ticks. */
+let batchGeneration = 0;
+
+function processBatchChunked<T extends { id: string }>(
+  items: T[],
+  handlers: Map<string, Handler<T>>,
+) {
+  const gen = ++batchGeneration;
+  let i = 0;
+  // Reuse a single MessageChannel for all chunks in this batch
+  const ch = new MessageChannel();
+  function processChunk() {
+    if (gen !== batchGeneration) { ch.port1.close(); return; }
+    const end = Math.min(i + BATCH_CHUNK_SIZE, items.length);
+    while (i < end) {
+      handlers.get(items[i].id)?.(items[i]);
+      i++;
+    }
+    if (i < items.length) {
+      ch.port2.postMessage(null);
+    } else {
+      ch.port1.close();
+    }
+  }
+  ch.port1.onmessage = processChunk;
+  processChunk();
+}
+
 function createDispatcher<T extends { id: string }>(
   eventName: string,
   batchSource?: BatchSource<T>,
@@ -27,8 +63,15 @@ function createDispatcher<T extends { id: string }>(
         const src = batchSource;
         listeners.push(
           listen(src.eventName, (event) => {
-            for (const item of src.unpack(event.payload)) {
-              handlers.get(item.id)?.(item);
+            const items = src.unpack(event.payload);
+            // Increment generation even for small batches so any in-flight
+            // chunked processing from a previous large batch is abandoned.
+            batchGeneration++;
+            if (items.length <= BATCH_CHUNK_SIZE) {
+              // Small batch — process synchronously to avoid yielding overhead
+              for (const item of items) handlers.get(item.id)?.(item);
+            } else {
+              processBatchChunked(items, handlers);
             }
           }),
         );

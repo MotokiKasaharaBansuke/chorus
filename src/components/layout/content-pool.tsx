@@ -52,7 +52,11 @@ export function ContentPool(props: ContentPoolProps) {
               <Show when={props.getTab(tabId)}>
                 {(tab) => (
                   <div
-                    ref={(el) => { refs.set(tabId, el); setVersion(v => v + 1); }}
+                    ref={(el) => {
+                      if (!el || refs.get(tabId) === el) return;
+                      refs.set(tabId, el);
+                      setVersion(v => v + 1);
+                    }}
                     data-pool-tab={tabId}
                     style={{ display: "flex", "flex-direction": "column", flex: "1", width: "100%", height: "100%" }}
                   >

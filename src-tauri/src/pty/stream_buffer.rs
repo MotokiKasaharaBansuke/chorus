@@ -6,12 +6,12 @@ use serde::Serialize;
 /// Aligned to vsync (60fps) to batch lines arriving within one frame.
 const BATCH_FLUSH_TIMEOUT: Duration = Duration::from_millis(16);
 /// Cap per-batch line count to keep each IPC event small enough that the JS
-/// main thread can process it within ~5ms.  With 20 concurrent panes, large
-/// batches (formerly 200 lines → ~20ms of synchronous JSON.parse) starve the
-/// browser event loop during output bursts.  50 lines ≈ 5ms, leaving room for
-/// user-input handling between events.  Throughput is unaffected because the
-/// outer loop immediately starts the next batch.
-const MAX_LINES_PER_BATCH: usize = 50;
+/// main thread can process it within ~3ms.  With multiple panes streaming
+/// simultaneously, large batches starve the browser event loop during output
+/// bursts.  20 lines ≈ 2-3ms of synchronous JSON.parse, leaving room for
+/// rendering and user-input handling between events.  Throughput is unaffected
+/// because the outer loop immediately starts the next batch.
+const MAX_LINES_PER_BATCH: usize = 20;
 
 #[derive(Clone, Serialize)]
 pub struct StreamBatchPayload {

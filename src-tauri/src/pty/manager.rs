@@ -146,7 +146,7 @@ impl PtyManager {
     pub fn get_stream_session_id(&self, id: &str) -> Result<String, AppError> {
         let sessions = self.sessions.lock();
         match sessions.get(id) {
-            Some(Session::Stream(s)) => Ok(s.session_id.clone()),
+            Some(Session::Stream(s)) => Ok(s.current_session_id()),
             Some(Session::Pty(_)) => Err(AppError::PtyWriteFailed("Not a stream session".into())),
             None => Err(AppError::PtyNotFound(id.to_string())),
         }
@@ -290,7 +290,7 @@ mod tests {
     fn stream_session_id(mgr: &PtyManager, id: &str) -> String {
         let sessions = mgr.sessions.lock();
         match sessions.get(id) {
-            Some(Session::Stream(s)) => s.session_id.clone(),
+            Some(Session::Stream(s)) => s.current_session_id(),
             _ => panic!("expected stream session at id {id}"),
         }
     }
@@ -299,6 +299,14 @@ mod tests {
         let sessions = mgr.sessions.lock();
         match sessions.get(id) {
             Some(Session::Stream(s)) => s.has_session_for_test(),
+            _ => panic!("expected stream session at id {id}"),
+        }
+    }
+
+    fn stream_initial_resume_done(mgr: &PtyManager, id: &str) -> bool {
+        let sessions = mgr.sessions.lock();
+        match sessions.get(id) {
+            Some(Session::Stream(s)) => s.initial_resume_done_for_test(),
             _ => panic!("expected stream session at id {id}"),
         }
     }
@@ -332,6 +340,29 @@ mod tests {
         mgr.interrupt_stream("a").expect("interrupt should succeed");
 
         assert!(stream_has_session(&mgr, "a"));
+    }
+
+    #[test]
+    fn interrupt_stream_preserves_initial_resume_done_after_observation() {
+        // Once the reader thread has observed `system.init` and latched
+        // initial_resume_done, an interrupt mid-stream must not roll that
+        // back — otherwise the next message would re-issue
+        // `--resume <parent_id>` and Claude would re-fork instead of
+        // continuing the active conversation.
+        let mgr = make_manager_with_streams(&["a"]);
+        {
+            let sessions = mgr.sessions.lock();
+            if let Some(Session::Stream(s)) = sessions.get("a") {
+                s.mark_session_started_for_test();
+                // Simulate the reader having latched after observing session_id.
+                s.mark_initial_resume_done_for_test();
+            }
+        }
+
+        mgr.interrupt_stream("a").expect("interrupt should succeed");
+
+        assert!(stream_has_session(&mgr, "a"));
+        assert!(stream_initial_resume_done(&mgr, "a"));
     }
 
     #[test]
