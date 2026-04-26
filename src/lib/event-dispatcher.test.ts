@@ -97,4 +97,47 @@ describe("streamEventDispatcher with batchSource", () => {
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler).toHaveBeenCalledWith({ id: "s1", data: "valid" });
   });
+
+  it("processes large batches in chunks via MessageChannel", async () => {
+    const { streamEventDispatcher } = await import("./event-dispatcher");
+    const handler = vi.fn();
+    streamEventDispatcher.subscribe("s1", handler);
+    await vi.dynamicImportSettled();
+
+    // 20 lines exceeds BATCH_CHUNK_SIZE (8) → triggers chunked processing
+    const lines = Array.from({ length: 20 }, (_, i) => `line${i}`);
+    emit("stream-event-batch", { id: "s1", lines });
+
+    // First chunk (8 items) processed synchronously
+    expect(handler.mock.calls.length).toBeGreaterThanOrEqual(8);
+
+    // Remaining chunks arrive via MessageChannel — flush all pending tasks
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(handler).toHaveBeenCalledTimes(20);
+    expect(handler).toHaveBeenLastCalledWith({ id: "s1", data: "line19" });
+  });
+
+  it("abandons in-flight chunks when a newer batch arrives", async () => {
+    const { streamEventDispatcher } = await import("./event-dispatcher");
+    const handler = vi.fn();
+    streamEventDispatcher.subscribe("s1", handler);
+    await vi.dynamicImportSettled();
+
+    // Start a large batch — first chunk (8 items) fires synchronously
+    const lines1 = Array.from({ length: 20 }, (_, i) => `old${i}`);
+    emit("stream-event-batch", { id: "s1", lines: lines1 });
+    const afterFirstChunk = handler.mock.calls.length;
+    expect(afterFirstChunk).toBeGreaterThanOrEqual(8);
+
+    // Send a new small batch — increments batchGeneration, invalidating
+    // any remaining chunks from lines1
+    const lines2 = Array.from({ length: 3 }, (_, i) => `new${i}`);
+    emit("stream-event-batch", { id: "s1", lines: lines2 });
+    const afterSecondBatch = handler.mock.calls.length;
+
+    // Wait for any pending chunks from the first batch
+    await new Promise(resolve => setTimeout(resolve, 20));
+    // No additional calls should have arrived from the abandoned first batch
+    expect(handler).toHaveBeenCalledTimes(afterSecondBatch);
+  });
 });

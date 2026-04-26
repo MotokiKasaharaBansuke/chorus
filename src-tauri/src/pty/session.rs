@@ -135,6 +135,45 @@ fn is_valid_session_id(id: &str) -> bool {
         && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
+/// Extract a `session_id` field from a single Claude Code stream-json line.
+///
+/// Returns `Some(id)` only when the line parses as JSON, contains a
+/// string `session_id`, and that value passes [`is_valid_session_id`] (so
+/// untrusted output can never inject CLI flags via this path).
+fn extract_session_id(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let id = value.get("session_id")?.as_str()?;
+    is_valid_session_id(id).then(|| id.to_string())
+}
+
+/// Try to capture the session_id from a single stream-json line and latch
+/// the session-state flags. Returns `true` once the latch fires so the
+/// caller can stop scanning subsequent lines for the same field.
+///
+/// Latching `has_session` and `initial_resume_done` is gated on actually
+/// observing a `session_id` from Claude — if the CLI crashes before
+/// `system.init`, both flags stay false so the next `send_message`
+/// re-bootstraps with `--session-id <chorus-uuid>` (default path) or
+/// `--resume <parent_id>` (resume/fork path) instead of resuming a
+/// session Claude never acknowledged.
+fn try_latch_session_observation(
+    line: &str,
+    session_id_slot: &Mutex<String>,
+    has_session: &AtomicBool,
+    initial_resume_done: &AtomicBool,
+) -> bool {
+    let Some(observed) = extract_session_id(line) else {
+        return false;
+    };
+    let mut slot = session_id_slot.lock();
+    if *slot != observed {
+        *slot = observed;
+    }
+    has_session.store(true, Ordering::Release);
+    initial_resume_done.store(true, Ordering::Release);
+    true
+}
+
 /// Stream session for chat-based CLIs (Claude Code, Codex).
 /// Each user message spawns the CLI in non-interactive mode and streams output back.
 /// - Claude Code: `claude -p "msg" --session-id <id> --output-format stream-json`
@@ -144,7 +183,15 @@ pub struct StreamSession {
     pub command: String,
     pub base_args: Vec<String>,
     pub working_dir: String,
-    pub session_id: String,
+    /// CLI session UUID used with `--session-id` / `--resume`.
+    ///
+    /// Pre-seeded with a Chorus-generated UUID so the first default-path message
+    /// can pass `--session-id <uuid>`. After Claude Code emits its `system.init`
+    /// event, the reader thread overwrites this with the *actual* session ID
+    /// Claude wrote to disk — required for the resume/fork paths, where Claude
+    /// either appends to the parent session or assigns a fresh UUID we never
+    /// supplied.
+    pub session_id: Arc<Mutex<String>>,
     /// Extra environment variables to set when spawning the CLI (e.g. CLAUDE_CONFIG_DIR).
     pub extra_env: HashMap<String, String>,
     /// Tracks when the current message started processing. None = idle.
@@ -185,13 +232,19 @@ impl StreamSession {
             child_pid: Arc::new(Mutex::new(None)),
             base_args,
             working_dir,
-            session_id: uuid::Uuid::new_v4().to_string(),
+            session_id: Arc::new(Mutex::new(uuid::Uuid::new_v4().to_string())),
             extra_env,
             running_since: Arc::new(Mutex::new(None)),
             has_session: Arc::new(AtomicBool::new(has_session)),
             session_flags: flags,
             initial_resume_done: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Returns the current effective session ID for `--session-id` / `--resume`.
+    /// May change after the first stream-json `session_id` is observed (resume/fork).
+    pub fn current_session_id(&self) -> String {
+        self.session_id.lock().clone()
     }
 
     /// Expand `~` at the start of a path to the user's home directory.
@@ -231,9 +284,15 @@ impl StreamSession {
                     args.push("stream-json".into());
                 }
                 // Session ID / resume logic:
-                // - Default (no flags): first msg → --session-id UUID, then --resume UUID
-                // - resume_session_at: first msg → --resume <parent_id>, then --resume <own_id>
+                // - Default (no flags): first msg → --session-id <own_id>, then --resume <own_id>
+                // - resume_session_at: first msg → --resume <parent_id>, then --resume <observed_id>
                 // - fork_session + resume_session_at: first msg → --resume <parent_id> --fork-session
+                //
+                // For the resume/fork paths we never pass `--session-id`, so Claude
+                // Code either appends to the parent or assigns a brand-new UUID.
+                // The reader thread captures that UUID from the stream-json output
+                // and updates `self.session_id`, so subsequent `--resume` here
+                // targets the conversation Claude actually wrote to disk.
                 let pending_parent = self.session_flags.resume_session_at.as_deref()
                     .filter(|_| !self.initial_resume_done.load(Ordering::Acquire));
 
@@ -245,10 +304,10 @@ impl StreamSession {
                     }
                 } else if self.has_session.load(Ordering::Acquire) {
                     args.push("--resume".into());
-                    args.push(self.session_id.clone());
+                    args.push(self.current_session_id());
                 } else {
                     args.push("--session-id".into());
-                    args.push(self.session_id.clone());
+                    args.push(self.current_session_id());
                 }
                 if self.session_flags.session_mirror {
                     args.push("--session-mirror".into());
@@ -342,12 +401,16 @@ impl StreamSession {
         // Temp files are cleaned up by the reader thread after the CLI exits
         // (covers both Claude Code and Codex paths).
 
-        // Mark session as created so subsequent messages use --resume
-        // (set AFTER successful stdin write to avoid --resume on a never-started session)
-        self.has_session.store(true, Ordering::Release);
-        // Mark initial resume/fork as consumed so subsequent messages use
-        // plain --resume <own_session_id> instead of the parent's ID.
-        self.initial_resume_done.store(true, Ordering::Release);
+        // For Codex (no stream-json session_id to observe) latch the session
+        // flags right away. For Claude Code we latch them inside the reader
+        // thread *after* observing a session_id from stream-json — otherwise
+        // a crash before `system.init` would leave `initial_resume_done = true`
+        // with `session_id` still pointing at the never-acknowledged Chorus
+        // UUID, causing the next message to fail with "No conversation found".
+        if self.cli_type == CliType::Codex {
+            self.has_session.store(true, Ordering::Release);
+            self.initial_resume_done.store(true, Ordering::Release);
+        }
         self.start_reader_thread(pane_id, child, stdout, stderr, app, guard, image_paths);
         Ok(())
     }
@@ -575,13 +638,25 @@ impl StreamSession {
     ) {
         let stream_id = pane_id.to_string();
         let cli_type = self.cli_type;
+        let session_id_slot = Arc::clone(&self.session_id);
+        let has_session = Arc::clone(&self.has_session);
+        let initial_resume_done = Arc::clone(&self.initial_resume_done);
 
         std::thread::spawn(move || {
             let _guard = guard; // Dropped on normal exit or panic — clears running_since
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match cli_type {
                     CliType::ClaudeCode => {
-                        Self::read_stream_json(child, stdout, stderr, &stream_id, &app);
+                        Self::read_stream_json(
+                            child,
+                            stdout,
+                            stderr,
+                            &stream_id,
+                            session_id_slot,
+                            has_session,
+                            initial_resume_done,
+                            &app,
+                        );
                     }
                     CliType::Codex => {
                         Self::read_codex_jsonl(child, stdout, stderr, &stream_id, &app);
@@ -614,6 +689,9 @@ impl StreamSession {
         stdout: std::process::ChildStdout,
         stderr: std::process::ChildStderr,
         stream_id: &str,
+        session_id_slot: Arc<Mutex<String>>,
+        has_session: Arc<AtomicBool>,
+        initial_resume_done: Arc<AtomicBool>,
         app: &AppHandle,
     ) {
         // Capture stderr in a background thread so we can forward it on failure
@@ -631,10 +709,22 @@ impl StreamSession {
 
         let buffer = StreamBuffer::new(stream_id.to_string(), app.clone());
         let mut got_output = false;
+        // Capture session_id once per turn — typically present on the first
+        // event (`system.init`). Skip subsequent updates to avoid re-locking
+        // and to ignore any later events that lack the field.
+        let mut session_id_captured = false;
         for line in BufReader::new(stdout).lines() {
             match line {
                 Ok(l) if !l.is_empty() => {
                     got_output = true;
+                    if !session_id_captured && try_latch_session_observation(
+                        &l,
+                        &session_id_slot,
+                        &has_session,
+                        &initial_resume_done,
+                    ) {
+                        session_id_captured = true;
+                    }
                     buffer.push(l);
                 }
                 Err(_) => break,
@@ -867,11 +957,25 @@ impl StreamSession {
         self.has_session.store(true, Ordering::Release);
     }
 
+    /// Test-only: simulates the reader thread latching after observing a
+    /// `session_id` event from Claude Code's stream-json output.
+    #[cfg(test)]
+    pub(super) fn mark_initial_resume_done_for_test(&self) {
+        self.initial_resume_done.store(true, Ordering::Release);
+    }
+
     /// Test-only: reads the `has_session` flag without exposing the
     /// underlying `AtomicBool` to non-test code.
     #[cfg(test)]
     pub(super) fn has_session_for_test(&self) -> bool {
         self.has_session.load(Ordering::Acquire)
+    }
+
+    /// Test-only: reads the `initial_resume_done` flag without exposing
+    /// the underlying `AtomicBool` to non-test code.
+    #[cfg(test)]
+    pub(super) fn initial_resume_done_for_test(&self) -> bool {
+        self.initial_resume_done.load(Ordering::Acquire)
     }
 }
 
@@ -904,9 +1008,10 @@ fn is_sensitive_env_key(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_sensitive_env_key, SessionFlags, StreamSession};
+    use super::{extract_session_id, is_sensitive_env_key, try_latch_session_observation, SessionFlags, StreamSession};
     use crate::cli::registry::CliType;
-    use std::sync::atomic::Ordering;
+    use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     // ---- build_args ----
 
@@ -984,22 +1089,47 @@ mod tests {
     }
 
     #[test]
-    fn build_args_fork_session_subsequent_uses_own_session_id() {
+    fn build_args_fork_session_subsequent_uses_observed_session_id() {
         let flags = SessionFlags {
             fork_session: true,
             resume_session_at: Some("parent-session-id".into()),
             ..Default::default()
         };
         let session = make_session_with_flags(CliType::ClaudeCode, flags);
-        // Simulate first message completed
+        // Simulate first message completed and Claude reporting the new
+        // forked session ID via stream-json.
         session.has_session.store(true, Ordering::Release);
         session.initial_resume_done.store(true, Ordering::Release);
+        *session.session_id.lock() = "claude-fork-uuid".to_string();
         let args = session.build_args("hello", false, &[]);
-        // Subsequent message should use --resume <own_id>, not parent
+        // Subsequent message must --resume the observed fork ID,
+        // not the parent and not a stale Chorus-generated UUID.
         assert!(args.contains(&"--resume".to_string()));
-        assert!(args.contains(&session.session_id));
+        assert!(args.contains(&"claude-fork-uuid".to_string()));
         assert!(!args.contains(&"parent-session-id".to_string()));
         assert!(!args.contains(&"--fork-session".to_string()));
+    }
+
+    #[test]
+    fn build_args_resume_session_at_subsequent_uses_observed_session_id() {
+        // Regression: non-fork resume previously emitted --resume <chorus-uuid>
+        // for the second message, which Claude Code rejected with
+        // "No conversation found with session ID: ...". The reader thread
+        // now overwrites session_id with the value Claude reports, so
+        // build_args must pick that up.
+        let flags = SessionFlags {
+            resume_session_at: Some("parent-session-id".into()),
+            ..Default::default()
+        };
+        let session = make_session_with_flags(CliType::ClaudeCode, flags);
+        session.has_session.store(true, Ordering::Release);
+        session.initial_resume_done.store(true, Ordering::Release);
+        // Non-fork resume: Claude appends to the parent and reports parent_id.
+        *session.session_id.lock() = "parent-session-id".to_string();
+        let args = session.build_args("hello", false, &[]);
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"parent-session-id".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
     }
 
     #[test]
@@ -1056,6 +1186,28 @@ mod tests {
     }
 
     #[test]
+    fn build_args_resume_flags_unchanged_until_session_observed() {
+        // If Claude Code crashes before emitting `system.init`, the reader
+        // thread never latches the session-state flags. The next send_message
+        // must therefore re-issue --resume <parent_id>, not --resume <stale chorus uuid>.
+        let flags = SessionFlags {
+            resume_session_at: Some("parent-session-id".into()),
+            ..Default::default()
+        };
+        let session = make_session_with_flags(CliType::ClaudeCode, flags);
+        // Simulate failed first turn: send_message returned, but reader saw
+        // no session_id event, so neither flag was latched.
+        assert!(session.has_session.load(Ordering::Acquire), "resume sets has_session at construction");
+        assert!(!session.initial_resume_done.load(Ordering::Acquire));
+        let args = session.build_args("retry", false, &[]);
+        // pending_parent should still resolve to the parent_id, so the retry
+        // attempts a fresh resume from the original session.
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"parent-session-id".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
+    }
+
+    #[test]
     fn build_args_default_flags_match_existing_behavior() {
         let session = make_session(CliType::ClaudeCode);
         let args = session.build_args("hello", false, &[]);
@@ -1064,6 +1216,88 @@ mod tests {
         assert!(!args.contains(&"--resume".to_string()));
         assert!(!args.contains(&"--fork-session".to_string()));
         assert!(!args.contains(&"--session-mirror".to_string()));
+    }
+
+    // ---- extract_session_id ----
+
+    #[test]
+    fn extract_session_id_parses_system_init_event() {
+        let line = r#"{"type":"system","subtype":"init","session_id":"abc-123","cwd":"/tmp"}"#;
+        assert_eq!(extract_session_id(line).as_deref(), Some("abc-123"));
+    }
+
+    #[test]
+    fn extract_session_id_returns_none_when_field_missing() {
+        let line = r#"{"type":"assistant","message":{"role":"assistant"}}"#;
+        assert_eq!(extract_session_id(line), None);
+    }
+
+    #[test]
+    fn extract_session_id_returns_none_for_invalid_json() {
+        assert_eq!(extract_session_id("not json"), None);
+        assert_eq!(extract_session_id(""), None);
+    }
+
+    #[test]
+    fn extract_session_id_rejects_flag_like_value() {
+        // Defense-in-depth: even if Claude somehow emits a CLI-flag-shaped
+        // session_id, we must not propagate it into argv.
+        let line = r#"{"session_id":"--malicious"}"#;
+        assert_eq!(extract_session_id(line), None);
+    }
+
+    #[test]
+    fn extract_session_id_rejects_non_string_value() {
+        let line = r#"{"session_id":12345}"#;
+        assert_eq!(extract_session_id(line), None);
+    }
+
+    // ---- try_latch_session_observation ----
+
+    fn make_latch_state(initial_id: &str) -> (Mutex<String>, AtomicBool, AtomicBool) {
+        (Mutex::new(initial_id.into()), AtomicBool::new(false), AtomicBool::new(false))
+    }
+
+    #[test]
+    fn try_latch_returns_false_when_no_session_id_field() {
+        let (slot, has, done) = make_latch_state("chorus-uuid");
+        let line = r#"{"type":"assistant","message":{}}"#;
+        assert!(!try_latch_session_observation(line, &slot, &has, &done));
+        // Slot and flags untouched
+        assert_eq!(*slot.lock(), "chorus-uuid");
+        assert!(!has.load(Ordering::Acquire));
+        assert!(!done.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn try_latch_updates_slot_and_flags_on_observation() {
+        let (slot, has, done) = make_latch_state("chorus-uuid");
+        let line = r#"{"type":"system","subtype":"init","session_id":"observed-id"}"#;
+        assert!(try_latch_session_observation(line, &slot, &has, &done));
+        assert_eq!(*slot.lock(), "observed-id");
+        assert!(has.load(Ordering::Acquire));
+        assert!(done.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn try_latch_keeps_slot_when_observed_matches() {
+        let (slot, has, done) = make_latch_state("same-id");
+        let line = r#"{"session_id":"same-id"}"#;
+        assert!(try_latch_session_observation(line, &slot, &has, &done));
+        // No-op write path still latches the flags
+        assert_eq!(*slot.lock(), "same-id");
+        assert!(has.load(Ordering::Acquire));
+        assert!(done.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn try_latch_rejects_invalid_session_id() {
+        let (slot, has, done) = make_latch_state("chorus-uuid");
+        let line = r#"{"session_id":"--malicious"}"#;
+        assert!(!try_latch_session_observation(line, &slot, &has, &done));
+        assert_eq!(*slot.lock(), "chorus-uuid");
+        assert!(!has.load(Ordering::Acquire));
+        assert!(!done.load(Ordering::Acquire));
     }
 
     // ---- expand_tilde ----

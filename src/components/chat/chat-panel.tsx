@@ -130,6 +130,16 @@ export function ChatPanel(props: ChatPanelProps) {
   let measureBatch = new Set<HTMLElement>();
   let measureRafId: number | null = null;
 
+  /** Measure an element only if it has real layout dimensions.  Elements
+   *  still inside the hidden ContentPool container (width/height 0) are
+   *  skipped — measuring them would record 0px and cause persistent text
+   *  overlap.  Chat messages always have ≥1px height when visible. */
+  function measureIfVisible(el: HTMLElement | null) {
+    if (el && el.isConnected && el.offsetHeight > 0) {
+      virtualizer.measureElement(el);
+    }
+  }
+
   function batchMeasure(el: HTMLElement) {
     measureBatch.add(el);
     if (measureRafId !== null) return;
@@ -138,9 +148,7 @@ export function ChatPanel(props: ChatPanelProps) {
       if (unmounted) { measureBatch.clear(); return; }
       const batch = measureBatch;
       measureBatch = new Set();
-      for (const e of batch) {
-        if (e.isConnected) virtualizer.measureElement(e);
-      }
+      for (const e of batch) measureIfVisible(e);
     });
   }
 
@@ -185,8 +193,10 @@ export function ChatPanel(props: ChatPanelProps) {
   }
 
   // When isActive transitions false→true, flush the latest parser state into
-  // the UI in one pass. Uses a prev-value guard so it fires only on the
-  // transition, not on every re-evaluation where isActive is already true.
+  // the UI in one pass and re-measure all visible items (their heights may be
+  // stale or zero from when the panel was inside the hidden ContentPool
+  // container). Uses a prev-value guard so it fires only on the transition,
+  // not on every re-evaluation where isActive is already true.
   let prevIsActive = props.isActive;
   createEffect(() => {
     const now = props.isActive;
@@ -196,6 +206,16 @@ export function ChatPanel(props: ChatPanelProps) {
         setMessages(latest);
         scrollToBottom();
       }
+      // Re-measure all visible items after one frame so the virtualizer
+      // picks up real heights (not estimateSize or stale zero-height
+      // measurements from the hidden pool container).
+      requestAnimationFrame(() => {
+        if (unmounted) return;
+        for (const item of virtualizer.getVirtualItems()) {
+          const el = scrollRef?.querySelector(`[data-index="${item.index}"]`) as HTMLElement | null;
+          measureIfVisible(el);
+        }
+      });
     }
     prevIsActive = now;
   });
@@ -268,7 +288,12 @@ export function ChatPanel(props: ChatPanelProps) {
   const unsubStatus = parser.onStatusChange((status) => {
     setIsStreaming(status === "streaming");
     store.updateStatus(props.tab.id, status === "streaming" ? "running" : "waiting");
-    if (status === "idle") drainPendingSlashCommand();
+    if (status === "idle") {
+      // Re-capture session ID after every turn — auto-compact or fork may
+      // have changed the underlying UUID on the Rust side.
+      captureSessionId(ptyId());
+      drainPendingSlashCommand();
+    }
   });
   onCleanup(unsubStatus);
 
@@ -291,7 +316,7 @@ export function ChatPanel(props: ChatPanelProps) {
     throttle.reset();
     // Eagerly capture session ID so session.json can restore the conversation
     // even if the user never sends a message before closing the app.
-    captureSessionIdIfNeeded(id);
+    captureSessionId(id);
     const unsub = streamEventDispatcher.subscribe(id, (payload) => {
       parser.processLine(payload.data);
     });
@@ -375,16 +400,19 @@ export function ChatPanel(props: ChatPanelProps) {
   type SendResult = "sent" | "busy" | "error";
 
   /** Save the CLI's session UUID so session.json can restore the conversation.
-   *  Captures targetPtyId at call time to guard against ptyId changing before
-   *  the async IPC resolves (e.g. a second respawn). */
-  function captureSessionIdIfNeeded(targetPtyId: string) {
-    if (props.tab.lastSessionId) return;
+   *  Always fetches the latest ID because auto-compact or fork may change the
+   *  session UUID mid-conversation. Captures targetPtyId at call time to guard
+   *  against ptyId changing before the async IPC resolves (e.g. a second respawn). */
+  function captureSessionId(targetPtyId: string) {
     const tabId = props.tab.id;
     getStreamSessionId(targetPtyId)
       .then(sessionId => {
-        if (ptyId() === targetPtyId) store.updateLastSessionId(tabId, sessionId);
+        if (ptyId() === targetPtyId && sessionId !== props.tab.lastSessionId) {
+          store.updateLastSessionId(tabId, sessionId);
+        }
       })
-      .catch(() => {});
+      // PTY may already be dead after respawn — expected race, not actionable
+      .catch(() => undefined);
   }
 
   /** Send a message to the PTY, respawning it once if the session is gone.
@@ -395,7 +423,7 @@ export function ChatPanel(props: ChatPanelProps) {
       await sendMessageCmd(ptyId(), message, images);
       if (isCancelled()) return "error";
       store.updateStatus(props.tab.id, "running");
-      captureSessionIdIfNeeded(ptyId());
+      captureSessionId(ptyId());
       return "sent";
     } catch (error: unknown) {
       const kind = classifyStreamError(error);
@@ -435,7 +463,7 @@ export function ChatPanel(props: ChatPanelProps) {
         await sendMessageCmd(newId, message, images);
         if (isCancelled()) return "error";
         store.updateStatus(props.tab.id, "running");
-        captureSessionIdIfNeeded(newId);
+        captureSessionId(newId);
         return "sent";
       } catch (retryError: unknown) {
         store.updateStatus(props.tab.id, "error");

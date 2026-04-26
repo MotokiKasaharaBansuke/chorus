@@ -34,6 +34,8 @@ interface ChatInputProps {
   contextIndicator?: {
     pct: number;
     color: string;
+    tokens: number;
+    windowSize: number;
     onCompact: () => void;
   };
 }
@@ -44,21 +46,37 @@ const DONUT_CIRCUMFERENCE = 2 * Math.PI * DONUT_RADIUS;
 interface ContextDonutProps {
   pct: number;
   color: string;
+  tokens: number;
+  windowSize: number;
   isStreaming: boolean;
   onCompact: () => void;
 }
 
+function formatTokens(n: number): string {
+  return n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
+}
+
 function ContextDonut(props: ContextDonutProps) {
-  const [showTooltip, setShowTooltip] = createSignal(false);
+  const [tooltipStyle, setTooltipStyle] = createSignal<Record<string, string> | null>(null);
   const usedPct = () => Math.max(0, Math.min(100, Math.round(props.pct * 100)));
-  const remainingPct = () => 100 - usedPct();
   const strokeDashoffset = () => DONUT_CIRCUMFERENCE * (1 - Math.min(props.pct, 1));
+  let wrapRef: HTMLDivElement | undefined;
 
   return (
     <div
+      ref={wrapRef}
       class={styles.contextDonutWrap}
-      onMouseEnter={() => setShowTooltip(true)}
-      onMouseLeave={() => setShowTooltip(false)}
+      onMouseEnter={() => {
+        if (!wrapRef) return;
+        const r = wrapRef.getBoundingClientRect();
+        setTooltipStyle({
+          position: "fixed",
+          left: `${Math.round(r.left + r.width / 2)}px`,
+          top: `${Math.round(r.top - 8)}px`,
+          transform: "translate(-50%, -100%)",
+        });
+      }}
+      onMouseLeave={() => setTooltipStyle(null)}
       onClick={() => { if (!props.isStreaming) props.onCompact(); }}
       style={{ cursor: props.isStreaming ? "default" : "pointer" }}
     >
@@ -77,11 +95,13 @@ function ContextDonut(props: ContextDonutProps) {
           style={{ transition: "stroke-dashoffset 0.4s ease, stroke 0.4s ease" }}
         />
       </svg>
-      <Show when={showTooltip()}>
-        <div class={styles.contextTooltip}>
-          <span>{remainingPct()}% of context remaining until auto-compact.</span>
-          <span class={styles.contextTooltipAction}>Click to compact now.</span>
-        </div>
+      <Show when={tooltipStyle()}>
+        {(st) => (
+          <div class={styles.contextTooltip} style={st()}>
+            <span>{formatTokens(props.tokens)} / {formatTokens(props.windowSize)} tokens ({usedPct()}%)</span>
+            <span class={styles.contextTooltipAction}>Click to compact now.</span>
+          </div>
+        )}
       </Show>
     </div>
   );
@@ -273,6 +293,8 @@ export function ChatInput(props: ChatInputProps) {
               <ContextDonut
                 pct={indicator().pct}
                 color={indicator().color}
+                tokens={indicator().tokens}
+                windowSize={indicator().windowSize}
                 isStreaming={props.isStreaming}
                 onCompact={indicator().onCompact}
               />
