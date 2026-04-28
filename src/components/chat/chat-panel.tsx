@@ -132,10 +132,13 @@ export function ChatPanel(props: ChatPanelProps) {
 
   /** Measure an element only if it has real layout dimensions.  Elements
    *  still inside the hidden ContentPool container (width/height 0) are
-   *  skipped — measuring them would record 0px and cause persistent text
-   *  overlap.  Chat messages always have ≥1px height when visible. */
+   *  skipped — measuring them would record incorrect heights (padding alone
+   *  can make offsetHeight > 0 even at width 0, producing wrong measurements
+   *  that cascade into translateY overlap for all subsequent items).
+   *  Both width AND height must be positive to guarantee the element has
+   *  reflowed at its true container width. */
   function measureIfVisible(el: HTMLElement | null) {
-    if (el && el.isConnected && el.offsetHeight > 0) {
+    if (el && el.isConnected && el.offsetWidth > 0 && el.offsetHeight > 0) {
       virtualizer.measureElement(el);
     }
   }
@@ -171,10 +174,57 @@ export function ChatPanel(props: ChatPanelProps) {
     });
   }
 
+  // Re-measure all currently rendered virtual items. Used after the scroll
+  // container gains real dimensions (ContentPool → visible pane) or after a
+  // container width change (pane resize / split) that causes text reflow.
+  // Debounced via rAF — multiple calls within a single frame coalesce into
+  // one pass, matching the early-return guard pattern used by batchMeasure
+  // and scheduleStickyUpdate.
+  let remeasureRafId: number | null = null;
+  function remeasureAllVisible() {
+    if (remeasureRafId !== null) return;
+    remeasureRafId = requestAnimationFrame(() => {
+      remeasureRafId = null;
+      if (unmounted) return;
+      for (const item of virtualizer.getVirtualItems()) {
+        const el = scrollRef?.querySelector(`[data-index="${item.index}"]`) as HTMLElement | null;
+        measureIfVisible(el);
+      }
+    });
+  }
+
+  // Observe scroll container width changes (pane resize / split). When the
+  // container width changes, text reflows and element heights change, but
+  // virtualizer items outside the viewport are not in the DOM and cannot be
+  // observed individually. Re-measuring all visible items on width change
+  // corrects their translateY positions and prevents cascading overlap.
+  let lastScrollWidth = 0;
+  let containerResizeObserver: ResizeObserver | null = null;
+
+  onMount(() => {
+    if (!scrollRef) return;
+    lastScrollWidth = Math.round(scrollRef.clientWidth);
+    containerResizeObserver = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      // Math.round avoids false positives from sub-pixel rounding on HiDPI.
+      const newWidth = Math.round(entry.contentRect.width);
+      // Only act on width changes — height changes are normal scroll behavior
+      if (newWidth > 0 && newWidth !== lastScrollWidth) {
+        lastScrollWidth = newWidth;
+        remeasureAllVisible();
+      }
+    });
+    containerResizeObserver.observe(scrollRef);
+  });
+
   onCleanup(() => {
     if (scrollRafId !== null) { cancelAnimationFrame(scrollRafId); scrollRafId = null; }
     if (stickyRafId !== null) { cancelAnimationFrame(stickyRafId); stickyRafId = null; }
     if (measureRafId !== null) { cancelAnimationFrame(measureRafId); measureRafId = null; }
+    if (remeasureRafId !== null) { cancelAnimationFrame(remeasureRafId); remeasureRafId = null; }
+    containerResizeObserver?.disconnect();
+    containerResizeObserver = null;
     measureBatch.clear();
   });
 
@@ -195,9 +245,11 @@ export function ChatPanel(props: ChatPanelProps) {
   // When isActive transitions false→true, flush the latest parser state into
   // the UI in one pass and re-measure all visible items (their heights may be
   // stale or zero from when the panel was inside the hidden ContentPool
-  // container). Uses a prev-value guard so it fires only on the transition,
-  // not on every re-evaluation where isActive is already true.
-  let prevIsActive = props.isActive;
+  // container).
+  // prevIsActive starts as false (not props.isActive) so that newly created
+  // tabs — which are immediately active — still trigger the re-measurement
+  // pass after ContentPool's appendChild moves them into a visible pane.
+  let prevIsActive = false;
   createEffect(() => {
     const now = props.isActive;
     if (now && !prevIsActive) {
@@ -206,16 +258,7 @@ export function ChatPanel(props: ChatPanelProps) {
         setMessages(latest);
         scrollToBottom();
       }
-      // Re-measure all visible items after one frame so the virtualizer
-      // picks up real heights (not estimateSize or stale zero-height
-      // measurements from the hidden pool container).
-      requestAnimationFrame(() => {
-        if (unmounted) return;
-        for (const item of virtualizer.getVirtualItems()) {
-          const el = scrollRef?.querySelector(`[data-index="${item.index}"]`) as HTMLElement | null;
-          measureIfVisible(el);
-        }
-      });
+      remeasureAllVisible();
     }
     prevIsActive = now;
   });
@@ -467,6 +510,9 @@ export function ChatPanel(props: ChatPanelProps) {
         return "sent";
       } catch (retryError: unknown) {
         store.updateStatus(props.tab.id, "error");
+        // Clear lastSessionId so the next respawn starts a fresh session
+        // instead of retrying with the same invalid session ID.
+        store.updateLastSessionId(props.tab.id, "");
         const errorMessage = retryError instanceof Error ? retryError.message : String(retryError);
         parser.addUserMessage(`[Error: Failed to send message. ${errorMessage}]`);
         return "error";
@@ -474,8 +520,23 @@ export function ChatPanel(props: ChatPanelProps) {
     }
   }
 
-  const sleep = (ms: number): Promise<void> =>
-    new Promise(resolve => setTimeout(resolve, ms));
+  /** Wait for the current turn to settle (parser reports idle via
+   *  turn_complete). Always waits for the actual turn_complete event from
+   *  the backend — never short-circuits on frontend state like isStreaming(),
+   *  which can be cleared by handleInterrupt before the guard drops.
+   *  Rejects on timeout or component unmount. */
+  function waitForIdle(timeoutMs = 10_000): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      function cleanup() { clearTimeout(timer); unsub(); }
+      const timer = setTimeout(() => { cleanup(); reject(new Error("timeout")); }, timeoutMs);
+      const unsub = parser.onStatusChange((status) => {
+        if (status === "idle" || unmounted) {
+          cleanup();
+          resolve();
+        }
+      });
+    });
+  }
 
   async function submitMessage(
     message: string,
@@ -484,13 +545,10 @@ export function ChatPanel(props: ChatPanelProps) {
     interrupted = false;
     const outcome = await submitWithBusyRetry({
       send: () => sendWithRespawn(message, images),
-      forceReset: async () => { await killPty(ptyId()).catch(() => {}); },
-      sleep,
+      waitForIdle: () => waitForIdle(10_000),
       isCancelled,
-      onForceReset: () =>
-        parser.addUserMessage("[Session unresponsive; resetting and retrying...]"),
       onResetFailed: () =>
-        parser.addUserMessage("[Error: Session reset failed. Please restart the tab.]"),
+        parser.addUserMessage("[Error: Session busy. Please try again.]"),
     });
     if (unmounted) return;
     if (outcome !== "sent") setIsStreaming(false);

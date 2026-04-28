@@ -151,11 +151,11 @@ fn extract_session_id(line: &str) -> Option<String> {
 /// caller can stop scanning subsequent lines for the same field.
 ///
 /// Latching `has_session` and `initial_resume_done` is gated on actually
-/// observing a `session_id` from Claude — if the CLI crashes before
-/// `system.init`, both flags stay false so the next `send_message`
-/// re-bootstraps with `--session-id <chorus-uuid>` (default path) or
-/// `--resume <parent_id>` (resume/fork path) instead of resuming a
-/// session Claude never acknowledged.
+/// observing a `session_id` from Claude. If the CLI crashes before
+/// `system.init`, both flags are untouched here — `read_stream_json`
+/// detects the failed exit and marks `initial_resume_done = true` /
+/// `has_session = false` to break the death spiral (see the
+/// "Break the death spiral" comment in `read_stream_json`).
 fn try_latch_session_observation(
     line: &str,
     session_id_slot: &Mutex<String>,
@@ -411,7 +411,7 @@ impl StreamSession {
             self.has_session.store(true, Ordering::Release);
             self.initial_resume_done.store(true, Ordering::Release);
         }
-        self.start_reader_thread(pane_id, child, stdout, stderr, app, guard, image_paths);
+        self.start_reader_thread(pane_id, child, stdout, stderr, app, guard, image_paths)?;
         Ok(())
     }
 
@@ -635,15 +635,20 @@ impl StreamSession {
         app: AppHandle,
         guard: super::running_guard::MessageRunGuard,
         temp_image_paths: Vec<String>,
-    ) {
+    ) -> Result<(), AppError> {
         let stream_id = pane_id.to_string();
         let cli_type = self.cli_type;
         let session_id_slot = Arc::clone(&self.session_id);
         let has_session = Arc::clone(&self.has_session);
         let initial_resume_done = Arc::clone(&self.initial_resume_done);
 
-        std::thread::spawn(move || {
-            let _guard = guard; // Dropped on normal exit or panic — clears running_since
+        std::thread::Builder::new()
+            .name(format!("reader[{stream_id}]"))
+            .stack_size(128 * 1024) // 128 KB — JSON parsing + string ops only
+            .spawn(move || {
+            // guard is moved into the read function, which drops it explicitly
+            // before emitting turn_complete. On panic, catch_unwind's unwind
+            // drops it via normal RAII since it's on the call stack.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match cli_type {
                     CliType::ClaudeCode => {
@@ -656,10 +661,13 @@ impl StreamSession {
                             has_session,
                             initial_resume_done,
                             &app,
+                            guard,
                         );
                     }
                     CliType::Codex => {
-                        Self::read_codex_jsonl(child, stdout, stderr, &stream_id, &app);
+                        Self::read_codex_jsonl(
+                            child, stdout, stderr, &stream_id, &app, guard,
+                        );
                     }
                     CliType::Shell => unreachable!(),
                 }
@@ -679,7 +687,8 @@ impl StreamSession {
                     }
                 }
             }
-        });
+        }).map_err(|e| AppError::PtySpawnFailed(format!("reader thread: {e}")))?;
+        Ok(())
     }
 
     /// Stream Claude Code NDJSON output line by line from piped stdout.
@@ -693,19 +702,24 @@ impl StreamSession {
         has_session: Arc<AtomicBool>,
         initial_resume_done: Arc<AtomicBool>,
         app: &AppHandle,
+        guard: super::running_guard::MessageRunGuard,
     ) {
-        // Capture stderr in a background thread so we can forward it on failure
-        let stderr_handle = std::thread::spawn(move || {
-            let mut collected = String::new();
-            for line in BufReader::new(stderr).lines().flatten() {
-                if !line.is_empty() {
-                    tracing::warn!(stderr = %line, "Claude Code stderr");
-                    collected.push_str(&line);
-                    collected.push('\n');
+        // Capture stderr in a background thread so we can forward it on failure.
+        // If thread spawn fails, fall back to draining stderr on the current thread
+        // to avoid blocking stdout reading — the thread is best-effort.
+        let stderr_handle = std::thread::Builder::new()
+            .stack_size(64 * 1024) // 64 KB — string accumulation only
+            .spawn(move || {
+                let mut collected = String::new();
+                for line in BufReader::new(stderr).lines().flatten() {
+                    if !line.is_empty() {
+                        tracing::warn!(stderr = %line, "Claude Code stderr");
+                        collected.push_str(&line);
+                        collected.push('\n');
+                    }
                 }
-            }
-            collected
-        });
+                collected
+            });
 
         let buffer = StreamBuffer::new(stream_id.to_string(), app.clone());
         let mut got_output = false;
@@ -738,8 +752,34 @@ impl StreamSession {
         let wait_start = Instant::now();
         let exit_code = child.wait().ok().and_then(|s| s.code());
         tracing::debug!(stream_id, exit_code, wait_ms = wait_start.elapsed().as_millis(), "Claude Code child.wait() returned");
-        let stderr_text = stderr_handle.join().unwrap_or_default();
+        let stderr_text: String = stderr_handle
+            .ok()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default();
         tracing::debug!(stream_id, "Claude Code stderr thread joined");
+
+        // Break the death spiral: if the CLI exited without emitting a
+        // session_id (e.g. "No conversation found with session ID: ..."),
+        // consume the resume/fork flags AND clear has_session so the next
+        // send_message falls through to `--session-id <chorus-uuid>` (fresh
+        // session) instead of retrying the same invalid `--resume <parent_id>`.
+        // Without clearing has_session, the next message would use
+        // `--resume <chorus-uuid>` which also fails (Chorus-generated UUIDs
+        // are never written to Claude's session store).
+        if !session_id_captured && exit_code.is_none_or(|c| c != 0) {
+            initial_resume_done.store(true, Ordering::Release);
+            has_session.store(false, Ordering::Release);
+            tracing::warn!(
+                stream_id,
+                "CLI exited without session_id — resetting session flags to prevent death spiral"
+            );
+        }
+
+        // Clear running_since BEFORE emitting events so the frontend can
+        // immediately send a new message upon receiving turn_complete without
+        // hitting StreamSessionBusy. This eliminates the race condition that
+        // previously required the 6×500ms busy-retry polling loop.
+        drop(guard);
 
         if (!got_output || exit_code.is_none_or(|c| c != 0)) && !stderr_text.is_empty() {
             let _ = app.emit("stream-event", StreamEventPayload {
@@ -758,8 +798,7 @@ impl StreamSession {
                 "exit_code": exit_code,
             }).to_string(),
         });
-        tracing::debug!(stream_id, "Claude Code read_stream_json returning — guard will drop");
-        // running_since is cleared by MessageRunGuard (RAII)
+        tracing::debug!(stream_id, "Claude Code read_stream_json done");
     }
 
     /// Stream Codex JSONL output line by line from piped stdout, translating events.
@@ -778,6 +817,7 @@ impl StreamSession {
         stderr: std::process::ChildStderr,
         stream_id: &str,
         app: &AppHandle,
+        guard: super::running_guard::MessageRunGuard,
     ) {
         // Emit init so ChatPanel shows the spinner immediately (before any output arrives)
         let _ = app.emit("stream-event", StreamEventPayload {
@@ -806,6 +846,9 @@ impl StreamSession {
         let wait_start = Instant::now();
         let _ = child.wait();
         tracing::debug!(stream_id, wait_ms = wait_start.elapsed().as_millis(), "Codex child.wait() returned");
+        // Clear running_since before emitting events (same rationale as read_stream_json)
+        drop(guard);
+
         // Ensure result + turn_complete is emitted even if Codex didn't send turn.completed
         let _ = app.emit("stream-event", StreamEventPayload {
             id: stream_id.to_string(),
@@ -815,8 +858,7 @@ impl StreamSession {
             id: stream_id.to_string(),
             data: serde_json::json!({ "type": "turn_complete" }).to_string(),
         });
-        tracing::debug!(stream_id, "Codex read_codex_jsonl returning — guard will drop");
-        // running_since is cleared by MessageRunGuard (RAII)
+        tracing::debug!(stream_id, "Codex read_codex_jsonl done");
     }
 
     fn translate_codex_line_to_string(line: &str) -> Option<String> {
@@ -1503,11 +1545,17 @@ mod tests {
 
 /// Spawn a thread that drains `stderr` and logs each non-empty line.
 fn spawn_stderr_logger(stderr: std::process::ChildStderr, label: &'static str) {
-    std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().flatten() {
-            if !line.is_empty() {
-                tracing::warn!(stderr = %line, "{label} stderr");
+    if let Err(e) = std::thread::Builder::new()
+        .stack_size(64 * 1024) // 64 KB — log forwarding only
+        .spawn(move || {
+            for line in BufReader::new(stderr).lines().flatten() {
+                if !line.is_empty() {
+                    tracing::warn!(stderr = %line, "{label} stderr");
+                }
             }
-        }
-    });
+        })
+    {
+        tracing::error!(error = %e, "Failed to spawn stderr logger thread");
+        // stderr pipe will be dropped, which is safe — CLI won't block on it
+    }
 }

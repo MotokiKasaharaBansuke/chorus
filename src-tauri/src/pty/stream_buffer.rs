@@ -29,8 +29,9 @@ impl StreamBuffer {
         let id_clone = stream_id.clone();
 
         let thread_name = format!("stream-buffer[{stream_id}]");
-        std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name(thread_name)
+            .stack_size(128 * 1024) // 128 KB — batching + IPC emit only
             .spawn(move || {
                 let mut batch: Vec<String> = Vec::with_capacity(32);
 
@@ -56,10 +57,12 @@ impl StreamBuffer {
                     }
                 }
             })
-            .unwrap_or_else(|e| {
-                tracing::error!(stream_id = %id_clone, error = %e, "Failed to spawn stream buffer thread");
-                panic!("stream buffer thread spawn failed for {id_clone}: {e}");
-            });
+        {
+            // rx is dropped with the closure — push() will log a warning per
+            // line, which is noisy but safe. Crashing the app (panic) under
+            // thread exhaustion would be worse.
+            tracing::error!(stream_id = %id_clone, error = %e, "Failed to spawn stream buffer thread");
+        }
 
         Self { tx }
     }
