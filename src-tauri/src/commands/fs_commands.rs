@@ -83,19 +83,34 @@ fn encode_project_dir(working_dir: &str) -> String {
     working_dir.replace('/', "-").replace('_', "-")
 }
 
+/// Validate that a session ID is UUID-like: alphanumeric + dashes, max 64 chars.
+fn is_valid_session_id(id: &str) -> bool {
+    id.len() <= 64 && !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Build the path to the Claude Code project directory for a given working dir.
+/// Returns `~/.claude/projects/<encoded_dir>`.
+/// Rejects empty or `..`-containing paths as defense-in-depth against traversal.
+fn claude_project_dir(working_dir: &str) -> Result<std::path::PathBuf, AppError> {
+    if working_dir.is_empty() || working_dir.contains("..") {
+        return Err(AppError::FileSystemError("Invalid working directory".into()));
+    }
+    let home = home_dir()?;
+    let encoded = encode_project_dir(working_dir);
+    Ok(home.join(".claude").join("projects").join(encoded))
+}
+
 /// List past Claude Code sessions for a project directory
 #[tauri::command]
 pub fn list_sessions(working_dir: String) -> Result<Vec<SessionInfo>, AppError> {
-    let home = home_dir()?;
-    let encoded = encode_project_dir(&working_dir);
-    let allowed_root = home.join(".claude").join("projects");
-    let dir = allowed_root.join(&encoded);
+    let dir = claude_project_dir(&working_dir)?;
 
     if !dir.exists() {
         return Ok(vec![]);
     }
 
     // Guard against path traversal: ensure dir is within ~/.claude/projects/
+    let allowed_root = home_dir()?.join(".claude").join("projects");
     let canonical_allowed = allowed_root.canonicalize()
         .map_err(|e| AppError::FileSystemError(e.to_string()))?;
     let canonical_dir = dir.canonicalize()
@@ -111,8 +126,7 @@ pub fn list_sessions(working_dir: String) -> Result<Vec<SessionInfo>, AppError> 
             if !name.ends_with(".jsonl") { continue; }
 
             let session_id = name.trim_end_matches(".jsonl").to_string();
-            // Validate session_id is UUID-like (alphanumeric + dashes) to reject crafted filenames
-            if !session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') { continue; }
+            if !is_valid_session_id(&session_id) { continue; }
 
             let metadata = entry.metadata().map_err(|e| AppError::FileSystemError(e.to_string()))?;
             let modified = metadata.modified()
@@ -179,30 +193,148 @@ pub fn list_sessions(working_dir: String) -> Result<Vec<SessionInfo>, AppError> 
     Ok(sessions.into_iter().take(20).collect())
 }
 
+/// Resolve and validate a session JSONL path, guarding against path traversal.
+/// Returns `None` if the file doesn't exist or is outside `~/.claude/projects/`.
+fn resolve_session_path(working_dir: &str, session_id: &str) -> Result<Option<std::path::PathBuf>, AppError> {
+    let dir = claude_project_dir(working_dir)?;
+    let path = dir.join(format!("{session_id}.jsonl"));
+    // File must exist for canonicalize to succeed
+    let canonical_path = match path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return Ok(None),
+    };
+    // Guard against symlinks / traversal: the resolved path must stay within
+    // ~/.claude/projects/
+    let allowed_root = home_dir()?.join(".claude").join("projects");
+    let canonical_allowed = allowed_root.canonicalize()
+        .map_err(|e| AppError::FileSystemError(e.to_string()))?;
+    if !canonical_path.starts_with(&canonical_allowed) {
+        return Ok(None);
+    }
+    Ok(Some(canonical_path))
+}
+
+/// Check whether a Claude Code session file exists on disk.
+/// Returns `true` if `~/.claude/projects/<encoded_dir>/<session_id>.jsonl` exists
+/// and is a non-empty file.  Used to validate a `lastSessionId` before attempting
+/// `--resume`, avoiding the "No conversation found" error.
+///
+/// Unlike `read_session`, invalid inputs return `Ok(false)` rather than `Err`
+/// because "does this session exist?" has a natural boolean answer.
+#[tauri::command]
+pub fn session_file_exists(working_dir: String, session_id: String) -> Result<bool, AppError> {
+    if !is_valid_session_id(&session_id) {
+        return Ok(false);
+    }
+    let path = match resolve_session_path(&working_dir, &session_id) {
+        Ok(Some(p)) => p,
+        _ => return Ok(false),
+    };
+    match std::fs::metadata(&path) {
+        Ok(m) => Ok(m.is_file() && m.len() > 0),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Build the path to the Chorus-managed session cache directory for a given working dir.
+/// Returns `~/.config/chorus/session-cache/<encoded_dir>`.
+fn session_cache_dir(working_dir: &str) -> Result<std::path::PathBuf, AppError> {
+    if working_dir.is_empty() || working_dir.contains("..") {
+        return Err(AppError::FileSystemError("Invalid working directory".into()));
+    }
+    let key = encode_project_dir(working_dir);
+    Ok(crate::config_path::config_dir().join("session-cache").join(key))
+}
+
+/// Synchronous implementation of session file caching.
+fn cache_session_file_sync(working_dir: &str, session_id: &str) -> Result<(), AppError> {
+    if !is_valid_session_id(session_id) {
+        return Ok(());
+    }
+    let src = match resolve_session_path(working_dir, session_id) {
+        Ok(Some(p)) => p,
+        _ => return Ok(()),
+    };
+    let dest_dir = session_cache_dir(working_dir)?;
+    std::fs::create_dir_all(&dest_dir)
+        .map_err(|e| AppError::FileSystemError(format!("Cannot create cache dir: {e}")))?;
+    let dest = dest_dir.join(format!("{session_id}.jsonl"));
+    // TOCTOU: source may have been deleted since resolve_session_path.
+    match std::fs::copy(&src, &dest) {
+        Ok(_) => Ok(()),
+        Err(_) => Ok(()),
+    }
+}
+
+/// Copy a Claude Code session file to Chorus's local cache.
+/// Called after each successful turn so the session can be restored if Claude Code
+/// prunes the original.  Silently succeeds if the source file doesn't exist.
+/// Runs on a blocking thread to avoid stalling the main thread on large files.
+#[tauri::command]
+pub async fn cache_session_file(working_dir: String, session_id: String) -> Result<(), AppError> {
+    tokio::task::spawn_blocking(move || cache_session_file_sync(&working_dir, &session_id))
+        .await
+        .map_err(|e| AppError::FileSystemError(format!("cache task: {e}")))?
+}
+
+/// Synchronous implementation of session file restoration.
+fn restore_session_file_sync(working_dir: &str, session_id: &str) -> Result<bool, AppError> {
+    if !is_valid_session_id(session_id) {
+        return Ok(false);
+    }
+    // If the original file already exists, no restore needed.
+    if let Ok(Some(_)) = resolve_session_path(working_dir, session_id) {
+        return Ok(false);
+    }
+    // Look for the cached copy.
+    let cache_dir = match session_cache_dir(working_dir) {
+        Ok(d) => d,
+        Err(_) => return Ok(false),
+    };
+    let cache_path = cache_dir.join(format!("{session_id}.jsonl"));
+    if !cache_path.is_file() {
+        return Ok(false);
+    }
+    // Restore to ~/.claude/projects/<key>/<id>.jsonl with path traversal guard.
+    let dest_dir = claude_project_dir(working_dir)?;
+    std::fs::create_dir_all(&dest_dir)
+        .map_err(|e| AppError::FileSystemError(format!("Cannot create project dir: {e}")))?;
+    // Canonicalize after create_dir_all so the directory exists for resolution.
+    let allowed_root = home_dir()?.join(".claude").join("projects");
+    let canonical_allowed = allowed_root.canonicalize()
+        .map_err(|e| AppError::FileSystemError(e.to_string()))?;
+    let canonical_dest_dir = dest_dir.canonicalize()
+        .map_err(|e| AppError::FileSystemError(e.to_string()))?;
+    if !canonical_dest_dir.starts_with(&canonical_allowed) {
+        return Ok(false);
+    }
+    let dest = canonical_dest_dir.join(format!("{session_id}.jsonl"));
+    // TOCTOU: cache file may have been deleted since the is_file check.
+    match std::fs::copy(&cache_path, &dest) {
+        Ok(_) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Restore a cached session file to its original Claude Code location.
+/// Returns `true` if the file was restored, `false` if no restore was needed
+/// (original already exists) or no cache was available.
+/// Runs on a blocking thread to avoid stalling the main thread on large files.
+#[tauri::command]
+pub async fn restore_session_file(working_dir: String, session_id: String) -> Result<bool, AppError> {
+    tokio::task::spawn_blocking(move || restore_session_file_sync(&working_dir, &session_id))
+        .await
+        .map_err(|e| AppError::FileSystemError(format!("restore task: {e}")))?
+}
+
 /// Read a session's JSONL file and return lines as JSON strings
 #[tauri::command]
 pub fn read_session(working_dir: String, session_id: String) -> Result<Vec<String>, AppError> {
-    // Validate session_id: UUID-like (alphanumeric + dashes), max 64 chars
-    if session_id.len() > 64 || !session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !is_valid_session_id(&session_id) {
         return Err(AppError::FileSystemError("Invalid session id".into()));
     }
-    let home = home_dir()?;
-    let encoded = encode_project_dir(&working_dir);
-    // Guard against path traversal via working_dir encoding
-    if encoded.contains("..") {
-        return Err(AppError::FileSystemError("Invalid working directory".into()));
-    }
-    let allowed_root = home.join(".claude").join("projects").join(&encoded);
-    let canonical_allowed = allowed_root.canonicalize()
-        .map_err(|e| AppError::FileSystemError(e.to_string()))?;
-
-    let path = canonical_allowed.join(format!("{session_id}.jsonl"));
-    let canonical_path = path.canonicalize()
-        .map_err(|_| AppError::FileSystemError("Invalid session path".into()))?;
-
-    if !canonical_path.starts_with(&canonical_allowed) {
-        return Err(AppError::FileSystemError("Access denied: path outside allowed directory".into()));
-    }
+    let canonical_path = resolve_session_path(&working_dir, &session_id)?
+        .ok_or_else(|| AppError::FileSystemError("Invalid session path".into()))?;
 
     // Only return user/assistant lines to reduce IPC transfer size
     // (Claude Code sessions can be 10-50MB with tool output, thinking, etc.)
@@ -407,4 +539,220 @@ pub fn git_has_tracked_changes(working_dir: String) -> Result<bool, AppError> {
     validate_path_scope(&working_dir)?;
     let files = run_git_with_timeout(&["diff", "HEAD", "--name-only"], &working_dir)?;
     Ok(!files.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- is_valid_session_id ----
+
+    #[test]
+    fn valid_uuid_session_id() {
+        assert!(is_valid_session_id("0614d5d0-7916-4502-a1b0-3848a1bed133"));
+    }
+
+    #[test]
+    fn empty_session_id_is_invalid() {
+        assert!(!is_valid_session_id(""));
+    }
+
+    #[test]
+    fn session_id_with_path_traversal_is_invalid() {
+        assert!(!is_valid_session_id("../../../etc/passwd"));
+    }
+
+    #[test]
+    fn session_id_over_64_chars_is_invalid() {
+        let long = "a".repeat(65);
+        assert!(!is_valid_session_id(&long));
+    }
+
+    #[test]
+    fn session_id_with_slash_is_invalid() {
+        assert!(!is_valid_session_id("abc/def"));
+    }
+
+    #[test]
+    fn session_id_at_64_chars_is_valid() {
+        let exact = "a".repeat(64);
+        assert!(is_valid_session_id(&exact));
+    }
+
+    // ---- encode_project_dir ----
+
+    #[test]
+    fn encode_replaces_slashes_and_underscores() {
+        assert_eq!(
+            encode_project_dir("/Users/test/my_project"),
+            "-Users-test-my-project"
+        );
+    }
+
+    #[test]
+    fn encode_empty_string() {
+        assert_eq!(encode_project_dir(""), "");
+    }
+
+    #[test]
+    fn encode_consecutive_slashes() {
+        assert_eq!(encode_project_dir("//a//b"), "--a--b");
+    }
+
+    // ---- session_file_exists ----
+
+    #[test]
+    fn session_file_exists_rejects_invalid_id() {
+        // Should return Ok(false), not Err
+        let result = session_file_exists(
+            "/tmp/nonexistent".to_string(),
+            "../../../etc/passwd".to_string(),
+        );
+        assert_eq!(result.unwrap(), false);
+    }
+
+    #[test]
+    fn session_file_exists_returns_false_for_missing_file() {
+        let result = session_file_exists(
+            "/tmp/nonexistent-dir".to_string(),
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
+        );
+        assert_eq!(result.unwrap(), false);
+    }
+
+    #[test]
+    fn session_file_exists_returns_false_for_empty_id() {
+        let result = session_file_exists("/tmp".to_string(), "".to_string());
+        assert_eq!(result.unwrap(), false);
+    }
+
+    // ---- claude_project_dir ----
+
+    #[test]
+    fn claude_project_dir_rejects_empty_working_dir() {
+        assert!(claude_project_dir("").is_err());
+    }
+
+    #[test]
+    fn claude_project_dir_rejects_dotdot_traversal() {
+        assert!(claude_project_dir("/Users/../etc").is_err());
+    }
+
+    // ---- resolve_session_path (integration) ----
+
+    #[test]
+    fn resolve_session_path_happy_path() {
+        // Create a temp dir mimicking ~/.claude/projects/<key>/<id>.jsonl
+        let home = std::env::var("HOME").expect("HOME must be set");
+        let session_id = "test-resolve-happy-path-abcdef1234567890";
+        let working_dir = "/tmp/chorus-test-resolve";
+        let encoded = encode_project_dir(working_dir);
+        let dir = std::path::PathBuf::from(&home)
+            .join(".claude")
+            .join("projects")
+            .join(&encoded);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join(format!("{session_id}.jsonl"));
+        std::fs::write(&file_path, "{\"type\":\"system\"}\n").unwrap();
+
+        let result = resolve_session_path(working_dir, session_id);
+        let resolved = result.unwrap().expect("should return Some for existing file");
+        assert!(resolved.is_absolute());
+        assert!(resolved.ends_with(format!("{session_id}.jsonl")));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&file_path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn resolve_session_path_returns_none_for_missing_file() {
+        let result = resolve_session_path(
+            "/tmp/nonexistent-chorus-test",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        );
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn session_file_exists_returns_false_for_empty_working_dir() {
+        let result = session_file_exists("".to_string(), "abcd-1234".to_string());
+        assert_eq!(result.unwrap(), false);
+    }
+
+    // ---- cache_session_file / restore_session_file ----
+
+    #[test]
+    fn cache_and_restore_round_trip() {
+        let home = std::env::var("HOME").expect("HOME must be set");
+        let session_id = "test-cache-roundtrip-aabbccdd11223344";
+        let working_dir = "/tmp/chorus-test-cache";
+        let encoded = encode_project_dir(working_dir);
+
+        // Create a fake session file in ~/.claude/projects/
+        let project_dir = std::path::PathBuf::from(&home)
+            .join(".claude")
+            .join("projects")
+            .join(&encoded);
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let original = project_dir.join(format!("{session_id}.jsonl"));
+        std::fs::write(&original, "{\"type\":\"system\"}\n").unwrap();
+
+        // Cache it
+        let result = cache_session_file_sync(working_dir, session_id);
+        assert!(result.is_ok());
+
+        // Verify cache file exists
+        let cache_dir = session_cache_dir(working_dir).unwrap();
+        let cached = cache_dir.join(format!("{session_id}.jsonl"));
+        assert!(cached.is_file());
+
+        // Delete original
+        std::fs::remove_file(&original).unwrap();
+        assert!(!original.exists());
+
+        // Restore should succeed
+        let restored = restore_session_file_sync(working_dir, session_id);
+        assert_eq!(restored.unwrap(), true);
+        assert!(original.exists());
+
+        // Restore again should return false (original already exists)
+        let again = restore_session_file_sync(working_dir, session_id);
+        assert_eq!(again.unwrap(), false);
+
+        // Cleanup
+        let _ = std::fs::remove_file(&original);
+        let _ = std::fs::remove_dir(&project_dir);
+        let _ = std::fs::remove_file(&cached);
+        let _ = std::fs::remove_dir(&cache_dir);
+    }
+
+    #[test]
+    fn cache_session_file_noop_for_missing_source() {
+        let result = cache_session_file_sync(
+            "/tmp/nonexistent-dir",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn restore_session_file_returns_false_when_no_cache() {
+        let result = restore_session_file_sync(
+            "/tmp/nonexistent-dir",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        );
+        assert_eq!(result.unwrap(), false);
+    }
+
+    #[test]
+    fn session_cache_dir_rejects_empty_working_dir() {
+        assert!(session_cache_dir("").is_err());
+    }
+
+    #[test]
+    fn session_cache_dir_builds_correct_path() {
+        let dir = session_cache_dir("/tmp/my-project").unwrap();
+        assert!(dir.ends_with("session-cache/-tmp-my-project"));
+    }
 }

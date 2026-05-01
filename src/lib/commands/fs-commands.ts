@@ -23,6 +23,18 @@ export interface SessionInfo {
   firstLine: string;
 }
 
+export async function sessionFileExists(workingDir: string, sessionId: string): Promise<boolean> {
+  return invoke<boolean>("session_file_exists", { workingDir, sessionId });
+}
+
+export async function cacheSessionFile(workingDir: string, sessionId: string): Promise<void> {
+  return invoke<void>("cache_session_file", { workingDir, sessionId });
+}
+
+export async function restoreSessionFile(workingDir: string, sessionId: string): Promise<boolean> {
+  return invoke<boolean>("restore_session_file", { workingDir, sessionId });
+}
+
 export async function listSessions(workingDir: string): Promise<SessionInfo[]> {
   return invoke<SessionInfo[]>("list_sessions", { workingDir });
 }
