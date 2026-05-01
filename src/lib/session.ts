@@ -1,6 +1,6 @@
 import type { CliConfig, CliMode, ReviewCliType, SessionFlags, TabWorktree, LayoutNode, PaneGroupNode, SplitNode, Tab } from "../types";
 import { saveSession, loadSession } from "./commands/session-commands";
-import { spawnPty } from "./commands";
+import { spawnPty, sessionFileExists, restoreSessionFile } from "./commands";
 
 const SESSION_VERSION = 1;
 
@@ -158,11 +158,29 @@ export async function restoreSession(data: string): Promise<RestoredWorkspace | 
     return null;
   }
 
+  // Validate each tab's lastSessionId against the on-disk session store
+  // BEFORE passing --resume to the CLI.  If the .jsonl file is missing
+  // (e.g. Claude Code pruned it), attempt to restore from Chorus's cache.
+  // Only clear the ID when neither original nor cache exists.
+  const workingDir = session.workingDir ?? "";
+  const validatedTabs = await Promise.all(
+    session.tabs.map(async (t) => {
+      if (!t.lastSessionId || t.lastSessionId.length === 0) return t;
+      const cwd = t.worktree?.path ?? t.cliConfig.workingDir ?? workingDir;
+      if (!cwd) return t;
+      const exists = await sessionFileExists(cwd, t.lastSessionId).catch(() => false);
+      if (exists) return t;
+      const restored = await restoreSessionFile(cwd, t.lastSessionId).catch(() => false);
+      if (restored) return t;
+      return { ...t, lastSessionId: undefined };
+    }),
+  );
+
   // Spawn PTYs for all tabs in parallel.
   // When a tab has a lastSessionId, resume that session so the CLI
   // restores conversation context from the previous app session.
   const spawnResults = await Promise.allSettled(
-    session.tabs.map(t => {
+    validatedTabs.map(t => {
       const flags: SessionFlags | undefined = t.lastSessionId && t.lastSessionId.length > 0
         ? { resumeSessionAt: t.lastSessionId }
         : undefined;
@@ -176,7 +194,7 @@ export async function restoreSession(data: string): Promise<RestoredWorkspace | 
   spawnResults.forEach((result, i) => {
     if (result.status === "fulfilled") {
       const id = result.value;
-      const saved = session.tabs[i];
+      const saved = validatedTabs[i];
       newIds.push(id);
       tabMap[id] = {
         id,

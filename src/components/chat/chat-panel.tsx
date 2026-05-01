@@ -1,7 +1,7 @@
 import { createSignal, createEffect, on, createMemo, For, Index, Show, onMount, onCleanup } from "solid-js";
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { streamEventDispatcher, ptyExitDispatcher } from "../../lib/event-dispatcher";
-import { sendMessage as sendMessageCmd, killPty, interruptPty, spawnPty, getStreamSessionId, spawnEphemeralPty, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
+import { sendMessage as sendMessageCmd, killPty, interruptPty, spawnPty, getStreamSessionId, spawnEphemeralPty, sessionFileExists, cacheSessionFile, restoreSessionFile, listSessions, readSession, listCodexSessions, readCodexSession, gitHasTrackedChanges, type SessionInfo, type ImageAttachmentPayload } from "../../lib/commands";
 import { useReviewRequest } from "../../hooks/use-review-request";
 import { useSendReview } from "../../hooks/use-send-review";
 import { getOrCreateParser } from "../../lib/stream-parser-registry";
@@ -452,6 +452,9 @@ export function ChatPanel(props: ChatPanelProps) {
       .then(sessionId => {
         if (ptyId() === targetPtyId && sessionId !== props.tab.lastSessionId) {
           store.updateLastSessionId(tabId, sessionId);
+          // Cache the session file so it can be restored if Claude Code prunes it
+          const cwd = props.tab.worktree?.path ?? props.tab.cliConfig.workingDir ?? "";
+          if (cwd) cacheSessionFile(cwd, sessionId).catch(() => undefined);
         }
       })
       // PTY may already be dead after respawn — expected race, not actionable
@@ -492,11 +495,26 @@ export function ChatPanel(props: ChatPanelProps) {
         lastRespawnAt = now;
         await killPty(ptyId()).catch(() => {});
         if (isCancelled()) return "error";
-        // Fork from the last session to preserve context across respawn
+        // Fork from the last session to preserve context across respawn,
+        // but only if the session file actually exists on disk.
+        // Without this check, --resume with a stale ID fails with
+        // "No conversation found with session ID: …".
         const lastSid = props.tab.lastSessionId;
-        const flags: SessionFlags | undefined = lastSid && lastSid.length > 0
-          ? { forkSession: true, resumeSessionAt: lastSid }
-          : undefined;
+        let flags: SessionFlags | undefined;
+        if (lastSid && lastSid.length > 0) {
+          const cwd = props.tab.worktree?.path ?? props.tab.cliConfig.workingDir ?? "";
+          let exists = cwd ? await sessionFileExists(cwd, lastSid).catch(() => false) : false;
+          // If the original file is gone, try to restore from Chorus's cache
+          if (!exists && cwd) {
+            const restored = await restoreSessionFile(cwd, lastSid).catch(() => false);
+            if (restored) exists = true;
+          }
+          if (exists) {
+            flags = { forkSession: true, resumeSessionAt: lastSid };
+          } else {
+            store.updateLastSessionId(props.tab.id, "");
+          }
+        }
         const newId = await spawnPty(props.tab.cliConfig, undefined, undefined, flags);
         if (isCancelled() || !store.getTab(props.tab.id)) {
           await killPty(newId).catch(() => {});
@@ -510,8 +528,6 @@ export function ChatPanel(props: ChatPanelProps) {
         return "sent";
       } catch (retryError: unknown) {
         store.updateStatus(props.tab.id, "error");
-        // Clear lastSessionId so the next respawn starts a fresh session
-        // instead of retrying with the same invalid session ID.
         store.updateLastSessionId(props.tab.id, "");
         const errorMessage = retryError instanceof Error ? retryError.message : String(retryError);
         parser.addUserMessage(`[Error: Failed to send message. ${errorMessage}]`);
