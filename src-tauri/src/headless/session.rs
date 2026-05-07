@@ -424,7 +424,7 @@ async fn reader_loop(
             biased;
             record = transport.next_record() => {
                 match record {
-                    Some(record) => handle_record(record, &app, &tab_id),
+                    Some(record) => handle_record(record, &app, &tab_id, &pending),
                     None => {
                         // EOF on stdout: child exited or closed its pipes.
                         // Fail every pending request so the UI does not
@@ -477,13 +477,31 @@ async fn reader_loop(
 
 /// Translate one record into a Tauri event. Unknown shapes go through
 /// `unknown_event` so a malformed line never tears down the session.
-fn handle_record(record: LineRecord, app: &AppHandle, tab_id: &str) {
+///
+/// Phase 1e adds a heuristic resolution path: when the CLI emits a
+/// `message-complete` shape (`type` plus a `finish_reason` field), we
+/// drain the **oldest** pending entry and resolve it with `Completed`
+/// (`Cancelled` if `finish_reason == "cancel"`). FIFO is a safe
+/// approximation today because Chorus serialises user turns through the
+/// reader task — a real `request_id` ↔ `message_id` correlation lands
+/// once we have CLI fixtures (Phase 1f).
+fn handle_record(
+    record: LineRecord,
+    app: &AppHandle,
+    tab_id: &str,
+    pending: &Arc<Mutex<PendingTable>>,
+) {
     match record {
         LineRecord::Line(s) => match serde_json::from_str::<serde_json::Value>(&s) {
-            Ok(value) => emit(
-                app,
-                super::event::unknown_event(tab_id.to_string(), value),
-            ),
+            Ok(value) => {
+                if let Some(reason) = detect_message_complete(&value) {
+                    resolve_oldest_pending(pending, reason);
+                }
+                emit(
+                    app,
+                    super::event::unknown_event(tab_id.to_string(), value),
+                );
+            }
             Err(_) => emit(app, HeadlessEvent::Status {
                 tab_id: tab_id.to_string(),
                 status: SessionStatus::Error,
@@ -508,6 +526,68 @@ fn handle_record(record: LineRecord, app: &AppHandle, tab_id: &str) {
                 message: Some(msg),
             });
         }
+    }
+}
+
+/// Turn-end shapes the heuristic recognises:
+///
+/// * Anthropic stream-json: `type: "message-complete"` (Phase 1+ canonical)
+/// * Claude Code's CLI: `type: "message_stop"`
+/// * `--print --output-format=json` summary: `type: "result"`
+///
+/// `finish_reason` keys nested inside other shapes (e.g. a `tool-use` whose
+/// `input` object happens to contain `finish_reason`) are **deliberately
+/// ignored**: matching only the discriminator field keeps the heuristic
+/// from firing on incidental key names.
+const TURN_END_TYPES: &[&str] = &["message-complete", "message_stop", "result"];
+
+/// Inspect a parsed JSONL line for a turn-end shape.
+///
+/// Returns the canonical `RequestOutcome` for the matched line so the
+/// caller can resolve a pending entry; `None` for any other line.
+///
+/// `finish_reason` is read **only** at the top level of a line whose
+/// `type` is in `TURN_END_TYPES`. A `finish_reason` of `"cancel"` maps to
+/// `Cancelled`; anything else (including missing / non-string) maps to
+/// `Completed`, since the assistant turn has clearly ended.
+fn detect_message_complete(value: &serde_json::Value) -> Option<RequestOutcome> {
+    let obj = value.as_object()?;
+    let type_str = obj.get("type").and_then(|t| t.as_str())?;
+    if !TURN_END_TYPES.contains(&type_str) {
+        return None;
+    }
+    let finish_reason = obj
+        .get("finish_reason")
+        .or_else(|| obj.get("finishReason"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    Some(if finish_reason == "cancel" {
+        RequestOutcome::Cancelled
+    } else {
+        RequestOutcome::Completed
+    })
+}
+
+/// Resolve the oldest pending entry with the supplied outcome.
+///
+/// The "oldest" rule is a heuristic until Phase 1f wires real
+/// `request_id` ↔ `message_id` correlation. It works because Chorus
+/// serialises user turns through the reader task — there is at most one
+/// in-flight request per session at a given moment in normal operation.
+fn resolve_oldest_pending(
+    pending: &Arc<Mutex<PendingTable>>,
+    outcome: RequestOutcome,
+) {
+    let mut table = pending.lock();
+    let Some(oldest_id) = table
+        .iter()
+        .min_by_key(|(_, entry)| entry.created_at)
+        .map(|(id, _)| id.clone())
+    else {
+        return;
+    };
+    if let Some(entry) = table.remove(&oldest_id) {
+        let _ = entry.responder.send(outcome);
     }
 }
 
@@ -714,6 +794,143 @@ mod tests {
         assert!(table.contains_key(&RequestId::from("live")));
         assert!(!table.contains_key(&RequestId::from("dropped")));
         assert!(!table.contains_key(&RequestId::from("expired")));
+    }
+
+    /// `detect_message_complete` matches every turn-end discriminator
+    /// Chorus expects to see in the wild, with optional `finish_reason`
+    /// driving Completed vs Cancelled.
+    #[test]
+    fn detect_message_complete_handles_known_shapes() {
+        use serde_json::json;
+        assert_eq!(
+            detect_message_complete(&json!({"type": "message-complete"})),
+            Some(RequestOutcome::Completed),
+        );
+        assert_eq!(
+            detect_message_complete(&json!({"type": "message_stop"})),
+            Some(RequestOutcome::Completed),
+        );
+        assert_eq!(
+            detect_message_complete(&json!({"type": "result"})),
+            Some(RequestOutcome::Completed),
+        );
+        assert_eq!(
+            detect_message_complete(&json!({
+                "type": "message-complete",
+                "finish_reason": "stop",
+            })),
+            Some(RequestOutcome::Completed),
+        );
+        assert_eq!(
+            detect_message_complete(&json!({
+                "type": "result",
+                "finishReason": "cancel",
+            })),
+            Some(RequestOutcome::Cancelled),
+        );
+    }
+
+    /// Critical: do not fire on a nested `finish_reason` that happens to
+    /// appear inside an unrelated shape (e.g. a tool-use whose `input`
+    /// payload mentions `finish_reason`). The discriminator must always
+    /// be the top-level `type`.
+    #[test]
+    fn detect_message_complete_ignores_nested_finish_reason() {
+        use serde_json::json;
+        assert!(
+            detect_message_complete(&json!({
+                "type": "tool-use",
+                "input": { "finish_reason": "stop" },
+            }))
+            .is_none(),
+        );
+        // Top-level `finish_reason` without a recognised `type` is also
+        // ignored — turn-end events always carry a `type` discriminator.
+        assert!(
+            detect_message_complete(&json!({"finish_reason": "stop"})).is_none(),
+        );
+    }
+
+    #[test]
+    fn detect_message_complete_returns_none_for_other_shapes() {
+        use serde_json::json;
+        assert!(detect_message_complete(&json!({"type": "message-delta"})).is_none());
+        assert!(detect_message_complete(&json!({"type": "tool-use"})).is_none());
+        assert!(detect_message_complete(&json!({"unrelated": 42})).is_none());
+        assert!(detect_message_complete(&json!(null)).is_none());
+        assert!(detect_message_complete(&json!("just a string")).is_none());
+        // Non-object JSON values must be rejected before the `type` lookup.
+        assert!(detect_message_complete(&json!([1, 2, 3])).is_none());
+        assert!(detect_message_complete(&json!(42)).is_none());
+        assert!(detect_message_complete(&json!(true)).is_none());
+    }
+
+    /// FIFO heuristic: the oldest entry resolves first. Phase 1f will
+    /// replace this with a real id-keyed lookup once we have a fixture
+    /// recording of Claude's stream-json envelope shape.
+    #[tokio::test]
+    async fn resolve_oldest_pending_drains_eldest_first() {
+        let pending: Arc<Mutex<PendingTable>> = Arc::new(Mutex::new(PendingTable::new()));
+
+        let (tx_a, rx_a) = oneshot::channel::<RequestOutcome>();
+        let mut entry_a = PendingEntry::new(tx_a);
+        entry_a.created_at = Instant::now() - Duration::from_secs(2);
+        pending.lock().insert(RequestId::from("a"), entry_a);
+
+        let (tx_b, rx_b) = oneshot::channel::<RequestOutcome>();
+        pending.lock().insert(RequestId::from("b"), PendingEntry::new(tx_b));
+
+        // First resolve picks `a` (older), second picks `b`.
+        resolve_oldest_pending(&pending, RequestOutcome::Completed);
+        assert_eq!(rx_a.await.unwrap(), RequestOutcome::Completed);
+
+        resolve_oldest_pending(&pending, RequestOutcome::Cancelled);
+        assert_eq!(rx_b.await.unwrap(), RequestOutcome::Cancelled);
+
+        assert!(pending.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_oldest_pending_is_safe_when_empty() {
+        let pending: Arc<Mutex<PendingTable>> = Arc::new(Mutex::new(PendingTable::new()));
+        // Just verify the call does not panic and leaves the table empty.
+        resolve_oldest_pending(&pending, RequestOutcome::Completed);
+        assert!(pending.lock().is_empty());
+    }
+
+    /// FIFO ordering must hold across more than two entries. Resolves in
+    /// strict eldest-first order regardless of insertion order.
+    #[tokio::test]
+    async fn resolve_oldest_pending_preserves_fifo_across_many_entries() {
+        let pending: Arc<Mutex<PendingTable>> = Arc::new(Mutex::new(PendingTable::new()));
+
+        let now = Instant::now();
+        let make_entry = |sender: oneshot::Sender<RequestOutcome>, age_secs: u64| {
+            let mut e = PendingEntry::new(sender);
+            e.created_at = now - Duration::from_secs(age_secs);
+            e
+        };
+
+        let (tx_a, rx_a) = oneshot::channel::<RequestOutcome>();
+        let (tx_b, rx_b) = oneshot::channel::<RequestOutcome>();
+        let (tx_c, rx_c) = oneshot::channel::<RequestOutcome>();
+
+        // Insert in non-FIFO order: middle, oldest, youngest. The resolver
+        // must still pick by age.
+        pending.lock().insert(RequestId::from("b"), make_entry(tx_b, 5));
+        pending.lock().insert(RequestId::from("a"), make_entry(tx_a, 10));
+        pending.lock().insert(RequestId::from("c"), make_entry(tx_c, 1));
+
+        resolve_oldest_pending(&pending, RequestOutcome::Completed);
+        assert_eq!(rx_a.await.unwrap(), RequestOutcome::Completed);
+
+        resolve_oldest_pending(&pending, RequestOutcome::Completed);
+        assert_eq!(rx_b.await.unwrap(), RequestOutcome::Completed);
+
+        resolve_oldest_pending(&pending, RequestOutcome::Cancelled);
+        assert_eq!(rx_c.await.unwrap(), RequestOutcome::Cancelled);
+
+        assert!(pending.lock().is_empty());
     }
 
     /// `cancel_pending` resolves every entry with `Cancelled` and reports
