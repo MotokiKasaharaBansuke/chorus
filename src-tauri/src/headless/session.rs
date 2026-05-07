@@ -1,10 +1,11 @@
 //! Per-tab session: owns the child process, the reader task, and the
 //! pending-request table.
 //!
-//! Several public surfaces (`RequestOutcome::Completed`/`Cancelled`,
-//! `Session::register_pending`) are wired into the type system but not
-//! yet consumed by the reader loop — Phase 1c will hook them up once we
-//! have CLI fixtures to drive the message-id correlation.
+//! `RequestOutcome::Completed` is wired into the type system but not yet
+//! consumed by the reader loop — Phase 1e will hook it up once we have
+//! CLI fixtures to drive message-id correlation deterministically. The
+//! other variants (`Cancelled`, `AgentCrashed`) are already resolved
+//! today by `cancel_pending` and `crash_pending` respectively.
 
 #![allow(dead_code)]
 //!
@@ -23,27 +24,21 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
-use uuid::Uuid;
 
 use super::child_transport::{ChildProcessTransport, SpawnError};
-use super::event::{ErrorKind, HeadlessEvent, SessionStatus, TabId};
+use super::event::{ErrorKind, HeadlessEvent, RequestId, SessionStatus, TabId};
 use super::line_reader::{LineRecord, LineViolation};
 use super::system::{SessionLock, SessionLockError};
 use super::transport::{JsonlTransport, SendError};
 use super::validation::{ValidatedCwd, ValidatedEnv};
 
-
-/// Logical identifier for one user message. Used to correlate the request
-/// to the assistant message id the CLI eventually emits, and to fail
-/// in-flight messages on crash.
-pub type RequestId = String;
 
 /// Reasons `Session::start` can fail.
 #[derive(Debug)]
@@ -106,16 +101,73 @@ impl From<SpawnError> for SessionStartError {
     }
 }
 
-/// Outcome a pending request resolves to.
+/// Handle returned by `Session::send_user_message`.
+///
+/// `id` is the Chorus-side request id (suitable for logging or for
+/// matching against CLI events); `outcome` resolves once the turn
+/// completes, cancels, or the agent crashes. Drop the struct entirely if
+/// the caller does not need completion semantics — the session GC will
+/// reclaim the pending entry without further action.
 #[derive(Debug)]
+pub struct PendingRequest {
+    pub id: RequestId,
+    pub outcome: oneshot::Receiver<RequestOutcome>,
+}
+
+/// Outcome a pending request resolves to.
+#[derive(Debug, PartialEq, Eq)]
 pub enum RequestOutcome {
     /// Assistant produced a `message-complete` event for this request.
+    /// Resolution by `crash_pending`/`cancel_pending` is wired today;
+    /// full message-id correlation against assistant `message-complete`
+    /// events lands in Phase 1e once we have CLI fixtures.
     Completed,
     /// Cancel succeeded (control JSON was acknowledged or the message
     /// stream ended early as a result).
     Cancelled,
     /// Child crashed before this request could complete.
     AgentCrashed,
+}
+
+/// Maximum time a pending entry stays in the table before being garbage
+/// collected. 5 minutes is well past the longest realistic Claude turn,
+/// so a still-live entry past this point almost certainly indicates a
+/// caller that dropped the receiver and forgot about the request.
+const PENDING_REQUEST_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// Internal book-keeping for `pending`. Bundles the resolver with the
+/// timestamp used by the TTL sweep.
+struct PendingEntry {
+    responder: oneshot::Sender<RequestOutcome>,
+    created_at: Instant,
+}
+
+impl PendingEntry {
+    fn new(responder: oneshot::Sender<RequestOutcome>) -> Self {
+        Self { responder, created_at: Instant::now() }
+    }
+
+    /// Should this entry be evicted on the next sweep?
+    fn is_stale(&self) -> bool {
+        // Caller dropped its `Receiver` — nobody is going to await this
+        // outcome, so resolving would be a no-op. Drop the entry now to
+        // free the table.
+        if self.responder.is_closed() {
+            return true;
+        }
+        // TTL backstop in case a caller held a `Receiver` past any
+        // reasonable turn duration.
+        self.created_at.elapsed() > PENDING_REQUEST_TTL
+    }
+}
+
+type PendingTable = HashMap<RequestId, PendingEntry>;
+
+/// Drop entries whose receiver was dropped or whose TTL elapsed. Cheap
+/// enough to run on every `send_user_message` because the table never
+/// grows past the count of in-flight turns (~1 per tab in practice).
+fn sweep_pending(table: &mut PendingTable) {
+    table.retain(|_, entry| !entry.is_stale());
 }
 
 /// Configuration for `Session::start`.
@@ -158,7 +210,7 @@ enum ReaderTaskCmd {
 pub struct Session {
     tab_id: TabId,
     cmd_tx: mpsc::Sender<ReaderTaskCmd>,
-    pending: Arc<Mutex<HashMap<RequestId, oneshot::Sender<RequestOutcome>>>>,
+    pending: Arc<Mutex<PendingTable>>,
     /// PID + group-kill helpers. `Arc` so the reader task can keep its own
     /// handle for in-task SIGKILL while the public surface uses this copy
     /// for the synchronous emergency path.
@@ -209,8 +261,7 @@ impl Session {
 
         let killer = Arc::new(ProcessKiller::from_transport(&transport));
 
-        let pending: Arc<Mutex<HashMap<RequestId, oneshot::Sender<RequestOutcome>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<Mutex<PendingTable>> = Arc::new(Mutex::new(PendingTable::new()));
         let (cmd_tx, cmd_rx) = mpsc::channel::<ReaderTaskCmd>(64);
 
         let reader_pending = pending.clone();
@@ -228,7 +279,7 @@ impl Session {
 
         // Optimistic: tell the UI we are ready to take input. A stronger
         // health-check (peeking stderr / waiting for `system-init`) lands
-        // in Phase 1d once we have fixture-driven coverage.
+        // in Phase 1e once we have fixture-driven coverage.
         emit(&app, HeadlessEvent::Status {
             tab_id: tab_id.clone(),
             status: SessionStatus::Idle,
@@ -245,26 +296,57 @@ impl Session {
         &self.tab_id
     }
 
-    /// Send a free-form user message and return its newly-minted `RequestId`.
+    /// Send a free-form user message.
     ///
-    /// Phase 1c does **not** track pending requests through to completion:
-    /// the only thing that resolves a pending entry today is `crash_pending`
-    /// at session teardown, so any insert during normal operation would
-    /// leak into the table indefinitely. The full pending lifecycle —
-    /// registration, message-id correlation, and cancel propagation —
-    /// lands in Phase 1d alongside the fixture-driven CLI integration
-    /// tests; until then this surface is intentionally simpler.
-    pub async fn send_user_message(&self, text: String) -> Result<RequestId, SendError> {
-        let request_id = Uuid::new_v4().to_string();
+    /// Returns a `PendingRequest` with the freshly-minted `RequestId` and
+    /// a `oneshot::Receiver<RequestOutcome>` that will fire when the turn
+    /// completes, is cancelled, or the agent crashes. The receiver may be
+    /// dropped if the caller does not need completion semantics — the
+    /// session sweeps caller-dropped entries on every subsequent send,
+    /// and a 5-minute TTL backstops any held-but-forgotten receivers.
+    ///
+    /// Pending registration happens **before** the channel send so that a
+    /// crash mid-send is still observable. On send failure we explicitly
+    /// remove the entry to keep the table from drifting.
+    ///
+    /// Note: pending entries currently resolve via `crash_pending`,
+    /// `cancel_pending`, and the GC sweep. Per-message `Completed`
+    /// resolution lands in Phase 1e once we have CLI fixtures to drive
+    /// message-id correlation deterministically.
+    pub async fn send_user_message(
+        &self,
+        text: String,
+    ) -> Result<PendingRequest, SendError> {
+        let request_id = RequestId::new();
+        let (outcome_tx, outcome_rx) = oneshot::channel();
+
+        {
+            let mut table = self.pending.lock();
+            sweep_pending(&mut table);
+            table.insert(request_id.clone(), PendingEntry::new(outcome_tx));
+        }
+
         let (responder, response) = oneshot::channel();
-        self.cmd_tx
+        if self
+            .cmd_tx
             .send(ReaderTaskCmd::SendUserText { request_id: request_id.clone(), text, responder })
             .await
-            .map_err(|_| SendError::PeerClosed)?;
+            .is_err()
+        {
+            self.pending.lock().remove(&request_id);
+            return Err(SendError::PeerClosed);
+        }
+
         match response.await {
-            Ok(Ok(())) => Ok(request_id),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(SendError::PeerClosed),
+            Ok(Ok(())) => Ok(PendingRequest { id: request_id, outcome: outcome_rx }),
+            Ok(Err(e)) => {
+                self.pending.lock().remove(&request_id);
+                Err(e)
+            }
+            Err(_) => {
+                self.pending.lock().remove(&request_id);
+                Err(SendError::PeerClosed)
+            }
         }
     }
 
@@ -330,7 +412,7 @@ async fn reader_loop(
     mut cmd_rx: mpsc::Receiver<ReaderTaskCmd>,
     app: AppHandle,
     tab_id: TabId,
-    pending: Arc<Mutex<HashMap<RequestId, oneshot::Sender<RequestOutcome>>>>,
+    pending: Arc<Mutex<PendingTable>>,
     _lock: Arc<SessionLock>,
 ) {
     let pid = transport.pid();
@@ -355,10 +437,11 @@ async fn reader_loop(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(ReaderTaskCmd::SendUserText { request_id: _, text, responder }) => {
-                        // Phase 1d will register `request_id` into `pending`
-                        // here and resolve it on the matching message-complete
-                        // event. Today the discard is intentional — see the
-                        // module docstring for the lifecycle plan.
+                        // Phase 1e will resolve `request_id` against the
+                        // matching `message-complete` event so the pending
+                        // entry fires `Completed`. Today registration is
+                        // already done by `Session::send_user_message`; this
+                        // task just needs to forward the user line.
                         let payload = build_user_text_line(&text);
                         let result = transport.send_line(&payload).await;
                         let _ = responder.send(result);
@@ -366,6 +449,16 @@ async fn reader_loop(
                     Some(ReaderTaskCmd::Cancel { responder }) => {
                         let payload = json!({ "type": "control", "action": "cancel" }).to_string();
                         let result = transport.send_line(&payload).await;
+                        if result.is_ok() {
+                            // The control envelope has been delivered;
+                            // resolve every pending entry as `Cancelled`
+                            // so awaiting callers learn the turn is done
+                            // even if the CLI never emits a confirmation.
+                            let count = cancel_pending(&pending);
+                            if count > 0 {
+                                debug!(tab_id = %tab_id, count, "pending requests cancelled");
+                            }
+                        }
                         let _ = responder.send(result);
                     }
                     Some(ReaderTaskCmd::Shutdown) | None => {
@@ -429,14 +522,14 @@ async fn graceful_kill(transport: &ChildProcessTransport) {
 /// Resolve every pending request with `AgentCrashed` and emit an Error
 /// status so the UI can prompt the user to retry.
 fn crash_pending(
-    pending: &Arc<Mutex<HashMap<RequestId, oneshot::Sender<RequestOutcome>>>>,
+    pending: &Arc<Mutex<PendingTable>>,
     app: &AppHandle,
     tab_id: &str,
     reason: &str,
 ) {
     let drained: Vec<_> = pending.lock().drain().collect();
-    for (_id, tx) in drained {
-        let _ = tx.send(RequestOutcome::AgentCrashed);
+    for (_id, entry) in drained {
+        let _ = entry.responder.send(RequestOutcome::AgentCrashed);
     }
     emit(app, HeadlessEvent::Status {
         tab_id: tab_id.to_string(),
@@ -444,6 +537,19 @@ fn crash_pending(
         error_kind: Some(ErrorKind::AgentCrashed),
         message: Some(reason.to_string()),
     });
+}
+
+/// Drain pending and resolve every entry with `Cancelled`. Triggered by
+/// the protocol-level cancel flow — the assumption is that any in-flight
+/// turn has been told to stop, so callers waiting on a `RequestOutcome`
+/// should observe `Cancelled` rather than `Completed`.
+fn cancel_pending(pending: &Arc<Mutex<PendingTable>>) -> usize {
+    let drained: Vec<_> = pending.lock().drain().collect();
+    let count = drained.len();
+    for (_id, entry) in drained {
+        let _ = entry.responder.send(RequestOutcome::Cancelled);
+    }
+    count
 }
 
 /// Grace period for the post-spawn health check. A CLI that dies on argv
@@ -579,6 +685,53 @@ mod tests {
             }
             other => panic!("expected HealthCheckFailed, got {other:?}"),
         }
+    }
+
+    /// `sweep_pending` must drop entries whose `oneshot::Sender::is_closed`
+    /// returns true (the receiver was dropped) and entries past TTL. Active
+    /// entries with live receivers must survive the sweep.
+    #[test]
+    fn sweep_drops_caller_dropped_and_ttl_expired_entries() {
+        let mut table: PendingTable = PendingTable::new();
+
+        // Live receiver: should survive.
+        let (tx_live, _rx_live) = oneshot::channel::<RequestOutcome>();
+        table.insert(RequestId::from("live"), PendingEntry::new(tx_live));
+
+        // Receiver dropped: should be swept.
+        let (tx_dropped, rx_dropped) = oneshot::channel::<RequestOutcome>();
+        drop(rx_dropped);
+        table.insert(RequestId::from("dropped"), PendingEntry::new(tx_dropped));
+
+        // TTL-expired entry: backdate created_at.
+        let (tx_expired, _rx_expired) = oneshot::channel::<RequestOutcome>();
+        let mut expired = PendingEntry::new(tx_expired);
+        expired.created_at = Instant::now() - PENDING_REQUEST_TTL - Duration::from_secs(1);
+        table.insert(RequestId::from("expired"), expired);
+
+        sweep_pending(&mut table);
+
+        assert!(table.contains_key(&RequestId::from("live")));
+        assert!(!table.contains_key(&RequestId::from("dropped")));
+        assert!(!table.contains_key(&RequestId::from("expired")));
+    }
+
+    /// `cancel_pending` resolves every entry with `Cancelled` and reports
+    /// the count drained, regardless of whether the receiver still cared.
+    #[tokio::test]
+    async fn cancel_pending_resolves_each_outcome_with_cancelled() {
+        let pending: Arc<Mutex<PendingTable>> = Arc::new(Mutex::new(PendingTable::new()));
+
+        let (tx_a, rx_a) = oneshot::channel::<RequestOutcome>();
+        let (tx_b, rx_b) = oneshot::channel::<RequestOutcome>();
+        pending.lock().insert(RequestId::from("a"), PendingEntry::new(tx_a));
+        pending.lock().insert(RequestId::from("b"), PendingEntry::new(tx_b));
+
+        let count = cancel_pending(&pending);
+        assert_eq!(count, 2);
+        assert!(pending.lock().is_empty());
+        assert_eq!(rx_a.await.unwrap(), RequestOutcome::Cancelled);
+        assert_eq!(rx_b.await.unwrap(), RequestOutcome::Cancelled);
     }
 
     /// A long-running child must clear the health check.

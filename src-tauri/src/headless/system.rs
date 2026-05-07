@@ -128,6 +128,56 @@ impl SessionLock {
     }
 }
 
+/// Inspect the lock file for `tab_id` without trying to acquire it.
+///
+/// Returns `Ok(Some(age))` when a lock file exists and we can read its
+/// mtime; the caller can then decide if the lock is stale (e.g. the
+/// previous Chorus instance crashed without releasing it). `Ok(None)`
+/// means no lock file is present, so a fresh acquire will succeed.
+///
+/// Released locks leave the file behind by design — the kernel-held
+/// flock has cleared but the path stays so callers like this one have
+/// an mtime to inspect.
+pub fn lock_age(tab_id: &str) -> Result<Option<std::time::Duration>, SessionLockError> {
+    if !is_valid_session_id(tab_id) {
+        return Err(SessionLockError::InvalidTabId);
+    }
+    let path = headless_session_lock(tab_id);
+    match std::fs::metadata(&path) {
+        Ok(meta) => {
+            let mtime = meta.modified()?;
+            // NTP-driven clock rewinds make `duration_since` return Err
+            // when the system clock is now older than `mtime`. We reject
+            // collapsing that into "no lock file" — the lock genuinely
+            // exists. Fall through to `Duration::ZERO` so the caller's
+            // staleness check sees a "very recent" lock and stays on the
+            // safe side (treat as live, not stale).
+            let age = std::time::SystemTime::now()
+                .duration_since(mtime)
+                .unwrap_or(std::time::Duration::ZERO);
+            Ok(Some(age))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(SessionLockError::Io(e)),
+    }
+}
+
+/// Forcibly remove the lock file for `tab_id` so a subsequent
+/// `try_acquire` succeeds. Caller must have first confirmed staleness via
+/// `lock_age` and obtained user consent — this function performs no
+/// safety checks of its own.
+pub fn force_release_lock(tab_id: &str) -> Result<(), SessionLockError> {
+    if !is_valid_session_id(tab_id) {
+        return Err(SessionLockError::InvalidTabId);
+    }
+    let path = headless_session_lock(tab_id);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(SessionLockError::Io(e)),
+    }
+}
+
 impl Drop for SessionLock {
     fn drop(&mut self) {
         // Release the kernel lock; ignore errors (the file is unlinked on
@@ -186,6 +236,49 @@ mod tests {
             .expect("third acquire result")
             .expect("third acquire after drop");
         drop(third);
+    }
+
+    #[test]
+    #[serial]
+    fn lock_age_returns_none_when_no_file_exists() {
+        let tab = "lock-age-fresh";
+        let _ = force_release_lock(tab);
+        assert!(lock_age(tab).unwrap().is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn lock_age_returns_some_after_acquire() {
+        let tab = "lock-age-after-acquire";
+        let _ = force_release_lock(tab);
+        let lock = SessionLock::try_acquire(tab).unwrap().expect("acquire");
+        let age = lock_age(tab).unwrap();
+        assert!(age.is_some(), "lock_age should return Some after acquire");
+        drop(lock);
+        let _ = force_release_lock(tab);
+    }
+
+    #[test]
+    #[serial]
+    fn force_release_after_acquire_lets_next_acquire_succeed() {
+        let tab = "lock-force-release";
+        let _ = force_release_lock(tab);
+        let lock = SessionLock::try_acquire(tab).unwrap().expect("acquire 1");
+        // Second acquire fails because flock is held.
+        assert!(SessionLock::try_acquire(tab).unwrap().is_none());
+        // Drop the live lock so flock is released; force_release also
+        // unlinks the file.
+        drop(lock);
+        force_release_lock(tab).expect("force_release");
+        let lock2 = SessionLock::try_acquire(tab).unwrap().expect("acquire 2");
+        drop(lock2);
+        let _ = force_release_lock(tab);
+    }
+
+    #[test]
+    fn lock_age_rejects_invalid_tab_id() {
+        assert!(matches!(lock_age("--evil"), Err(SessionLockError::InvalidTabId)));
+        assert!(matches!(force_release_lock("--evil"), Err(SessionLockError::InvalidTabId)));
     }
 
     #[test]
