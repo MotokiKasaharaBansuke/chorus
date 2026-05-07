@@ -12,13 +12,128 @@ use serde::{Deserialize, Serialize};
 
 /// Tab identifier. Tab ID = headless session ID (1:1), preserving the
 /// existing "Tab ID = PTY ID" invariant from the PTY pipeline.
+///
+/// Kept as a `String` alias rather than a newtype because the PTY pipeline
+/// still threads bare `String` tab ids through several call sites. Phase 4
+/// (PTY removal) is the right time to promote this to a newtype.
 pub type TabId = String;
 
+/// Identifier minted by Chorus for one user→assistant turn. Used to
+/// correlate `Session::send_user_message` with its eventual completion.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RequestId(String);
+
+impl RequestId {
+    /// Generate a fresh v4 UUID-backed request id.
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4().to_string())
+    }
+
+    /// Borrow the underlying UUID string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for RequestId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for RequestId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for RequestId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for RequestId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
 /// Identifier of an in-flight assistant message. Stable across delta + final.
-pub type MessageId = String;
+/// Sourced from the upstream CLI (claude / codex), so we wrap an opaque
+/// string rather than minting our own.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MessageId(String);
+
+impl MessageId {
+    /// Constructed at the reader_loop boundary in Phase 1e once we are
+    /// parsing CLI events and minting `MessageDelta` directly here.
+    #[allow(dead_code)]
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    #[allow(dead_code)]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for MessageId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for MessageId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for MessageId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
 
 /// Identifier of a single tool invocation within an assistant message.
-pub type ToolUseId = String;
+/// Sourced from the upstream CLI.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ToolUseId(String);
+
+impl ToolUseId {
+    #[allow(dead_code)]
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    #[allow(dead_code)]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ToolUseId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for ToolUseId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for ToolUseId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
 
 /// Lifecycle state of a session, separate from message-level events so the
 /// UI can show busy indicators without parsing message stream contents.
@@ -451,6 +566,34 @@ mod tests {
     /// reaching `unknown_event`'s `Err` arm in a unit test is impractical
     /// without a custom Value type. The fail-closed design is reviewed at
     /// the implementation site instead — see the `Err(_)` arm above.
+    #[test]
+    fn request_id_serializes_as_bare_string() {
+        let rid = RequestId::from("abc-123".to_string());
+        let s = serde_json::to_string(&rid).unwrap();
+        assert_eq!(s, "\"abc-123\"");
+        let round: RequestId = serde_json::from_str(&s).unwrap();
+        assert_eq!(round, rid);
+    }
+
+    #[test]
+    fn request_id_new_yields_uuid_shape() {
+        let rid = RequestId::new();
+        // UUID v4 is 36 chars: 8-4-4-4-12 with four dashes.
+        assert_eq!(rid.as_str().len(), 36);
+        assert_eq!(rid.as_str().matches('-').count(), 4);
+    }
+
+    #[test]
+    fn message_id_and_tool_use_id_are_distinct_types() {
+        let mid = MessageId::new("m-1");
+        let tid = ToolUseId::new("tu-1");
+        // The point of newtypes is exactly that this assignment is rejected
+        // by the compiler — verified at build time, not runtime. Here we
+        // just exercise Display/AsStr to keep the API in use.
+        assert_eq!(format!("{mid}"), "m-1");
+        assert_eq!(format!("{tid}"), "tu-1");
+    }
+
     #[test]
     fn unknown_event_truncation_marker_is_well_typed() {
         let big = "x".repeat(MAX_UNKNOWN_RAW_BYTES + 100);

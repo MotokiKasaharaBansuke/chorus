@@ -89,6 +89,8 @@ pub fn run() {
             headless_commands::write_headless_input,
             headless_commands::cancel_headless_message,
             headless_commands::kill_headless,
+            headless_commands::inspect_headless_lock,
+            headless_commands::force_release_headless_lock,
             fs_commands::list_directory,
             fs_commands::read_file,
             fs_commands::watch_directory,

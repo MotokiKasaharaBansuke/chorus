@@ -13,10 +13,13 @@ use serde::Deserialize;
 use tauri::{AppHandle, State};
 use tracing::warn;
 
+use serde::Serialize;
+
 use crate::cli::registry::{resolve_command, CliMode, CliType};
 use crate::error::AppError;
 use crate::headless::manager::HeadlessManager;
 use crate::headless::session::{Session, SessionConfig, SessionStartError};
+use crate::headless::system::{force_release_lock, lock_age};
 use crate::headless::validation::{
     sanitize_extra_env, validate_cwd, validate_model, validate_session_id, ValidationError,
 };
@@ -44,6 +47,20 @@ pub struct SpawnHeadlessRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub extra_env: HashMap<String, String>,
+    /// When set, append `--resume <id>` to the Claude argv so the new
+    /// process continues an existing session rather than starting fresh.
+    /// The id is validated as session-id-shaped before being passed
+    /// through, so a crafted value cannot inject arbitrary CLI flags.
+    /// Currently only honoured for `CliType::ClaudeCode`; Codex resume
+    /// uses the `codex exec resume <id>` subcommand and lands in Phase 1e.
+    #[serde(default)]
+    pub resume_session_at: Option<String>,
+    /// When true and `resume_session_at` is set, also append
+    /// `--fork-session` so Claude assigns a fresh session id rather than
+    /// appending to the parent. Without `resume_session_at` this flag is
+    /// a no-op (consistent with Claude's CLI semantics).
+    #[serde(default)]
+    pub fork_session: bool,
 }
 
 /// Convert validation errors into `AppError` so the frontend sees a single
@@ -102,7 +119,27 @@ pub async fn spawn_headless(
             "Shell CliType is not supported by headless pipeline".into(),
         ));
     }
-    let (command, args) = resolve_command(&request.cli_type, &request.mode, &request.model)?;
+    let (command, mut args) = resolve_command(&request.cli_type, &request.mode, &request.model)?;
+
+    // Append resume / fork flags for Claude. Codex resume uses a different
+    // subcommand path and lands in Phase 1e.
+    if matches!(request.cli_type, CliType::ClaudeCode) {
+        if let Some(session_id) = request.resume_session_at.as_deref() {
+            validate_session_id(session_id).map_err(validation_to_app)?;
+            args.push("--resume".into());
+            args.push(session_id.into());
+            if request.fork_session {
+                args.push("--fork-session".into());
+            }
+        } else if request.fork_session {
+            // Fail fast — silently dropping `fork_session` would mask a
+            // client bug where the user intended to fork. Surface it so
+            // the frontend can correct the argument shape.
+            return Err(AppError::PtySpawnFailed(
+                "fork_session requires resume_session_at".into(),
+            ));
+        }
+    }
 
     let config = SessionConfig {
         tab_id: request.tab_id.clone(),
@@ -138,10 +175,14 @@ pub async fn write_headless_input(
     let session = state
         .get(&request.tab_id)
         .ok_or_else(|| AppError::PtyNotFound(request.tab_id.clone()))?;
-    session
+    let pending = session
         .send_user_message(request.text)
         .await
-        .map_err(|e| AppError::PtyWriteFailed(format!("{e}")))
+        .map_err(|e| AppError::PtyWriteFailed(format!("{e}")))?;
+    // The frontend correlates completion via the per-tab event channel;
+    // the outcome receiver is dropped here so the session GC can reclaim
+    // the pending entry once it is no longer needed.
+    Ok(pending.id.as_str().to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,6 +210,53 @@ pub async fn cancel_headless_message(
 #[serde(rename_all = "camelCase")]
 pub struct KillHeadlessRequest {
     pub tab_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectHeadlessLockRequest {
+    pub tab_id: String,
+}
+
+/// Per-tab lock diagnostic surface for the frontend's "session already
+/// running" UI. `None` means no lock file exists; a present age lets the
+/// UI decide whether to offer a force-release prompt.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectHeadlessLockResponse {
+    pub age_seconds: Option<u64>,
+}
+
+/// Inspect the lock file for `tabId` without trying to acquire it.
+#[tauri::command]
+pub async fn inspect_headless_lock(
+    request: InspectHeadlessLockRequest,
+) -> Result<InspectHeadlessLockResponse, AppError> {
+    validate_session_id(&request.tab_id).map_err(validation_to_app)?;
+    let age = lock_age(&request.tab_id)
+        .map_err(|e| AppError::PtySpawnFailed(format!("lock_age: {e}")))?;
+    Ok(InspectHeadlessLockResponse {
+        age_seconds: age.map(|d| d.as_secs()),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForceReleaseHeadlessLockRequest {
+    pub tab_id: String,
+}
+
+/// Forcibly remove the lock file for `tabId`. Frontend must have first
+/// shown the user the lock age via `inspect_headless_lock` and obtained
+/// explicit consent — this function performs no consent or staleness
+/// checks of its own.
+#[tauri::command]
+pub async fn force_release_headless_lock(
+    request: ForceReleaseHeadlessLockRequest,
+) -> Result<(), AppError> {
+    validate_session_id(&request.tab_id).map_err(validation_to_app)?;
+    force_release_lock(&request.tab_id)
+        .map_err(|e| AppError::PtySpawnFailed(format!("force_release: {e}")))
 }
 
 /// Tear the session down: graceful close, then SIGTERM/SIGKILL escalation
