@@ -18,9 +18,10 @@ impl CliType {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum CliMode {
+    #[default]
     Default,
     Plan,
     DangerouslySkipPermissions,
@@ -39,12 +40,17 @@ pub fn find_binary(name: &str) -> Option<PathBuf> {
     for path in &paths {
         let p = PathBuf::from(path);
         if p.exists() {
+            tracing::info!(binary = name, path = %p.display(), "cli binary resolved");
             return Some(p);
         }
     }
 
     // Try PATH
-    which::which(name).ok()
+    if let Ok(p) = which::which(name) {
+        tracing::info!(binary = name, path = %p.display(), "cli binary resolved via PATH");
+        return Some(p);
+    }
+    None
 }
 
 pub fn resolve_command(

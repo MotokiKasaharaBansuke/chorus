@@ -152,6 +152,30 @@ impl ChildProcessTransport {
         Err(io::Error::last_os_error())
     }
 
+    /// Non-blocking exit-status check. Returns `Some(status)` if the child
+    /// has already exited, `None` otherwise. Used by `Session::start`'s
+    /// health check to catch CLIs that die immediately after spawn (missing
+    /// binary, bad argv, auth failure) before the reader_loop is set up.
+    ///
+    /// On `try_wait` errors we return `None` (assumed still alive); the
+    /// reader_loop's stdout EOF path will still surface the failure, just
+    /// with the lifetime of one read poll instead of the post-spawn poll.
+    pub fn try_check_exit(&mut self) -> Option<std::process::ExitStatus> {
+        let child = self.child.as_mut()?;
+        match child.try_wait() {
+            Ok(Some(status)) => Some(status),
+            Ok(None) => None,
+            Err(e) => {
+                // ECHILD or kernel-side staleness. Return None so the
+                // health-check side does not false-positive an "exited"
+                // verdict, but log so operators can investigate flaky
+                // SIGCHLD delivery in CI sandboxes etc.
+                tracing::warn!(pid = self.pid, "try_wait failed: {e}");
+                None
+            }
+        }
+    }
+
     /// Wait for the child to exit. Returns the exit status if the child has
     /// not been reaped yet. Idempotent — subsequent calls return `None` once
     /// the child handle has been consumed.
@@ -280,6 +304,35 @@ mod tests {
         t.close_send().await.unwrap();
         let err = t.send_line("late").await.expect_err("send after close");
         assert!(matches!(err, SendError::PeerClosed));
+    }
+
+    #[tokio::test]
+    async fn try_check_exit_returns_none_for_running_child() {
+        let mut t = ChildProcessTransport::spawn(
+            "/bin/sh",
+            &["-c".into(), "sleep 60".into()],
+            &cwd(),
+            &env(),
+        )
+        .expect("spawn /bin/sh sleep");
+        assert!(t.try_check_exit().is_none());
+        t.kill_group().expect("kill_group");
+    }
+
+    #[tokio::test]
+    async fn try_check_exit_returns_status_for_quick_exit() {
+        let mut t = ChildProcessTransport::spawn(
+            "/bin/sh",
+            &["-c".into(), "exit 7".into()],
+            &cwd(),
+            &env(),
+        )
+        .expect("spawn /bin/sh exit 7");
+        // Give the kernel a moment to deliver SIGCHLD; 50 ms is well below
+        // the 200 ms post-spawn health-check window in `Session::start`.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let status = t.try_check_exit().expect("child should have exited");
+        assert_eq!(status.code(), Some(7));
     }
 
     #[tokio::test]
