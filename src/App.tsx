@@ -688,7 +688,9 @@ function App() {
           quickLaunchMode={quickLaunchMode()}
           onQuickLaunchModeChange={setQuickLaunchMode}
           reviewCliType={settingsStore.reviewCliType}
-          onReviewCliTypeChange={(t) => settingsStore.setReviewCliType(t)}
+          onReviewCliTypeChange={(type) => settingsStore.setReviewCliType(type)}
+          engineDefault={settingsStore.engineDefault}
+          onEngineDefaultChange={(engine) => settingsStore.setEngineDefault(engine)}
           fontSize={fontSize()}
           onFontSizeChange={applyFontSize}
           onOpenWorktreeSettings={() => setIsWorktreeSettingsOpen(true)}
