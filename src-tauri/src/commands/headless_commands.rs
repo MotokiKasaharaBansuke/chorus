@@ -157,6 +157,30 @@ pub async fn spawn_headless(
     Ok(tab_id)
 }
 
+/// 256 KiB. Generous for any plausible user turn (Markdown + pasted code)
+/// while still preventing a runaway input from monopolising stdin or
+/// inflating the IPC payload past Tauri's serialization budget.
+///
+/// Must stay in sync with `MAX_INPUT_BYTES` in
+/// `src/components/headless/headless-input.tsx`. The frontend rejects
+/// over-budget input first; this constant is the defence-in-depth line
+/// when the renderer is bypassed or compromised.
+const MAX_USER_TEXT_BYTES: usize = 256 * 1024;
+
+/// Returns Ok(()) when `text` is within the per-message budget.
+/// Extracted so the budget can be exercised by unit tests without
+/// spinning up a Tauri runtime.
+fn check_user_text_bytes(text: &str) -> Result<(), AppError> {
+    if text.len() > MAX_USER_TEXT_BYTES {
+        return Err(AppError::PtyWriteFailed(format!(
+            "user text {} bytes exceeds {} bytes",
+            text.len(),
+            MAX_USER_TEXT_BYTES,
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WriteHeadlessInputRequest {
@@ -172,6 +196,7 @@ pub async fn write_headless_input(
     state: State<'_, HeadlessManager>,
     request: WriteHeadlessInputRequest,
 ) -> Result<String, AppError> {
+    check_user_text_bytes(&request.text)?;
     let session = state
         .get(&request.tab_id)
         .ok_or_else(|| AppError::PtyNotFound(request.tab_id.clone()))?;
@@ -278,4 +303,44 @@ pub async fn kill_headless(
     }
     drop(session);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_text_within_budget_is_accepted() {
+        check_user_text_bytes("hello").expect("ascii hello must pass");
+        check_user_text_bytes("").expect("empty text must pass");
+    }
+
+    #[test]
+    fn user_text_at_exact_budget_is_accepted() {
+        let text = "a".repeat(MAX_USER_TEXT_BYTES);
+        check_user_text_bytes(&text).expect("exact-cap input must pass");
+    }
+
+    #[test]
+    fn user_text_one_byte_over_budget_is_rejected() {
+        let text = "a".repeat(MAX_USER_TEXT_BYTES + 1);
+        let err = check_user_text_bytes(&text).expect_err("over-cap input must reject");
+        match err {
+            AppError::PtyWriteFailed(msg) => {
+                assert!(msg.contains("exceeds"), "{msg}");
+                assert!(msg.contains(&MAX_USER_TEXT_BYTES.to_string()), "{msg}");
+            }
+            other => panic!("expected PtyWriteFailed, got {other:?}"),
+        }
+    }
+
+    /// Multi-byte UTF-8 characters consume more `len()` bytes than chars,
+    /// so the byte-based budget is the right call. This pins the
+    /// behaviour: the cap means "256 KiB on the wire", not "256 K chars".
+    #[test]
+    fn user_text_budget_is_byte_based_not_char_based() {
+        // Each '日' is 3 UTF-8 bytes. 90_000 chars ≈ 270 KiB > MAX.
+        let text = "日".repeat(90_000);
+        assert!(check_user_text_bytes(&text).is_err());
+    }
 }
