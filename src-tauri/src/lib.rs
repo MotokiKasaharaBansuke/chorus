@@ -3,6 +3,7 @@ mod commands;
 mod config_path;
 mod error;
 mod fs;
+mod headless;
 mod ipc;
 mod pty;
 mod settings;
