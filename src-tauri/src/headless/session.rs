@@ -29,7 +29,7 @@ use parking_lot::Mutex;
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::child_transport::{ChildProcessTransport, SpawnError};
@@ -54,7 +54,32 @@ pub enum SessionStartError {
     Lock(SessionLockError),
     /// Child process could not be spawned.
     Spawn(SpawnError),
+    /// Child exited before completing the post-spawn health check.
+    HealthCheckFailed(String),
 }
+
+/// Reasons `Session::shutdown` can fail.
+///
+/// Distinct from `SendError` because the public surface should be able to
+/// tell "we successfully asked the reader task to wind down" from "the
+/// session was already torn down" without parsing strings.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ShutdownError {
+    /// Reader task already exited; the channel is closed. Idempotent
+    /// callers can treat this as success, but explicit handlers can
+    /// surface "double shutdown" diagnostics.
+    AlreadyClosed,
+}
+
+impl std::fmt::Display for ShutdownError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyClosed => write!(f, "session already closed"),
+        }
+    }
+}
+
+impl std::error::Error for ShutdownError {}
 
 impl std::fmt::Display for SessionStartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -62,6 +87,7 @@ impl std::fmt::Display for SessionStartError {
             Self::AlreadyLocked => write!(f, "session already running"),
             Self::Lock(e) => write!(f, "session lock failed: {e}"),
             Self::Spawn(e) => write!(f, "session spawn failed: {e}"),
+            Self::HealthCheckFailed(msg) => write!(f, "health check failed: {msg}"),
         }
     }
 }
@@ -178,7 +204,9 @@ impl Session {
         let lock = SessionLock::try_acquire(&tab_id)?.ok_or(SessionStartError::AlreadyLocked)?;
         let lock = Arc::new(lock);
 
-        let transport = ChildProcessTransport::spawn(&command, &args, &cwd, &extra_env)?;
+        let mut transport = ChildProcessTransport::spawn(&command, &args, &cwd, &extra_env)?;
+        post_spawn_health_check(&mut transport, SPAWN_HEALTH_CHECK_GRACE).await?;
+
         let killer = Arc::new(ProcessKiller::from_transport(&transport));
 
         let pending: Arc<Mutex<HashMap<RequestId, oneshot::Sender<RequestOutcome>>>> =
@@ -198,9 +226,9 @@ impl Session {
             reader_lock,
         ));
 
-        // Optimistic: tell the UI we are ready to take input. A real
-        // health-check (waiting for `system-init` from the CLI) lands in
-        // Phase 1c once we have fixture-driven coverage.
+        // Optimistic: tell the UI we are ready to take input. A stronger
+        // health-check (peeking stderr / waiting for `system-init`) lands
+        // in Phase 1d once we have fixture-driven coverage.
         emit(&app, HeadlessEvent::Status {
             tab_id: tab_id.clone(),
             status: SessionStatus::Idle,
@@ -208,6 +236,7 @@ impl Session {
             message: None,
         });
 
+        info!(tab_id = %tab_id, pid = killer.pid, "headless session started");
         Ok(Self { tab_id, cmd_tx, pending, killer, _lock: lock })
     }
 
@@ -216,10 +245,15 @@ impl Session {
         &self.tab_id
     }
 
-    /// Send a free-form user message. The returned `RequestId` is what the
-    /// caller uses to correlate the assistant's reply (or to wait on a
-    /// `oneshot::Receiver` if you need synchronous "did this turn finish"
-    /// semantics — see `register_pending`).
+    /// Send a free-form user message and return its newly-minted `RequestId`.
+    ///
+    /// Phase 1c does **not** track pending requests through to completion:
+    /// the only thing that resolves a pending entry today is `crash_pending`
+    /// at session teardown, so any insert during normal operation would
+    /// leak into the table indefinitely. The full pending lifecycle —
+    /// registration, message-id correlation, and cancel propagation —
+    /// lands in Phase 1d alongside the fixture-driven CLI integration
+    /// tests; until then this surface is intentionally simpler.
     pub async fn send_user_message(&self, text: String) -> Result<RequestId, SendError> {
         let request_id = Uuid::new_v4().to_string();
         let (responder, response) = oneshot::channel();
@@ -232,13 +266,6 @@ impl Session {
             Ok(Err(e)) => Err(e),
             Err(_) => Err(SendError::PeerClosed),
         }
-    }
-
-    /// Register a oneshot you want resolved when `request_id` completes,
-    /// cancels, or the agent crashes. Drops silently if the session has
-    /// already torn down.
-    pub fn register_pending(&self, request_id: RequestId, tx: oneshot::Sender<RequestOutcome>) {
-        self.pending.lock().insert(request_id, tx);
     }
 
     /// Send the protocol-level cancel envelope. Note: the actual semantics
@@ -254,10 +281,17 @@ impl Session {
     }
 
     /// Tell the reader task to wind down: close stdin, give the CLI a
-    /// chance to exit, then SIGTERM/SIGKILL the group. Idempotent — calling
-    /// after the reader has already exited is a no-op.
-    pub async fn shutdown(&self) {
-        let _ = self.cmd_tx.send(ReaderTaskCmd::Shutdown).await;
+    /// chance to exit, then SIGTERM/SIGKILL the group.
+    ///
+    /// Returns `Err(ShutdownError::AlreadyClosed)` when the reader task has
+    /// already exited. Callers that want idempotent semantics can simply
+    /// ignore this error, but having it surfaced lets diagnostics
+    /// distinguish "graceful shutdown sent" from "double shutdown".
+    pub async fn shutdown(&self) -> Result<(), ShutdownError> {
+        self.cmd_tx
+            .send(ReaderTaskCmd::Shutdown)
+            .await
+            .map_err(|_| ShutdownError::AlreadyClosed)
     }
 
     /// Synchronous emergency tear-down: send SIGKILL to the process group
@@ -321,6 +355,10 @@ async fn reader_loop(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(ReaderTaskCmd::SendUserText { request_id: _, text, responder }) => {
+                        // Phase 1d will register `request_id` into `pending`
+                        // here and resolve it on the matching message-complete
+                        // event. Today the discard is intentional — see the
+                        // module docstring for the lifecycle plan.
                         let payload = build_user_text_line(&text);
                         let result = transport.send_line(&payload).await;
                         let _ = responder.send(result);
@@ -408,6 +446,37 @@ fn crash_pending(
     });
 }
 
+/// Grace period for the post-spawn health check. A CLI that dies on argv
+/// (missing binary, bad flag, ENOEXEC, auth refusal) typically exits within
+/// tens of milliseconds. 200 ms is far below human-perceptible spawn
+/// latency yet long enough to catch the common failure modes.
+const SPAWN_HEALTH_CHECK_GRACE: Duration = Duration::from_millis(200);
+
+/// Catch CLIs that die immediately after spawn before the reader_loop is
+/// attached. Two probes — one before the sleep and one after — let us detect
+/// both "already gone before we got the handle" and "died during the grace
+/// window" without busy-waiting.
+///
+/// Failures are fatal: callers should not auto-restart, since a CLI that
+/// can't survive its own health check would just respawn-loop.
+async fn post_spawn_health_check(
+    transport: &mut ChildProcessTransport,
+    grace: Duration,
+) -> Result<(), SessionStartError> {
+    if let Some(status) = transport.try_check_exit() {
+        return Err(SessionStartError::HealthCheckFailed(format!(
+            "child exited before health check: {status:?}"
+        )));
+    }
+    tokio::time::sleep(grace).await;
+    if let Some(status) = transport.try_check_exit() {
+        return Err(SessionStartError::HealthCheckFailed(format!(
+            "child exited during health check: {status:?}"
+        )));
+    }
+    Ok(())
+}
+
 /// Stream-json envelope claude expects on stdin for a fresh user turn.
 fn build_user_text_line(text: &str) -> String {
     json!({
@@ -437,7 +506,8 @@ fn emit(app: &AppHandle, event: HeadlessEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::headless::validation::validate_cwd;
+    use crate::headless::validation::{sanitize_extra_env, validate_cwd};
+    use std::collections::HashMap;
 
     #[allow(dead_code)]
     fn config(tab_id: &str, command: &str, args: &[&str]) -> SessionConfig {
@@ -448,6 +518,15 @@ mod tests {
             cwd: validate_cwd("/tmp").unwrap(),
             extra_env: ValidatedEnv::empty(),
         }
+    }
+
+    fn cwd() -> ValidatedCwd {
+        validate_cwd("/tmp").unwrap()
+    }
+
+    fn empty_env() -> ValidatedEnv {
+        let (env, _) = sanitize_extra_env(HashMap::new());
+        env
     }
 
     /// `build_user_text_line` produces exactly one JSON object per call,
@@ -469,5 +548,54 @@ mod tests {
         // modules.
         let e = SessionStartError::AlreadyLocked;
         assert!(format!("{e}").contains("already running"));
+        let e = SessionStartError::HealthCheckFailed("boom".into());
+        assert!(format!("{e}").contains("health check"));
+    }
+
+    #[test]
+    fn shutdown_error_displays_already_closed() {
+        assert_eq!(
+            ShutdownError::AlreadyClosed.to_string(),
+            "session already closed",
+        );
+    }
+
+    /// `post_spawn_health_check` must fail when the child has already exited
+    /// before the reader loop is attached. We simulate this with `sh -c
+    /// "exit 9"` — the kernel reaps it within the grace window.
+    #[tokio::test]
+    async fn health_check_fails_for_quick_exit() {
+        let mut transport = ChildProcessTransport::spawn(
+            "/bin/sh",
+            &["-c".into(), "exit 9".into()],
+            &cwd(),
+            &empty_env(),
+        )
+        .expect("spawn /bin/sh exit 9");
+        let result = post_spawn_health_check(&mut transport, Duration::from_millis(150)).await;
+        match result {
+            Err(SessionStartError::HealthCheckFailed(msg)) => {
+                assert!(msg.contains("exited"), "{msg}");
+            }
+            other => panic!("expected HealthCheckFailed, got {other:?}"),
+        }
+    }
+
+    /// A long-running child must clear the health check.
+    #[tokio::test]
+    async fn health_check_passes_for_long_running_child() {
+        let mut transport = ChildProcessTransport::spawn(
+            "/bin/sh",
+            &["-c".into(), "sleep 60".into()],
+            &cwd(),
+            &empty_env(),
+        )
+        .expect("spawn /bin/sh sleep");
+        // Use a tiny grace window so the test runs quickly. Real callers
+        // pass `SPAWN_HEALTH_CHECK_GRACE`.
+        post_spawn_health_check(&mut transport, Duration::from_millis(50))
+            .await
+            .expect("long-running child should pass health check");
+        transport.kill_group().expect("kill_group");
     }
 }

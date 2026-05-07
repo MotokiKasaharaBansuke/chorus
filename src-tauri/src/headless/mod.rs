@@ -16,11 +16,17 @@
 //! * `session` — actor-style per-tab session, owns reader task + pending table
 //! * `manager` — process-wide registry of `Session`s
 //!
-//! ## Outstanding work (Phase 1c)
+//! ## Outstanding work (Phase 1d)
 //!
-//! * Health-check on spawn (no-op JSONL → wait for `system-init` within 5s)
+//! * **Pending request lifecycle**: registration, message-id correlation
+//!   so assistant replies resolve `RequestOutcome::Completed`, and cancel
+//!   propagation that resolves `Cancelled`. Phase 1c intentionally ships
+//!   without auto-registration to avoid an unbounded pending table.
 //! * `resume_headless` / `fork_headless` commands with stale-lock detection
+//! * Stronger spawn health-check: peek stderr inside the grace window so
+//!   "auth required" / "rate-limited at startup" messages fail fast
 //! * Fixture-driven integration tests in `tests/fixtures/claude/*.jsonl`
+//! * `RequestId` / `MessageId` / `ToolUseId` newtypes (currently aliases)
 
 pub mod child_transport;
 pub mod event;

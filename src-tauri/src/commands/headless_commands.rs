@@ -13,6 +13,7 @@ use serde::Deserialize;
 use tauri::{AppHandle, State};
 use tracing::warn;
 
+use crate::cli::registry::{resolve_command, CliMode, CliType};
 use crate::error::AppError;
 use crate::headless::manager::HeadlessManager;
 use crate::headless::session::{Session, SessionConfig, SessionStartError};
@@ -20,16 +21,21 @@ use crate::headless::validation::{
     sanitize_extra_env, validate_cwd, validate_model, validate_session_id, ValidationError,
 };
 
-/// Payload from the frontend for `spawn_headless`. Mirrors `pty_commands`
-/// where possible: `tabId`, `cwd`, `extraEnv`. `command` and `args` are
-/// pre-resolved by the frontend's CLI registry; we accept them as-is and
-/// re-validate the `cwd` here.
+/// Payload from the frontend for `spawn_headless`.
+///
+/// `cliType` and `mode` are the only knobs the frontend exposes for
+/// process selection; the actual binary path and base argv are resolved
+/// inside the backend via `cli::registry::resolve_command`. This closes
+/// the lateral-movement risk of accepting an arbitrary `command` string —
+/// a compromised renderer cannot point Chorus at `/usr/bin/curl` or any
+/// other binary outside the registered allowlist.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpawnHeadlessRequest {
     pub tab_id: String,
-    pub command: String,
-    pub args: Vec<String>,
+    pub cli_type: CliType,
+    #[serde(default)]
+    pub mode: CliMode,
     pub cwd: String,
     /// Optional model override. Forwarded only after validation; an invalid
     /// shape produces an error rather than being silently dropped, since
@@ -56,6 +62,9 @@ fn start_to_app(e: SessionStartError) -> AppError {
         }
         SessionStartError::Spawn(inner) => {
             AppError::PtySpawnFailed(format!("spawn: {inner}"))
+        }
+        SessionStartError::HealthCheckFailed(msg) => {
+            AppError::PtySpawnFailed(format!("health check: {msg}"))
         }
     }
 }
@@ -85,10 +94,20 @@ pub async fn spawn_headless(
         );
     }
 
+    // Resolve binary + base argv inside the backend so the renderer can
+    // never point us at an unregistered binary. `Shell` is excluded from
+    // the headless pipeline — it has no JSONL contract.
+    if matches!(request.cli_type, CliType::Shell) {
+        return Err(AppError::CliNotFound(
+            "Shell CliType is not supported by headless pipeline".into(),
+        ));
+    }
+    let (command, args) = resolve_command(&request.cli_type, &request.mode, &request.model)?;
+
     let config = SessionConfig {
         tab_id: request.tab_id.clone(),
-        command: request.command,
-        args: request.args,
+        command,
+        args,
         cwd,
         extra_env,
     };
@@ -109,7 +128,8 @@ pub struct WriteHeadlessInputRequest {
 }
 
 /// Send a user message to the running session. Returns the request id so
-/// the frontend can correlate the assistant reply.
+/// the frontend can correlate the assistant reply via the per-tab event
+/// channel.
 #[tauri::command]
 pub async fn write_headless_input(
     state: State<'_, HeadlessManager>,
@@ -161,8 +181,13 @@ pub async fn kill_headless(
     let session = state
         .remove(&request.tab_id)
         .ok_or_else(|| AppError::PtyNotFound(request.tab_id.clone()))?;
-    session.shutdown().await;
-    // Drop releases the SessionLock and lets `kill_on_drop` do final cleanup.
+    // Already-closed is not a hard error here — `kill_headless` is meant to
+    // be idempotent. Log at debug so the double-shutdown case is still
+    // observable in trace builds. Drop still releases the SessionLock and
+    // triggers `kill_on_drop` for the underlying child.
+    if let Err(e) = session.shutdown().await {
+        tracing::debug!(tab_id = %request.tab_id, "shutdown returned: {e}");
+    }
     drop(session);
     Ok(())
 }
