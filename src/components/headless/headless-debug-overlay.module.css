@@ -1,0 +1,124 @@
+.overlay {
+  position: fixed;
+  top: 60px;
+  right: 16px;
+  width: 480px;
+  height: calc(100vh - 96px);
+  background: var(--background, #1e1e1e);
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+  z-index: 1000;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border, #2a2a2a);
+  background: var(--header-bg, #232323);
+}
+
+.title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent, #4a9eff);
+  margin-right: auto;
+}
+
+.tabId {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 11px;
+  color: var(--muted, #888);
+}
+
+.actionButton {
+  background: transparent;
+  border: 1px solid var(--border, #2a2a2a);
+  color: var(--foreground, #ccc);
+  padding: 3px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.actionButton:hover {
+  background: var(--input-bg, #252525);
+}
+
+.actionButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.spawnArea {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+}
+
+.spawnRow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.spawnLabel {
+  font-size: 11px;
+  color: var(--muted, #888);
+  min-width: 64px;
+}
+
+.spawnInput {
+  flex: 1;
+  background: var(--input-bg, #252525);
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 3px;
+  color: inherit;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.spawnInput:focus {
+  outline: none;
+  border-color: var(--accent, #4a9eff);
+}
+
+.spawnError {
+  color: #d05858;
+  font-size: 11px;
+  padding: 0 16px 8px;
+}
+
+.spawnSelect {
+  background: var(--input-bg, #252525);
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 3px;
+  color: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  flex: 1;
+}
+
+.devBadge {
+  background: #d05858;
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 2px;
+  letter-spacing: 0.5px;
+}

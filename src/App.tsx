@@ -14,6 +14,7 @@ import { spawnPaneWithWorktree } from "./lib/worktree/spawn-pane";
 import { decideCloseAction } from "./lib/worktree/decide-close-action";
 import { MIN_PANE_PX, getAllPaneGroups, findPaneGroupContainingTab } from "./lib/layout/layout-tree";
 import { TerminalPanel } from "./components/terminal/terminal-panel";
+import { HeadlessDebugOverlay } from "./components/headless/headless-debug-overlay";
 import { Sidebar } from "./components/sidebar/sidebar";
 import { LayoutRenderer } from "./components/layout/layout-renderer";
 import { ContentPool } from "./components/layout/content-pool";
@@ -738,6 +739,10 @@ function App() {
           onClose={() => setShowUsageModal(false)}
         />
       </Show>
+
+      {/* Phase 2 preview: side-by-side headless agent panel.
+          DEV-only so release builds never see it. */}
+      {import.meta.env.DEV && <HeadlessDebugOverlay />}
     </div>
   );
 }
