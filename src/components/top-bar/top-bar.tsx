@@ -5,6 +5,7 @@ import { SidebarIcon, TerminalIcon, RefreshIcon } from "../icons";
 import { formatResetsIn, formatUtilization, USAGE_WARNING_THRESHOLD } from "../../lib/format/usage";
 import type { ZombieSessionInfo } from "../../lib/commands";
 import type { CliMode, ReviewCliType } from "../../types";
+import type { EngineDefault } from "../../types/settings";
 import type { RateLimitEntry } from "../../types/usage";
 import styles from "./top-bar.module.css";
 
@@ -18,6 +19,9 @@ interface TopBarProps {
   onQuickLaunchModeChange: (mode: CliMode) => void;
   reviewCliType: ReviewCliType;
   onReviewCliTypeChange: (type: ReviewCliType) => void;
+  /** Default execution engine for new Claude/Codex panes. */
+  engineDefault: EngineDefault;
+  onEngineDefaultChange: (engine: EngineDefault) => void;
   fontSize: number;
   onFontSizeChange: (size: number) => void;
   onOpenWorktreeSettings: () => void;
@@ -100,7 +104,7 @@ export function TopBar(props: TopBarProps) {
               <div class={`${styles.dropdownItem} ${props.quickLaunchMode === "dangerously-skip-permissions" ? styles.dropdownActive : ""}`}
                 onClick={() => { props.onQuickLaunchModeChange("dangerously-skip-permissions"); setShowSettings(false); }}>
                 Bypass
-                <span style={{ color: "#c74e39", "font-size": "10px", "margin-left": "4px" }}>DANGER</span>
+                <span class={`${styles.itemTag} ${styles.itemTagDanger}`}>DANGER</span>
               </div>
               <div class={styles.divider} />
               <div class={styles.dropdownTitle}>Review CLI</div>
@@ -108,6 +112,20 @@ export function TopBar(props: TopBarProps) {
                 onClick={() => { props.onReviewCliTypeChange("codex"); setShowSettings(false); }}>Codex</div>
               <div class={`${styles.dropdownItem} ${props.reviewCliType === "claude-code" ? styles.dropdownActive : ""}`}
                 onClick={() => { props.onReviewCliTypeChange("claude-code"); setShowSettings(false); }}>Claude Code</div>
+              <div class={styles.divider} />
+              {/* Engine: which execution backend new Claude/Codex panes use.
+                  Headless is opt-in until Phase 4 retires PTY entirely. */}
+              <div class={styles.dropdownTitle}>Engine</div>
+              <div class={`${styles.dropdownItem} ${props.engineDefault === "pty" ? styles.dropdownActive : ""}`}
+                onClick={() => { props.onEngineDefaultChange("pty"); setShowSettings(false); }}>
+                PTY
+                <span class={`${styles.itemTag} ${styles.itemTagMuted}`}>default</span>
+              </div>
+              <div class={`${styles.dropdownItem} ${props.engineDefault === "headless" ? styles.dropdownActive : ""}`}
+                onClick={() => { props.onEngineDefaultChange("headless"); setShowSettings(false); }}>
+                Headless
+                <span class={`${styles.itemTag} ${styles.itemTagWarn}`}>experimental</span>
+              </div>
               <div class={styles.divider} />
               <div
                 class={styles.dropdownItem}

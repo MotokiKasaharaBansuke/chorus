@@ -52,6 +52,47 @@ describe("useSettingsStore", () => {
     expect(saveSettingsMock.mock.calls[0][0]).toMatchObject({ reviewCliType: "codex" });
   });
 
+  it("setEngineDefault schedules a debounced saveSettings with the new engine", async () => {
+    loadSettingsMock.mockResolvedValue(DEFAULT_SETTINGS);
+    const store = useSettingsStore();
+    await store.initialize();
+    saveSettingsMock.mockClear();
+
+    expect(store.engineDefault).toBe("pty");
+    store.setEngineDefault("headless");
+    expect(store.engineDefault).toBe("headless");
+    expect(saveSettingsMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(260);
+    expect(saveSettingsMock).toHaveBeenCalledTimes(1);
+    expect(saveSettingsMock.mock.calls[0][0]).toMatchObject({ engineDefault: "headless" });
+  });
+
+  it("initialize() honours engineDefault when loadSettings supplies it", async () => {
+    loadSettingsMock.mockResolvedValue({
+      reviewCliType: "codex",
+      engineDefault: "headless",
+      worktree: DEFAULT_SETTINGS.worktree,
+    });
+
+    const store = useSettingsStore();
+    await store.initialize();
+
+    expect(store.engineDefault).toBe("headless");
+  });
+
+  it("initialize() falls back to pty when loadSettings omits engineDefault", async () => {
+    loadSettingsMock.mockResolvedValue({
+      reviewCliType: "codex",
+      worktree: DEFAULT_SETTINGS.worktree,
+    });
+
+    const store = useSettingsStore();
+    await store.initialize();
+
+    expect(store.engineDefault).toBe("pty");
+  });
+
   it("patchWorktree merges fields and persists", async () => {
     loadSettingsMock.mockResolvedValue(DEFAULT_SETTINGS);
     const store = useSettingsStore();
