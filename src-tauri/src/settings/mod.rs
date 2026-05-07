@@ -95,10 +95,21 @@ impl Default for WorktreeSettings {
     }
 }
 
+/// Default execution engine for Claude/Codex panes. Pre-Phase-3 sessions
+/// have no field, which deserializes to `Pty` for backwards compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EngineDefault {
+    #[default]
+    Pty,
+    Headless,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub review_cli_type: ReviewCliType,
+    pub engine_default: EngineDefault,
     pub worktree: WorktreeSettings,
 }
 
@@ -106,6 +117,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             review_cli_type: ReviewCliType::default(),
+            engine_default: EngineDefault::default(),
             worktree: WorktreeSettings::default(),
         }
     }
@@ -155,10 +167,35 @@ mod tests {
     }
 
     #[test]
+    fn engine_default_round_trips_kebab_case() {
+        let s = Settings { engine_default: EngineDefault::Headless, ..Default::default() };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"engineDefault\":\"headless\""), "{json}");
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.engine_default, EngineDefault::Headless);
+    }
+
+    #[test]
+    fn missing_engine_default_falls_back_to_pty() {
+        // Pre-Phase-3 settings.json — no `engineDefault` key.
+        let json = r#"{"reviewCliType":"codex"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.engine_default, EngineDefault::Pty);
+    }
+
+    #[test]
+    fn engine_default_explicit_pty_round_trips() {
+        let s = Settings::default();
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"engineDefault\":\"pty\""), "{json}");
+    }
+
+    #[test]
     fn missing_fields_fall_back_to_defaults() {
         let json = r#"{"reviewCliType":"claudeCode"}"#;
         let s: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(s.review_cli_type, ReviewCliType::ClaudeCode);
+        assert_eq!(s.engine_default, EngineDefault::Pty);
         assert_eq!(s.worktree, WorktreeSettings::default());
     }
 

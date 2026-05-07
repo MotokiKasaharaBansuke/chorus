@@ -28,17 +28,39 @@ export interface TabWorktree {
   repoRoot: string;
 }
 
+/**
+ * Which execution engine drives this pane.
+ *
+ * - `"pty"` — historical path: portable-pty + xterm.js scraping. Used by
+ *   shell tabs, the bottom terminal, and any claude-code/codex pane
+ *   created before the headless engine was opted into.
+ * - `"headless"` — Phase 1+ JSONL pipeline (`spawn_headless` etc).
+ *   Currently opted into via the engine feature flag, becomes default
+ *   in Phase 4 once PTY is removed.
+ *
+ * Default: `"pty"` (omitted field). Persisted sessions written before
+ * Phase 3 lack this field, so an absent value must round-trip as PTY.
+ */
+export type PaneKind = "pty" | "headless";
+
 export interface Tab {
   id: string;
   title: string;
   status: TabStatus;
   cliConfig: CliConfig;
+  /** Defaults to `"pty"` when absent (legacy session restore). */
+  paneKind?: PaneKind;
   filePath?: string;
   lastSessionId?: string; // last loaded past session (for restore)
   ptyId?: string; // current PTY ID (differs from tab.id after PTY respawn)
   contentOverride?: string; // inline content for read-only tabs (tool output)
   sourceTabId?: string; // tab that requested this review (for "send back" feature)
   worktree?: TabWorktree; // present when this pane was opened with auto-worktree
+}
+
+/** Resolve the effective pane kind, treating an absent field as `"pty"`. */
+export function effectivePaneKind(tab: Tab): PaneKind {
+  return tab.paneKind ?? "pty";
 }
 
 /** Resolve the effective PTY ID (falls back to tab.id when no respawn has occurred) */

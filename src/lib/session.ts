@@ -1,6 +1,8 @@
-import type { CliConfig, CliMode, ReviewCliType, SessionFlags, TabWorktree, LayoutNode, PaneGroupNode, SplitNode, Tab } from "../types";
+import type { CliConfig, CliMode, PaneKind, ReviewCliType, SessionFlags, TabWorktree, LayoutNode, PaneGroupNode, SplitNode, Tab } from "../types";
+import { effectivePaneKind } from "../types";
 import { saveSession, loadSession } from "./commands/session-commands";
 import { spawnPty, sessionFileExists, restoreSessionFile } from "./commands";
+import { spawnHeadless } from "./headless/commands";
 
 const SESSION_VERSION = 1;
 
@@ -11,6 +13,9 @@ interface SavedTab {
   cliConfig: CliConfig;
   lastSessionId?: string;
   worktree?: TabWorktree;
+  /** Engine the tab was running on at save time. Absent for legacy
+   *  sessions written before Phase 3 — interpreted as `"pty"`. */
+  paneKind?: PaneKind;
 }
 
 type SavedLayout = SavedSplit | SavedPaneGroup;
@@ -102,7 +107,19 @@ export function buildSavedSession(
 
   return {
     version: SESSION_VERSION,
-    tabs: tabs.map(t => ({ title: t.title, cliConfig: { ...t.cliConfig }, lastSessionId: t.lastSessionId, worktree: t.worktree })),
+    tabs: tabs.map((t) => {
+      // Persist `paneKind` only when non-default so legacy session.json
+      // files (no `paneKind` key) round-trip unchanged. Restore reads
+      // absent as `"pty"` via `effectivePaneKind`.
+      const kind = effectivePaneKind(t);
+      return {
+        title: t.title,
+        cliConfig: { ...t.cliConfig },
+        lastSessionId: t.lastSessionId,
+        worktree: t.worktree,
+        ...(kind === "headless" ? { paneKind: "headless" as const } : {}),
+      };
+    }),
     layout: savedLayout,
     sidebarOpen,
     sidebarWidth,
@@ -176,16 +193,44 @@ export async function restoreSession(data: string): Promise<RestoredWorkspace | 
     }),
   );
 
-  // Spawn PTYs for all tabs in parallel.
-  // When a tab has a lastSessionId, resume that session so the CLI
-  // restores conversation context from the previous app session.
+  // Spawn engines for all tabs in parallel.
+  //
+  // For PTY tabs: when a `lastSessionId` is present we resume the CLI's
+  // saved conversation so context survives the app restart.
+  //
+  // For headless tabs: spawn a new headless session, passing
+  // `resumeSessionAt` when available so Claude continues the previous
+  // conversation rather than starting fresh.
+  //
+  // Defence-in-depth: a hand-edited session.json that pairs `paneKind:
+  // "headless"` with a non-Claude/Codex `cliType` falls back to PTY here.
+  // The backend would also reject (`headless_commands.rs` rejects shell),
+  // but resolving it on the frontend keeps the user's tab alive in the
+  // legacy engine instead of silently failing the spawn.
   const spawnResults = await Promise.allSettled(
-    validatedTabs.map(t => {
+    validatedTabs.map((t) => {
+      const kind: PaneKind = t.paneKind ?? "pty";
+      const cwd = t.worktree?.path ?? t.cliConfig.workingDir ?? workingDir;
+      const cliType = t.cliConfig.cliType;
       const flags: SessionFlags | undefined = t.lastSessionId && t.lastSessionId.length > 0
         ? { resumeSessionAt: t.lastSessionId }
         : undefined;
+
+      if (kind === "headless" && (cliType === "claude-code" || cliType === "codex")) {
+        const tabId = `headless-${crypto.randomUUID()}`;
+        return spawnHeadless({
+          tabId,
+          cliType,
+          mode: t.cliConfig.mode,
+          cwd,
+          model: t.cliConfig.model,
+          ...(t.lastSessionId && t.lastSessionId.length > 0
+            ? { resumeSessionAt: t.lastSessionId }
+            : {}),
+        });
+      }
       return spawnPty(t.cliConfig, undefined, undefined, flags);
-    })
+    }),
   );
 
   const newIds: string[] = [];
@@ -203,6 +248,9 @@ export async function restoreSession(data: string): Promise<RestoredWorkspace | 
         cliConfig: { ...saved.cliConfig },
         lastSessionId: saved.lastSessionId,
         worktree: saved.worktree,
+        // Propagate `paneKind` only for non-PTY panes so legacy round-trip
+        // stays bit-identical for shell + PTY claude/codex tabs.
+        ...(saved.paneKind === "headless" ? { paneKind: "headless" as const } : {}),
       };
     } else {
       newIds.push(""); // placeholder for failed spawns
