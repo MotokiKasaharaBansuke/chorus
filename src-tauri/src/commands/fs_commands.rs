@@ -5,6 +5,7 @@ use tauri::{AppHandle, State};
 use crate::error::AppError;
 use crate::fs::tree::{self, FileNode};
 use crate::fs::watcher::WatcherState;
+use crate::headless::validation::is_valid_session_id;
 
 /// Validate that `path` is within the user's home directory.
 /// Blocks access to system directories like /etc, /var, etc.
@@ -81,11 +82,6 @@ fn home_dir() -> Result<std::path::PathBuf, AppError> {
 /// Claude Code converts both slashes and underscores to dashes.
 fn encode_project_dir(working_dir: &str) -> String {
     working_dir.replace('/', "-").replace('_', "-")
-}
-
-/// Validate that a session ID is UUID-like: alphanumeric + dashes, max 64 chars.
-fn is_valid_session_id(id: &str) -> bool {
-    id.len() <= 64 && !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 /// Build the path to the Claude Code project directory for a given working dir.

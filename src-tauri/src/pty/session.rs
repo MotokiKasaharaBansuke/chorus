@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::registry::CliType;
 use crate::error::AppError;
+use crate::headless::validation;
 use super::output_buffer::OutputBuffer;
 use super::stream_buffer::StreamBuffer;
 
@@ -65,7 +66,7 @@ impl PtySession {
         for arg in args { cmd.arg(arg); }
         cmd.cwd(working_dir);
         for (key, value) in std::env::vars() {
-            if !is_sensitive_env_key(&key) { cmd.env(key, value); }
+            if !validation::is_sensitive_env_key(&key) { cmd.env(key, value); }
         }
         cmd.env("TERM", "xterm-256color");
 
@@ -126,14 +127,9 @@ pub struct SessionFlags {
     pub session_mirror: bool,
 }
 
-/// Validate that a session ID is UUID-like: alphanumeric + dashes, max 64 chars.
-/// Rejects crafted values that could be interpreted as CLI flags (e.g. "--flag").
-fn is_valid_session_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && !id.starts_with('-') // reject values that look like CLI flags
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-}
+// `is_valid_session_id` lives in `crate::headless::validation`. We
+// re-export at the call sites via the module-qualified `validation::*`
+// path so the delegation is visible at every call.
 
 /// Extract a `session_id` field from a single Claude Code stream-json line.
 ///
@@ -143,7 +139,7 @@ fn is_valid_session_id(id: &str) -> bool {
 fn extract_session_id(line: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
     let id = value.get("session_id")?.as_str()?;
-    is_valid_session_id(id).then(|| id.to_string())
+    validation::is_valid_session_id(id).then(|| id.to_string())
 }
 
 /// Try to capture the session_id from a single stream-json line and latch
@@ -220,7 +216,7 @@ impl StreamSession {
         // Sanitize: strip resume_session_at if it fails UUID-like validation.
         // This prevents argument injection via crafted session IDs.
         let flags = SessionFlags {
-            resume_session_at: flags.resume_session_at.filter(|id| is_valid_session_id(id)),
+            resume_session_at: flags.resume_session_at.filter(|id| validation::is_valid_session_id(id)),
             ..flags
         };
         // When resume_session_at is set, the first message should use --resume
@@ -619,7 +615,7 @@ impl StreamSession {
         cmd.env("PATH", format!("{extra_paths}:{current_path}"));
 
         for (key, value) in std::env::vars() {
-            if key != "PATH" && !is_sensitive_env_key(&key) {
+            if key != "PATH" && !validation::is_sensitive_env_key(&key) {
                 cmd.env(&key, &value);
             }
         }
@@ -1021,37 +1017,17 @@ impl StreamSession {
     }
 }
 
-/// Returns true for env keys that should not be forwarded to child CLI processes.
-///
-/// Uses a suffix-based blocklist. AI coding assistants need `ANTHROPIC_API_KEY`,
-/// `OPENAI_API_KEY`, `GITHUB_TOKEN`, and similar vars to function, so those are
-/// intentionally allowed through. Only block credentials unrelated to their
-/// operation (DB passwords, private keys, connection strings, etc.).
-///
-/// Note: `_SECRET_KEY` is blocked to catch compound credentials like
-/// `STRIPE_SECRET_KEY` that would slip through a plain `_SECRET` suffix check.
-fn is_sensitive_env_key(key: &str) -> bool {
-    let upper = key.to_ascii_uppercase();
-    upper.ends_with("_PASSWORD")
-        || upper.ends_with("_PASSWD")
-        || upper.ends_with("_SECRET")
-        || upper.ends_with("_SECRET_KEY")
-        || upper.ends_with("_PRIVATE_KEY")
-        || upper.ends_with("_DSN")
-        || upper.ends_with("_CONNECTION_STRING")
-        || upper == "AWS_SECRET_ACCESS_KEY"
-        || upper == "AWS_SESSION_TOKEN"
-        || upper == "DATABASE_URL"
-        || upper == "POSTGRES_URL"
-        || upper == "MYSQL_URL"
-        || upper == "REDIS_URL"
-        || upper == "MONGODB_URI"
-}
+// `is_sensitive_env_key` lives in `crate::headless::validation`. The
+// headless variant is stricter — it blocks generic `*_TOKEN` names by
+// default and only allowlists `GITHUB_TOKEN` / `GH_TOKEN`. PTY callers
+// inherit that behaviour so a single env-forwarding policy applies across
+// both pipelines.
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_session_id, is_sensitive_env_key, try_latch_session_observation, SessionFlags, StreamSession};
+    use super::{extract_session_id, try_latch_session_observation, SessionFlags, StreamSession};
     use crate::cli::registry::CliType;
+    use crate::headless::validation::is_sensitive_env_key;
     use parking_lot::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 

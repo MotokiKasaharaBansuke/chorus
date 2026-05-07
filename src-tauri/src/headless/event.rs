@@ -183,6 +183,25 @@ pub enum HeadlessEvent {
     },
 }
 
+impl HeadlessEvent {
+    /// Tab id this event belongs to. Centralised here so callers do not
+    /// re-write the variant match every time they need to route by tab —
+    /// adding a new variant only requires updating this method, not every
+    /// emit site.
+    pub fn tab_id(&self) -> &str {
+        match self {
+            Self::MessageDelta { tab_id, .. }
+            | Self::MessageComplete { tab_id, .. }
+            | Self::MessageToolUse { tab_id, .. }
+            | Self::MessageToolResult { tab_id, .. }
+            | Self::Usage { tab_id, .. }
+            | Self::Status { tab_id, .. }
+            | Self::RateLimit { tab_id, .. }
+            | Self::Unknown { tab_id, .. } => tab_id,
+        }
+    }
+}
+
 /// 64 KiB. Anything an unknown event would carry beyond that is debug-only;
 /// the full byte stream is still in the line reader for diagnostics.
 pub const MAX_UNKNOWN_RAW_BYTES: usize = 64 * 1024;
@@ -370,6 +389,51 @@ mod tests {
                 assert_eq!(raw["limitBytes"], MAX_UNKNOWN_RAW_BYTES as u64);
             }
             other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tab_id_method_returns_owning_tab_for_each_variant() {
+        let cases: Vec<HeadlessEvent> = vec![
+            HeadlessEvent::MessageDelta {
+                tab_id: "t".into(),
+                message_id: "m".into(),
+                index: 0,
+                delta: "x".into(),
+            },
+            HeadlessEvent::MessageComplete {
+                tab_id: "t".into(),
+                message_id: "m".into(),
+                finish_reason: FinishReason::Stop,
+            },
+            HeadlessEvent::MessageToolUse {
+                tab_id: "t".into(),
+                message_id: "m".into(),
+                tool_use_id: "tu".into(),
+                name: "Edit".into(),
+                input: json!({}),
+            },
+            HeadlessEvent::MessageToolResult {
+                tab_id: "t".into(),
+                tool_use_id: "tu".into(),
+                output: "".into(),
+                is_error: false,
+            },
+            HeadlessEvent::Usage { tab_id: "t".into(), usage: UsageReport::default() },
+            HeadlessEvent::Status {
+                tab_id: "t".into(),
+                status: SessionStatus::Idle,
+                error_kind: None,
+                message: None,
+            },
+            HeadlessEvent::RateLimit {
+                tab_id: "t".into(),
+                detail: RateLimitDetail { reset_at: None, retry_after_ms: 0 },
+            },
+            unknown_event("t".into(), json!({})),
+        ];
+        for event in cases {
+            assert_eq!(event.tab_id(), "t");
         }
     }
 

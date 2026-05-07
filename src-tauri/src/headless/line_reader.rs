@@ -1,5 +1,10 @@
 //! Bounded line reader for JSONL streams.
 //!
+//! `split_lines_bounded` is a synchronous helper kept around for fixture-
+//! driven tests in Phase 1c.
+
+#![allow(dead_code)]
+//!
 //! Wraps `tokio_util::codec::LinesCodec` so a malicious or buggy CLI cannot
 //! OOM Chorus by emitting an unbounded "line". Each record returned is either
 //! a complete UTF-8 `Line` or a `Violation` describing why the upstream

@@ -1,5 +1,10 @@
 //! Secret redaction for log output.
 //!
+//! `contains_secret` is a public test/debug helper; it has no production
+//! caller yet.
+
+#![allow(dead_code)]
+//!
 //! Applied at the `tracing` boundary only — never to user-facing event
 //! payloads. The user wants to see their own tool output verbatim; logs are
 //! the place where credentials accidentally end up in shared bug reports.
