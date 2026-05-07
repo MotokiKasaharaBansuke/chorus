@@ -137,13 +137,16 @@ const PENDING_REQUEST_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Internal book-keeping for `pending`. Bundles the resolver with the
 /// timestamp used by the TTL sweep.
-struct PendingEntry {
+/// `pub(crate)` for regression test access only. Production callers
+/// must go through the `Session` API — touching the table directly
+/// risks bypassing the lifecycle guarantees `Session` holds.
+pub(crate) struct PendingEntry {
     responder: oneshot::Sender<RequestOutcome>,
-    created_at: Instant,
+    pub(crate) created_at: Instant,
 }
 
 impl PendingEntry {
-    fn new(responder: oneshot::Sender<RequestOutcome>) -> Self {
+    pub(crate) fn new(responder: oneshot::Sender<RequestOutcome>) -> Self {
         Self { responder, created_at: Instant::now() }
     }
 
@@ -161,7 +164,8 @@ impl PendingEntry {
     }
 }
 
-type PendingTable = HashMap<RequestId, PendingEntry>;
+/// `pub(crate)` for regression test access only — see `PendingEntry`.
+pub(crate) type PendingTable = HashMap<RequestId, PendingEntry>;
 
 /// Drop entries whose receiver was dropped or whose TTL elapsed. Cheap
 /// enough to run on every `send_user_message` because the table never
@@ -574,7 +578,9 @@ fn detect_message_complete(value: &serde_json::Value) -> Option<RequestOutcome> 
 /// `request_id` ↔ `message_id` correlation. It works because Chorus
 /// serialises user turns through the reader task — there is at most one
 /// in-flight request per session at a given moment in normal operation.
-fn resolve_oldest_pending(
+/// `pub(crate)` for regression test access only — production code goes
+/// through `handle_record`, which owns the timing of when this fires.
+pub(crate) fn resolve_oldest_pending(
     pending: &Arc<Mutex<PendingTable>>,
     outcome: RequestOutcome,
 ) {

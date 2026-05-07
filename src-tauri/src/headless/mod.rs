@@ -32,6 +32,8 @@ pub mod child_transport;
 pub mod event;
 pub mod line_reader;
 pub mod manager;
+#[cfg(test)]
+mod parallel_regression;
 pub mod redaction;
 pub mod session;
 pub mod system;
