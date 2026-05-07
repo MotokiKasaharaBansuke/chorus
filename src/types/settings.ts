@@ -30,8 +30,22 @@ export interface WorktreeSettings {
   onPaneClose: OnPaneClose;
 }
 
+/**
+ * Default execution engine for newly-spawned claude-code / codex panes.
+ *
+ * - `"pty"` — historical path; safe and unchanged.
+ * - `"headless"` — Phase 1+ JSONL engine. Opt-in until Phase 4 retires
+ *   PTY entirely. Shell tabs and the bottom terminal are unaffected.
+ */
+export type EngineDefault = "pty" | "headless";
+
 export interface Settings {
   reviewCliType: ReviewCliType;
+  /**
+   * Engine preference for newly-created Claude/Codex panes. Absent in
+   * old persisted settings — treated as `"pty"` for backwards compat.
+   */
+  engineDefault?: EngineDefault;
   worktree: WorktreeSettings;
 }
 
@@ -65,5 +79,6 @@ export const DEFAULT_WORKTREE_SETTINGS: WorktreeSettings = {
 
 export const DEFAULT_SETTINGS: Settings = {
   reviewCliType: "codex",
+  engineDefault: "pty",
   worktree: DEFAULT_WORKTREE_SETTINGS,
 };
