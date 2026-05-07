@@ -11,8 +11,13 @@ mod worktree;
 
 use tauri::Manager;
 
-use commands::{fs_commands, image_commands, pty_commands, session_commands, settings_commands, worktree_commands};
+use commands::{
+    fs_commands, headless_commands, image_commands, pty_commands, session_commands,
+    settings_commands, worktree_commands,
+};
 use fs::watcher::WatcherState;
+use headless::manager::HeadlessManager;
+use headless::system::raise_fd_limit_to_target;
 use pty::manager::PtyManager;
 
 /// Parse --directory flag from command line args, fall back to CWD
@@ -49,13 +54,19 @@ pub fn run() {
         tracing::info!(directory = dir, "Launched with directory");
     }
 
+    if let Err(e) = raise_fd_limit_to_target() {
+        tracing::warn!("could not raise RLIMIT_NOFILE: {e}");
+    }
+
     let pty_manager = PtyManager::new();
+    let headless_manager = HeadlessManager::default();
     let watcher_state = WatcherState::new();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(pty_manager)
+        .manage(headless_manager)
         .manage(watcher_state)
         .setup(|app| {
             ipc::start(app.handle().clone());
@@ -74,6 +85,10 @@ pub fn run() {
             pty_commands::kill_zombie_sessions,
             pty_commands::list_zombie_sessions,
             pty_commands::kill_session_by_id,
+            headless_commands::spawn_headless,
+            headless_commands::write_headless_input,
+            headless_commands::cancel_headless_message,
+            headless_commands::kill_headless,
             fs_commands::list_directory,
             fs_commands::read_file,
             fs_commands::watch_directory,
@@ -105,11 +120,13 @@ pub fn run() {
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
-                let state = window.state::<PtyManager>();
-                state.kill_all();
+                let pty = window.state::<PtyManager>();
+                pty.kill_all();
+                let headless = window.state::<HeadlessManager>();
+                headless.kill_all();
                 let _ = image_commands::cleanup_temp_images();
                 ipc::cleanup();
-                tracing::info!("All PTY sessions killed on window close");
+                tracing::info!("All sessions killed on window close");
             }
         })
         .run(tauri::generate_context!())

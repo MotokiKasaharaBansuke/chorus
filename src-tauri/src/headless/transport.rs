@@ -1,5 +1,10 @@
 //! Transport abstraction over the JSONL pipe between Chorus and the CLI.
 //!
+//! `MockTransport` is exclusively used by tests. It lives outside `cfg(test)`
+//! so other modules' tests can import it without a special build flag.
+
+#![allow(dead_code)]
+//!
 //! `JsonlTransport` factors out "talk to a child process over stdin/stdout"
 //! so session lifecycle, request/response correlation, and reconnect logic
 //! can be unit-tested without spawning real `claude` or `codex` processes.

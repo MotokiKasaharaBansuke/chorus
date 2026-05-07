@@ -3,6 +3,12 @@
 //! Argument injection is the primary threat model: any CLI flag synthesized
 //! from session state, settings, or third-party JSONL must pass through this
 //! module before reaching `tokio::process::Command::arg`.
+//!
+//! `ValidatedCwd::into_path_buf` is part of the public API even though no
+//! production caller consumes it yet — the spawn site holds onto the
+//! `&Path` view. Phase 1c's worktree integration will need ownership.
+
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -64,13 +70,40 @@ pub fn is_valid_session_id(id: &str) -> bool {
     validate_session_id(id).is_ok()
 }
 
+/// A working directory that has cleared `validate_cwd`.
+///
+/// Newtype so spawn sites cannot accept a raw `&Path` — they must take a
+/// `&ValidatedCwd`, which can only be constructed via `validate_cwd`. The
+/// "canonicalize after lock acquisition" contract for symlink resolution is
+/// the only remaining caller obligation; everything else is enforced here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedCwd(PathBuf);
+
+impl ValidatedCwd {
+    /// Borrow the inner absolute path.
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Consume into the owned `PathBuf`.
+    pub fn into_path_buf(self) -> PathBuf {
+        self.0
+    }
+}
+
+impl AsRef<Path> for ValidatedCwd {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
 /// Validate that `cwd` is an absolute path with no `..` components and no
 /// flag-like prefix.
 ///
 /// Existence is **not** checked here — the caller may want to create the
 /// directory (e.g. worktree post-create). Symlink resolution is left to the
 /// spawn site, which should canonicalize after lock acquisition.
-pub fn validate_cwd(cwd: &str) -> Result<PathBuf, ValidationError> {
+pub fn validate_cwd(cwd: &str) -> Result<ValidatedCwd, ValidationError> {
     if cwd.is_empty() {
         return Err(ValidationError::EmptyCwd);
     }
@@ -84,7 +117,7 @@ pub fn validate_cwd(cwd: &str) -> Result<PathBuf, ValidationError> {
     if path.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err(ValidationError::CwdHasParentTraversal);
     }
-    Ok(path.to_path_buf())
+    Ok(ValidatedCwd(path.to_path_buf()))
 }
 
 /// Models accept letters, digits, `-`, `.`, `:`, `_`, `/`, up to 128 chars,
@@ -185,14 +218,55 @@ pub fn validate_env_entry(key: &str, value: &str) -> Result<(), ValidationError>
     Ok(())
 }
 
+/// An env map that has cleared `validate_env_entry` for every entry.
+///
+/// Newtype so spawn sites cannot accept a raw `HashMap` — the public
+/// constructor is `sanitize_extra_env` (or `ValidatedEnv::empty` for
+/// callers that genuinely need an explicit empty map). `Default` is
+/// gated to `cfg(test)` so production code cannot create one by accident
+/// and bypass the validation pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(Default))]
+pub struct ValidatedEnv(HashMap<String, String>);
+
+impl ValidatedEnv {
+    /// Construct an explicitly-empty validated env. Use only when the
+    /// caller has decided that no extra env should be forwarded — this is
+    /// **not** a way to bypass `sanitize_extra_env`.
+    pub fn empty() -> Self {
+        Self(HashMap::new())
+    }
+
+    /// Iterate over the validated `(key, value)` pairs.
+    pub fn iter(&self) -> std::collections::hash_map::Iter<'_, String, String> {
+        self.0.iter()
+    }
+
+    /// Number of entries.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// True iff no entries.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Borrow the inner map.
+    pub fn as_map(&self) -> &HashMap<String, String> {
+        &self.0
+    }
+}
+
 /// Filter a caller-supplied env map to a safe subset for child processes.
 ///
-/// Returns the rejected keys so the caller can surface a single warning event
-/// instead of failing the whole spawn — the philosophy here is "drop and
-/// continue", since AI CLIs typically tolerate a missing optional var.
+/// Returns a `ValidatedEnv` and the rejected keys so the caller can surface
+/// a single warning event instead of failing the whole spawn — the
+/// philosophy here is "drop and continue", since AI CLIs typically tolerate
+/// a missing optional var.
 pub fn sanitize_extra_env(
     env: HashMap<String, String>,
-) -> (HashMap<String, String>, Vec<String>) {
+) -> (ValidatedEnv, Vec<String>) {
     let mut accepted = HashMap::with_capacity(env.len());
     let mut rejected = Vec::new();
     for (k, v) in env {
@@ -202,7 +276,7 @@ pub fn sanitize_extra_env(
             rejected.push(k);
         }
     }
-    (accepted, rejected)
+    (ValidatedEnv(accepted), rejected)
 }
 
 #[cfg(test)]
@@ -263,7 +337,8 @@ mod tests {
     #[test]
     fn cwd_accepts_absolute_clean_path() {
         let cwd = validate_cwd("/Users/dev/project").unwrap();
-        assert_eq!(cwd, PathBuf::from("/Users/dev/project"));
+        assert_eq!(cwd.as_path(), Path::new("/Users/dev/project"));
+        assert_eq!(cwd.into_path_buf(), PathBuf::from("/Users/dev/project"));
     }
 
     #[test]
@@ -404,9 +479,22 @@ mod tests {
         input.insert("BAD-KEY".into(), "x".into());
 
         let (accepted, rejected) = sanitize_extra_env(input);
-        assert!(accepted.contains_key("ANTHROPIC_API_KEY"));
-        assert!(!accepted.contains_key("DB_PASSWORD"));
-        assert!(!accepted.contains_key("BAD-KEY"));
+        let map = accepted.as_map();
+        assert!(map.contains_key("ANTHROPIC_API_KEY"));
+        assert!(!map.contains_key("DB_PASSWORD"));
+        assert!(!map.contains_key("BAD-KEY"));
+        assert_eq!(accepted.len(), 1);
         assert_eq!(rejected.len(), 2);
+    }
+
+    #[test]
+    fn validated_env_iter_yields_accepted_pairs_only() {
+        let mut input = HashMap::new();
+        input.insert("ANTHROPIC_API_KEY".into(), "sk-ant-xxx".into());
+        input.insert("DB_PASSWORD".into(), "leaked".into());
+        let (accepted, _rejected) = sanitize_extra_env(input);
+        let mut keys: Vec<_> = accepted.iter().map(|(k, _)| k.clone()).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["ANTHROPIC_API_KEY".to_string()]);
     }
 }
