@@ -3,8 +3,8 @@
 //! Naming mirrors the existing PTY commands (`spawn_pty`, `write_pty`,
 //! `kill_pty`) so the verb set stays uniform: `spawn_headless`,
 //! `write_headless_input`, `cancel_headless_message`, `kill_headless`.
-//! Phase 1c will add `resume_headless` / `fork_headless` once stale-lock
-//! detection lands.
+//! Resume / fork are folded into `spawn_headless` (the `resumeSessionAt`
+//! and `forkSession` fields). Codex resume support follows in Phase 1e.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -1,10 +1,11 @@
 //! Per-tab session: owns the child process, the reader task, and the
 //! pending-request table.
 //!
-//! Several public surfaces (`RequestOutcome::Completed`/`Cancelled`,
-//! `Session::register_pending`) are wired into the type system but not
-//! yet consumed by the reader loop — Phase 1c will hook them up once we
-//! have CLI fixtures to drive the message-id correlation.
+//! `RequestOutcome::Completed` is wired into the type system but not yet
+//! consumed by the reader loop — Phase 1e will hook it up once we have
+//! CLI fixtures to drive message-id correlation deterministically. The
+//! other variants (`Cancelled`, `AgentCrashed`) are already resolved
+//! today by `cancel_pending` and `crash_pending` respectively.
 
 #![allow(dead_code)]
 //!
@@ -117,8 +118,9 @@ pub struct PendingRequest {
 #[derive(Debug, PartialEq, Eq)]
 pub enum RequestOutcome {
     /// Assistant produced a `message-complete` event for this request.
-    /// Phase 1d wires this from `crash_pending`/`cancel`; full message-id
-    /// correlation lives in Phase 1e once we have CLI fixtures.
+    /// Resolution by `crash_pending`/`cancel_pending` is wired today;
+    /// full message-id correlation against assistant `message-complete`
+    /// events lands in Phase 1e once we have CLI fixtures.
     Completed,
     /// Cancel succeeded (control JSON was acknowledged or the message
     /// stream ended early as a result).
@@ -277,7 +279,7 @@ impl Session {
 
         // Optimistic: tell the UI we are ready to take input. A stronger
         // health-check (peeking stderr / waiting for `system-init`) lands
-        // in Phase 1d once we have fixture-driven coverage.
+        // in Phase 1e once we have fixture-driven coverage.
         emit(&app, HeadlessEvent::Status {
             tab_id: tab_id.clone(),
             status: SessionStatus::Idle,
@@ -435,10 +437,11 @@ async fn reader_loop(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(ReaderTaskCmd::SendUserText { request_id: _, text, responder }) => {
-                        // Phase 1d will register `request_id` into `pending`
-                        // here and resolve it on the matching message-complete
-                        // event. Today the discard is intentional — see the
-                        // module docstring for the lifecycle plan.
+                        // Phase 1e will resolve `request_id` against the
+                        // matching `message-complete` event so the pending
+                        // entry fires `Completed`. Today registration is
+                        // already done by `Session::send_user_message`; this
+                        // task just needs to forward the user line.
                         let payload = build_user_text_line(&text);
                         let result = transport.send_line(&payload).await;
                         let _ = responder.send(result);
