@@ -50,6 +50,7 @@ use tracing::{debug, info, warn};
 
 use super::child_transport::ChildProcessTransport;
 use super::event::{ErrorKind, HeadlessEvent, RequestId, SessionStatus, TabId};
+use super::image::InlineImage;
 use super::line_reader::{LineRecord, LineViolation};
 use super::parser::StreamParser;
 use super::system::{SessionLock, SessionLockError};
@@ -217,7 +218,11 @@ impl Session {
     /// Rejects with `SendError::Busy` if a previous turn is still in
     /// flight — the caller must wait for the next `Status::Idle` /
     /// `Status::Error` event before retrying.
-    pub async fn send_user_message(&self, text: String) -> Result<RequestId, SendError> {
+    pub async fn send_user_message(
+        &self,
+        text: String,
+        images: Vec<InlineImage>,
+    ) -> Result<RequestId, SendError> {
         // Hold the in-flight guard across the entire body so the
         // busy-check and slot reservation are atomic. The body has no
         // `.await` (every step — `Command::spawn`, `tokio::spawn`,
@@ -260,7 +265,7 @@ impl Session {
             in_flight: self.in_flight.clone(),
             turn_id,
         };
-        let handle = tokio::spawn(run_turn(transport, text, ctx));
+        let handle = tokio::spawn(run_turn(transport, text, images, ctx));
 
         *guard = Some(InFlightTurn { turn_id, killer, handle });
 
@@ -317,11 +322,16 @@ impl Drop for Session {
 
 // --- run_turn split into 3 stages: send → drain → finish ---
 
-async fn run_turn(mut transport: ChildProcessTransport, text: String, ctx: TurnContext) {
+async fn run_turn(
+    mut transport: ChildProcessTransport,
+    text: String,
+    images: Vec<InlineImage>,
+    ctx: TurnContext,
+) {
     let pid = transport.pid();
     debug!(tab_id = %ctx.tab_id, turn_id = ctx.turn_id, pid, "turn started");
 
-    if let Err(detail) = send_user_turn(&mut transport, &text).await {
+    if let Err(detail) = send_user_turn(&mut transport, &text, &images).await {
         finish_turn(transport, ctx, TurnOutcome::SendFailed(detail)).await;
         return;
     }
@@ -344,8 +354,12 @@ enum TurnOutcome {
     StdoutIo(String),
 }
 
-async fn send_user_turn(t: &mut ChildProcessTransport, text: &str) -> Result<(), String> {
-    let payload = build_user_text_line(text);
+async fn send_user_turn(
+    t: &mut ChildProcessTransport,
+    text: &str,
+    images: &[InlineImage],
+) -> Result<(), String> {
+    let payload = build_user_message(text, images);
     if let Err(e) = t.send_line(&payload).await {
         return Err(format!("stdin write failed: {e}"));
     }
@@ -521,12 +535,29 @@ fn capture_session_id(
 }
 
 /// Stream-json envelope claude expects on stdin for a fresh user turn.
-fn build_user_text_line(text: &str) -> String {
+/// Builds a `content[]` with one `text` block followed by one `image`
+/// block per attachment. Empty `text` is dropped so a turn can be
+/// "image only" without sending a useless empty text block.
+fn build_user_message(text: &str, images: &[InlineImage]) -> String {
+    let mut content = Vec::with_capacity(images.len() + 1);
+    if !text.is_empty() {
+        content.push(json!({ "type": "text", "text": text }));
+    }
+    for img in images {
+        content.push(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": img.media_type,
+                "data": img.data,
+            },
+        }));
+    }
     json!({
         "type": "user",
         "message": {
             "role": "user",
-            "content": [{ "type": "text", "text": text }],
+            "content": content,
         },
     })
     .to_string()
@@ -567,13 +598,47 @@ mod tests {
     }
 
     #[test]
-    fn build_user_text_line_shapes_envelope() {
-        let line = build_user_text_line("hello");
+    fn build_user_message_text_only() {
+        let line = build_user_message("hello", &[]);
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["type"], "user");
         assert_eq!(v["message"]["role"], "user");
         assert_eq!(v["message"]["content"][0]["type"], "text");
         assert_eq!(v["message"]["content"][0]["text"], "hello");
+        assert_eq!(v["message"]["content"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn build_user_message_with_images_emits_image_blocks_after_text() {
+        let images = vec![
+            InlineImage { media_type: "image/png".into(), data: "AAAA".into() },
+            InlineImage { media_type: "image/jpeg".into(), data: "BBBB".into() },
+        ];
+        let line = build_user_message("look:", &images);
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let content = v["message"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "AAAA");
+        assert_eq!(content[2]["source"]["media_type"], "image/jpeg");
+    }
+
+    #[test]
+    fn build_user_message_image_only_drops_empty_text() {
+        // An "image only" turn (user pastes a screenshot, hits Enter
+        // with no text) must not send a useless empty text block —
+        // claude rejects empty text content.
+        let images = vec![InlineImage {
+            media_type: "image/png".into(),
+            data: "X".into(),
+        }];
+        let line = build_user_message("", &images);
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let content = v["message"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "image");
     }
 
     #[test]

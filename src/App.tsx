@@ -233,7 +233,15 @@ function App() {
     ipcUnlistenRef = await listen<{ dir: string; cliType?: string }>("mlm-open-dir", async (event) => {
       const { dir, cliType: rawCliType } = event.payload;
       if (!dir || !dir.startsWith("/")) return;
-      const cliType: "claude-code" | "codex" = rawCliType === "codex" ? "codex" : "claude-code";
+      // Honor an explicit `claude-code` / `codex` from the IPC payload;
+      // otherwise fall back to the user's default-CLI setting so the
+      // bare `mlm <dir>` invocation respects their preference.
+      const cliType: "claude-code" | "codex" =
+        rawCliType === "codex"
+          ? "codex"
+          : rawCliType === "claude-code"
+            ? "claude-code"
+            : settingsStore.defaultCliType;
       const config: CliConfig = { cliType, mode: quickLaunchMode(), workingDir: dir };
       try {
         await spawnAndOpenTab(config, { splitIntoNewPane: true });
@@ -704,6 +712,8 @@ function App() {
           onReviewCliTypeChange={(type) => settingsStore.setReviewCliType(type)}
           engineDefault={settingsStore.engineDefault}
           onEngineDefaultChange={(engine) => settingsStore.setEngineDefault(engine)}
+          defaultCliType={settingsStore.defaultCliType}
+          onDefaultCliTypeChange={(cli) => settingsStore.setDefaultCliType(cli)}
           fontSize={fontSize()}
           onFontSizeChange={applyFontSize}
           onOpenWorktreeSettings={() => setIsWorktreeSettingsOpen(true)}
@@ -786,6 +796,7 @@ function App() {
 
       <CliSettingsModal
         isOpen={isModalOpen()}
+        defaultCliType={settingsStore.defaultCliType}
         defaultWorkingDir={sidebarStore.workingDir}
         onSubmit={(config) => { setIsModalOpen(false); handleNewTab(config); }}
         onCancel={() => setIsModalOpen(false)}

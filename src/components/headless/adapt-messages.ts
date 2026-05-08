@@ -46,11 +46,14 @@ export function adaptHeadlessMessages(
 
 function adaptMessage(msg: HeadlessMessage): ChatMessage {
   if (msg.role === "user") {
-    return {
-      role: "user",
-      blocks: [{ kind: "text", text: msg.text }],
-      isStreaming: false,
-    };
+    const blocks: ChatBlock[] = [];
+    if (msg.text) blocks.push({ kind: "text", text: msg.text });
+    if (msg.images) {
+      for (const img of msg.images) {
+        blocks.push({ kind: "image", path: img.path, name: img.name });
+      }
+    }
+    return { role: "user", blocks, isStreaming: false };
   }
 
   const blocks: ChatBlock[] = [];

@@ -142,6 +142,11 @@ export type HeadlessMessage =
       id: RequestId;
       text: string;
       sentAt: number;
+      /** Image attachments sent with this turn, so a re-render after
+       *  page reload can show the user-side thumbnails. The backend
+       *  has long since base64-inlined them and forgotten the path,
+       *  so this is the only frontend record. */
+      images?: ReadonlyArray<{ path: string; name: string }>;
     }
   | {
       role: "assistant";

@@ -27,6 +27,7 @@
 
 pub mod child_transport;
 pub mod event;
+pub mod image;
 pub mod line_reader;
 pub mod manager;
 #[cfg(test)]

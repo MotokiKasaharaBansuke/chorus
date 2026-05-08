@@ -187,6 +187,20 @@ pub async fn spawn_headless(
 /// when the renderer is bypassed or compromised.
 const MAX_USER_TEXT_BYTES: usize = 256 * 1024;
 
+/// Hard cap on attachments per turn. Bounds the peak memory footprint
+/// while we read every attachment up-front (`load_attachment` keeps
+/// the base64 payload alive in `Vec<InlineImage>` until the
+/// stream-json line is built and written). 16 attachments × 20 MiB ×
+/// 4/3 base64 expansion ≈ 425 MiB worst case — survivable; lifting
+/// the cap would let a compromised renderer OOM the chorus process.
+///
+/// Note: this is the **chorus-side** memory budget, not the
+/// Anthropic API's per-message limit (which is higher). Once the
+/// per-image streaming write planned in Phase 1i lands, the cap can
+/// safely move up to 32 or 64 — the bound will then be largest
+/// single image, not the sum.
+const MAX_IMAGES_PER_TURN: usize = 16;
+
 /// Returns Ok(()) when `text` is within the per-message budget.
 /// Extracted so the budget can be exercised by unit tests without
 /// spinning up a Tauri runtime.
@@ -201,11 +215,28 @@ fn check_user_text_bytes(text: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Same shape as `check_user_text_bytes` but for the attachment count.
+/// Reject early so a poisoned renderer cannot make us alloc megabytes
+/// of `Vec<ImageAttachment>` before any validation runs.
+fn check_image_count(count: usize) -> Result<(), AppError> {
+    if count > MAX_IMAGES_PER_TURN {
+        return Err(AppError::PtyWriteFailed(format!(
+            "too many image attachments: {count} (max {MAX_IMAGES_PER_TURN})",
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WriteHeadlessInputRequest {
     pub tab_id: String,
     pub text: String,
+    /// Optional image attachments. Each entry is validated against the
+    /// `/tmp/chorus-images/` allowlist and inlined as a base64 image
+    /// content block in the stream-json envelope claude expects.
+    #[serde(default)]
+    pub images: Vec<crate::headless::image::ImageAttachment>,
 }
 
 /// Send a user message to the running session. Returns the request id so
@@ -217,11 +248,20 @@ pub async fn write_headless_input(
     request: WriteHeadlessInputRequest,
 ) -> Result<String, AppError> {
     check_user_text_bytes(&request.text)?;
+    check_image_count(request.images.len())?;
     let session = state
         .get(&request.tab_id)
         .ok_or_else(|| AppError::PtyNotFound(request.tab_id.clone()))?;
+    // Validate + load each image before touching the backend session.
+    // Rejecting at this boundary means a poisoned attachment cannot
+    // half-spawn a child or leave the frontend in `thinking` state
+    // waiting for a turn that never starts.
+    let mut inline_images = Vec::with_capacity(request.images.len());
+    for att in &request.images {
+        inline_images.push(crate::headless::image::load_attachment(att)?);
+    }
     let request_id = session
-        .send_user_message(request.text)
+        .send_user_message(request.text, inline_images)
         .await
         .map_err(|e| AppError::PtyWriteFailed(format!("{e}")))?;
     // Per-turn model: the spawn + drain runs on a background tokio task,
@@ -346,6 +386,25 @@ mod tests {
             AppError::PtyWriteFailed(msg) => {
                 assert!(msg.contains("exceeds"), "{msg}");
                 assert!(msg.contains(&MAX_USER_TEXT_BYTES.to_string()), "{msg}");
+            }
+            other => panic!("expected PtyWriteFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_count_within_cap_is_accepted() {
+        check_image_count(0).expect("zero images");
+        check_image_count(MAX_IMAGES_PER_TURN).expect("exactly the cap");
+    }
+
+    #[test]
+    fn image_count_one_over_cap_is_rejected() {
+        let err = check_image_count(MAX_IMAGES_PER_TURN + 1)
+            .expect_err("over-cap count must reject");
+        match err {
+            AppError::PtyWriteFailed(msg) => {
+                assert!(msg.contains("too many"), "{msg}");
+                assert!(msg.contains(&MAX_IMAGES_PER_TURN.to_string()), "{msg}");
             }
             other => panic!("expected PtyWriteFailed, got {other:?}"),
         }

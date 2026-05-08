@@ -1,20 +1,44 @@
-import { createSignal, Show } from "solid-js";
+import { createEffect, createSignal, on, Show } from "solid-js";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { CliConfig, CliMode, CliType } from "../../types";
+import type { DefaultCliType } from "../../types/settings";
 import styles from "./cli-settings-modal.module.css";
 
 interface CliSettingsModalProps {
   isOpen: boolean;
   defaultWorkingDir: string;
+  /** User's preferred AI-assistant CLI from settings. Pre-selects the
+   *  CLI radio so the modal opens at the user's expected default
+   *  rather than the historical hard-coded "claude-code". Typed as
+   *  `DefaultCliType` (not `CliType`) so a caller cannot pre-select
+   *  `"shell"` or `"file-viewer"` — a user choosing those does it
+   *  explicitly each time. */
+  defaultCliType?: DefaultCliType;
   onSubmit: (config: CliConfig) => void;
   onCancel: () => void;
 }
 
 export function CliSettingsModal(props: CliSettingsModalProps) {
-  const [cliType, setCliType] = createSignal<CliType>("claude-code");
+  const [cliType, setCliType] = createSignal<CliType>(
+    props.defaultCliType ?? "claude-code",
+  );
   const [mode, setMode] = createSignal<CliMode>("default");
   const [workingDir, setWorkingDir] = createSignal(props.defaultWorkingDir);
   const [showDangerConfirm, setShowDangerConfirm] = createSignal(false);
+
+  // Reset the CLI selection to the user's current default every time
+  // the modal opens. The modal stays mounted across opens (its
+  // visibility is gated by `<Show when={props.isOpen}>` below), so
+  // without this effect a setting change made *between* opens would
+  // not flow into the radio state.
+  createEffect(
+    on(
+      () => props.isOpen,
+      (isOpen) => {
+        if (isOpen) setCliType(props.defaultCliType ?? "claude-code");
+      },
+    ),
+  );
 
   function handleModeChange(newMode: CliMode) {
     if (newMode === "dangerously-skip-permissions") {
