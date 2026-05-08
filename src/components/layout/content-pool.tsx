@@ -92,7 +92,7 @@ function PooledContent(props: { tab: Tab; isActive: () => boolean; onClose: () =
     if (effectivePaneKind(props.tab) === "headless") {
       return <HeadlessPanel tab={props.tab} />;
     }
-    return <ChatPanel tab={props.tab} isActive={props.isActive()} />;
+    return <ChatPanel tab={props.tab} isActive={props.isActive} />;
   }
-  return <TerminalPanel tab={props.tab} isActive={props.isActive()} />;
+  return <TerminalPanel tab={props.tab} isActive={props.isActive} />;
 }

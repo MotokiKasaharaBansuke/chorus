@@ -58,7 +58,10 @@ export function useThrottledUpdate(options: ThrottledUpdateOptions) {
       if (trailingTimerId === null) {
         trailingTimerId = setTimeout(() => {
           trailingTimerId = null;
-          if (options.isDisposed()) return;
+          if (options.isDisposed() || !options.isActive()) {
+            deferredMessages = null;
+            return;
+          }
           if (deferredMessages) {
             lastAppliedAt = performance.now();
             const pending = deferredMessages;

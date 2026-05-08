@@ -6,7 +6,7 @@ import styles from "./terminal-panel.module.css";
 
 interface TerminalPanelProps {
   tab: Tab;
-  isActive: boolean;
+  isActive: () => boolean;
 }
 
 export function TerminalPanel(props: TerminalPanelProps) {

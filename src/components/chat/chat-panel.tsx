@@ -37,7 +37,7 @@ interface ChatPanelProps {
    *  usage calculation) while still processing stream events so the parser
    *  stays current. On becoming active, the latest state is flushed to the UI
    *  in one pass. This avoids wasted work for hidden tabs in multi-tab groups. */
-  isActive: boolean;
+  isActive: () => boolean;
 }
 
 export function ChatPanel(props: ChatPanelProps) {
@@ -251,7 +251,7 @@ export function ChatPanel(props: ChatPanelProps) {
   // pass after ContentPool's appendChild moves them into a visible pane.
   let prevIsActive = false;
   createEffect(() => {
-    const now = props.isActive;
+    const now = props.isActive();
     if (now && !prevIsActive) {
       const latest = parser.getMessages();
       if (latest.length > 0) {
@@ -310,7 +310,7 @@ export function ChatPanel(props: ChatPanelProps) {
   // rates starves the main thread with 20 panes streaming simultaneously.
   const throttle = useThrottledUpdate({
     onApply: applyUpdate,
-    isActive: () => props.isActive,
+    isActive: props.isActive,
     isDisposed: () => unmounted,
   });
   const unsubUpdate = parser.onUpdate(throttle.handleUpdate);
