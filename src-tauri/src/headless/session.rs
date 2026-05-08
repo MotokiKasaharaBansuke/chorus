@@ -476,12 +476,17 @@ fn process_jsonl_line(line: &str, ctx: &TurnContext, parser: &mut StreamParser) 
         );
     }
 
-    if let Some(detail) = extract_inline_error(&value) {
-        // Stash the most recent in-stream error so `finish_turn` can
-        // surface it when the child eventually exits non-zero. Codex
-        // emits the API's reason via `error` / `turn.failed`; without
-        // this capture the user just sees `exit code 1`.
-        *ctx.captured_error.lock() = Some(detail);
+    if let Some(message) = extract_inline_error(&value) {
+        // First-write-wins. Codex emits `error` (specific API reason
+        // like "model not supported") *before* `turn.failed` (a
+        // generic "turn failed" wrapper), so blindly overwriting the
+        // slot would discard the more useful detail. The downstream
+        // contract is "show the user the first explanation we got";
+        // only the absence of any prior message lets a later one win.
+        let mut slot = ctx.captured_error.lock();
+        if slot.is_none() {
+            *slot = Some(message);
+        }
     }
 
     let typed = parser.translate(&value, &ctx.tab_id);
@@ -641,21 +646,40 @@ fn extract_upstream_session_id(value: &serde_json::Value) -> Option<&str> {
 /// Shapes handled:
 /// - `{"type":"error","message":"..."}` (codex direct)
 /// - `{"type":"turn.failed","error":{"message":"..."}}`
+///
+/// Codex sometimes wraps the human text in a JSON-encoded string —
+/// `"{\"detail\":\"The 'gpt-5.1' model is not supported...\"}"` —
+/// so the raw `message` would render as escape-laden noise. We
+/// peel one layer if it parses as `{"detail": "..."}`; anything
+/// else is returned verbatim.
 fn extract_inline_error(value: &serde_json::Value) -> Option<String> {
     let obj = value.as_object()?;
     let envelope_type = obj.get("type").and_then(|v| v.as_str())?;
-    match envelope_type {
-        "error" => obj
-            .get("message")
-            .and_then(|v| v.as_str())
-            .map(String::from),
+    let raw = match envelope_type {
+        "error" => obj.get("message").and_then(|v| v.as_str())?,
         "turn.failed" => obj
             .get("error")
             .and_then(|v| v.get("message"))
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        _ => None,
+            .and_then(|v| v.as_str())?,
+        _ => return None,
+    };
+    Some(unwrap_json_detail(raw))
+}
+
+/// If `raw` parses as `{"detail": "..."}` (as codex sometimes
+/// produces), return the inner string; otherwise return the raw
+/// payload. Bounded to a single shallow `from_str` so a malformed
+/// nested document cannot recurse or allocate without limit.
+fn unwrap_json_detail(raw: &str) -> String {
+    if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(raw) {
+        if let Some(detail) = obj.get("detail").and_then(|v| v.as_str()) {
+            return detail.to_string();
+        }
+        if let Some(message) = obj.get("message").and_then(|v| v.as_str()) {
+            return message.to_string();
+        }
     }
+    raw.to_string()
 }
 
 /// Stream-json envelope claude expects on stdin for a fresh user turn.
@@ -1032,5 +1056,60 @@ mod tests {
     fn extract_inline_error_returns_none_for_unrelated_lines() {
         assert!(extract_inline_error(&serde_json::json!({"type":"turn.started"})).is_none());
         assert!(extract_inline_error(&serde_json::json!({"foo":"bar"})).is_none());
+    }
+
+    /// Pins the first-write-wins guard in `process_jsonl_line`.
+    /// Codex emits a specific `error` envelope before a generic
+    /// `turn.failed` wrapper — without this rule the user would see
+    /// the wrapper text instead of the actionable reason.
+    #[test]
+    fn captured_error_slot_first_write_wins() {
+        let slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let observe = |msg: &str| {
+            let mut g = slot.lock();
+            if g.is_none() {
+                *g = Some(msg.to_string());
+            }
+        };
+        observe("first specific");
+        observe("second generic");
+        assert_eq!(slot.lock().as_deref(), Some("first specific"));
+    }
+
+    /// Codex sometimes JSON-encodes the human reason inside the
+    /// `message` field. We peel one layer so the user sees the raw
+    /// sentence instead of `{"detail": "..."}` with escape noise.
+    #[test]
+    fn extract_inline_error_unwraps_codex_json_detail() {
+        let v = serde_json::json!({
+            "type": "error",
+            "message": "{\"detail\":\"The 'gpt-5.1-codex-max' model is not supported when using Codex with a ChatGPT account.\"}",
+        });
+        let unwrapped = extract_inline_error(&v).expect("error envelope must yield message");
+        assert_eq!(
+            unwrapped,
+            "The 'gpt-5.1-codex-max' model is not supported when using Codex with a ChatGPT account.",
+        );
+    }
+
+    #[test]
+    fn extract_inline_error_passes_through_non_json_messages() {
+        let v = serde_json::json!({"type": "error", "message": "rate limited"});
+        assert_eq!(extract_inline_error(&v).as_deref(), Some("rate limited"));
+    }
+
+    #[test]
+    fn extract_inline_error_passes_through_json_without_detail_key() {
+        // A future codex shape might emit `{"reason":"..."}` etc.
+        // We only know how to unwrap `detail` / `message`; other
+        // shapes round-trip as-is so the user still sees something.
+        let v = serde_json::json!({
+            "type": "error",
+            "message": "{\"reason\":\"too many requests\"}",
+        });
+        assert_eq!(
+            extract_inline_error(&v).as_deref(),
+            Some("{\"reason\":\"too many requests\"}"),
+        );
     }
 }
