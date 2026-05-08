@@ -18,6 +18,11 @@ import type {
   TabId,
   UsageReport,
 } from "../types/headless";
+import {
+  clearPersistedSession,
+  loadPersistedSession,
+  savePersistedSession,
+} from "./headless-persist";
 
 interface HeadlessState {
   sessions: Record<TabId, HeadlessSessionState>;
@@ -32,14 +37,63 @@ const ZERO_USAGE: UsageReport = {
 
 const [store, setStore] = createStore<HeadlessState>({ sessions: {} });
 
+/**
+ * Per-tab debounced writer to localStorage. Coalesces a burst of
+ * events (text deltas during streaming) into a single save 200 ms
+ * after the last mutation, so we do not run the JSON serialiser on
+ * every keystroke-sized delta.
+ */
+const PERSIST_DEBOUNCE_MS = 200;
+const persistTimers = new Map<TabId, ReturnType<typeof setTimeout>>();
+
+function persistTab(tabId: TabId): void {
+  const existing = persistTimers.get(tabId);
+  if (existing !== undefined) clearTimeout(existing);
+  // Use the bare global `setTimeout` (not `window.setTimeout`) so the
+  // module loads in the Node-based vitest environment too — the unit
+  // tests run without a browser global.
+  const handle = setTimeout(() => {
+    persistTimers.delete(tabId);
+    const session = store.sessions[tabId];
+    if (session) savePersistedSession(session);
+  }, PERSIST_DEBOUNCE_MS);
+  persistTimers.set(tabId, handle);
+}
+
+/**
+ * Flush every pending debounced save synchronously. Call this from
+ * the window `beforeunload` handler so a `Cmd+Q` or system shutdown
+ * does not lose the last 200 ms of message-delta or the freshest
+ * `upstreamSessionId` — without it, the next launch would resume the
+ * conversation against a stale claude session id and the histories
+ * would diverge.
+ */
+function flushAllPersist(): void {
+  for (const [tabId, handle] of persistTimers) {
+    clearTimeout(handle);
+    const session = store.sessions[tabId];
+    if (session) savePersistedSession(session);
+  }
+  persistTimers.clear();
+}
+
 function ensureSession(tabId: TabId): void {
   if (store.sessions[tabId]) return;
-  setStore("sessions", tabId, {
+  // Hydrate from localStorage so a freshly-mounted panel after app
+  // restart shows prior messages immediately, before the first
+  // backend event arrives. `loadPersistedSession` returns `null` for
+  // tabs we have not seen before — falling through to a clean state.
+  const persisted = loadPersistedSession(tabId);
+  setStore(
+    "sessions",
     tabId,
-    status: "idle",
-    messages: [],
-    usage: { ...ZERO_USAGE },
-  });
+    persisted ?? {
+      tabId,
+      status: "idle",
+      messages: [],
+      usage: { ...ZERO_USAGE },
+    },
+  );
 }
 
 /** Register a session row with default state. Idempotent. */
@@ -47,8 +101,17 @@ function registerSession(tabId: TabId): void {
   ensureSession(tabId);
 }
 
-/** Drop a session and its accumulated state. */
+/** Drop a session and its accumulated state. Also clears persisted
+ *  storage so a closed tab does not occupy localStorage indefinitely
+ *  and cancels any in-flight debounced save so a zombie writer
+ *  cannot resurrect the entry after removal. */
 function removeSession(tabId: TabId): void {
+  const pending = persistTimers.get(tabId);
+  if (pending !== undefined) {
+    clearTimeout(pending);
+    persistTimers.delete(tabId);
+  }
+  clearPersistedSession(tabId);
   setStore(
     produce((s) => {
       delete s.sessions[tabId];
@@ -66,14 +129,28 @@ function appendUserMessage(tabId: TabId, requestId: string, text: string): void 
   ensureSession(tabId);
   setStore(
     produce((s) => {
-      s.sessions[tabId]?.messages.push({
+      const session = s.sessions[tabId];
+      if (!session) return;
+      session.messages.push({
         role: "user",
         id: requestId,
         text,
         sentAt: Date.now(),
       });
+      // Optimistic transition to "thinking" so the input gates
+      // immediately, before the real `Status::Thinking` event arrives
+      // through the Tauri IPC channel. Without this, a quick double
+      // Enter races the channel and the second send hits the backend
+      // `SendError::Busy` guard. Only flip from idle — never override
+      // an existing error/running state.
+      if (session.status === "idle") {
+        session.status = "thinking";
+        session.errorKind = undefined;
+        session.errorMessage = undefined;
+      }
     }),
   );
+  persistTab(tabId);
 }
 
 /**
@@ -90,6 +167,10 @@ function applyEvent(event: HeadlessEvent): void {
       const session = s.sessions[event.tabId];
       if (!session) return;
       switch (event.type) {
+        case "session-id": {
+          session.upstreamSessionId = event.sessionId;
+          break;
+        }
         case "message-delta": {
           const last = session.messages[session.messages.length - 1];
           if (last?.role === "assistant" && last.id === event.messageId) {
@@ -163,6 +244,11 @@ function applyEvent(event: HeadlessEvent): void {
       }
     }),
   );
+  // `unknown` is the only event we don't bother persisting after —
+  // its payload is opaque and wouldn't change rendered state anyway.
+  if (event.type !== "unknown") {
+    persistTab(event.tabId);
+  }
 }
 
 /**
@@ -170,6 +256,8 @@ function applyEvent(event: HeadlessEvent): void {
  * use `removeSession` per tab.
  */
 function _reset(): void {
+  for (const handle of persistTimers.values()) clearTimeout(handle);
+  persistTimers.clear();
   setStore({ sessions: {} });
 }
 
@@ -185,6 +273,7 @@ export function useHeadlessStore() {
     removeSession,
     appendUserMessage,
     applyEvent,
+    flushAllPersist,
     _reset,
   } as const;
 }

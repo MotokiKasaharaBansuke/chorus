@@ -283,6 +283,18 @@ pub enum HeadlessEvent {
     #[serde(rename_all = "camelCase")]
     RateLimit { tab_id: TabId, detail: RateLimitDetail },
 
+    /// Upstream `claude` session id captured from a `system.init`
+    /// envelope. Emitted at most once per turn (whenever the id changes
+    /// in the backend `Session`). Frontend persists it so a later
+    /// app restart can pass it back as `resumeSessionAt`, letting
+    /// claude continue the conversation rather than start fresh.
+    #[serde(rename = "session-id")]
+    #[serde(rename_all = "camelCase")]
+    SessionIdCaptured {
+        tab_id: TabId,
+        session_id: String,
+    },
+
     /// Forward-compat envelope for events the CLI emits that we do not
     /// recognize. Frontend logs and ignores.
     ///
@@ -312,6 +324,7 @@ impl HeadlessEvent {
             | Self::Usage { tab_id, .. }
             | Self::Status { tab_id, .. }
             | Self::RateLimit { tab_id, .. }
+            | Self::SessionIdCaptured { tab_id, .. }
             | Self::Unknown { tab_id, .. } => tab_id,
         }
     }

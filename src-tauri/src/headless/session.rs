@@ -1,44 +1,60 @@
-//! Per-tab session: owns the child process, the reader task, and the
-//! pending-request table.
+//! Per-tab session built around the **per-turn spawn** model.
 //!
-//! `RequestOutcome::Completed` is wired into the type system but not yet
-//! consumed by the reader loop — Phase 1e will hook it up once we have
-//! CLI fixtures to drive message-id correlation deterministically. The
-//! other variants (`Cancelled`, `AgentCrashed`) are already resolved
-//! today by `cancel_pending` and `crash_pending` respectively.
+//! ## Why per-turn instead of persistent
+//!
+//! Earlier phases assumed `claude -p --input-format stream-json` could
+//! act as a long-lived bidirectional pipe. The shipped CLI does not work
+//! that way: it consumes a single user message, emits the assistant turn
+//! plus a `result` envelope, then exits. We therefore spawn a fresh
+//! child for every `send_user_message`, write the user line, close
+//! stdin so claude actually starts responding, drain stdout to the
+//! frontend, and let the child exit. Continuity is preserved with
+//! `--session-id <uuid>` on the first turn and `--resume <session-id>`
+//! on subsequent turns. The session id is extracted from the upstream
+//! `system.init` event and persisted on the `Session`.
+//!
+//! ## What this owns
+//!
+//! - the spawn template (binary, base args, cwd, env)
+//! - the upstream session id (after the first turn) and the
+//!   one-shot `--fork-session` toggle
+//! - the in-flight child handle for `kill_now` / `Drop`
+//! - the per-tab on-disk lock (`SessionLock`) preventing two Chorus
+//!   processes from racing on the same headless tab
+//!
+//! ## Trust boundary
+//!
+//! The upstream JSONL stream is **not** trusted. `capture_session_id`
+//! re-validates every observed `session_id` against the same allowlist
+//! the IPC entry point uses, so a poisoned line cannot smuggle a flag
+//! like `--dangerously-skip-permissions` into the next turn's argv.
+//!
+//! ## Concurrency
+//!
+//! Exactly one turn runs per session at a time. `send_user_message`
+//! returns `SendError::Busy` while the previous turn is still alive,
+//! and the in-flight slot is cleared by the run task only when the
+//! turn that owns it observes its own exit — this prevents a delayed
+//! cleanup from clobbering a freshly-spawned successor.
 
 #![allow(dead_code)]
-//!
-//! Architecture is actor-style:
-//!
-//! * `Session::start` spawns the CLI, takes the `SessionLock`, and forks a
-//!   tokio task that owns the `ChildProcessTransport` end-to-end. That
-//!   reader task is the **only** thing that calls `transport.next_record`,
-//!   so framing state is never shared across `await` points by accident.
-//! * The public surface (`send_user_message`, `cancel_current`, `shutdown`,
-//!   `kill`) talks to the reader task through a bounded `mpsc` channel. No
-//!   public method holds a `tokio` lock across `await`.
-//! * `pending` maps `requestId` → `oneshot::Sender` so that if the child
-//!   crashes mid-turn the reader task can fail every in-flight request
-//!   instead of leaving the UI stuck on "thinking".
 
-use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use super::child_transport::{ChildProcessTransport, SpawnError};
+use super::child_transport::ChildProcessTransport;
 use super::event::{ErrorKind, HeadlessEvent, RequestId, SessionStatus, TabId};
 use super::line_reader::{LineRecord, LineViolation};
+use super::parser::StreamParser;
 use super::system::{SessionLock, SessionLockError};
 use super::transport::{JsonlTransport, SendError};
-use super::validation::{ValidatedCwd, ValidatedEnv};
-
+use super::validation::{is_valid_session_id, ValidatedCwd, ValidatedEnv};
 
 /// Reasons `Session::start` can fail.
 #[derive(Debug)]
@@ -47,42 +63,13 @@ pub enum SessionStartError {
     AlreadyLocked,
     /// Lock file system call failed.
     Lock(SessionLockError),
-    /// Child process could not be spawned.
-    Spawn(SpawnError),
-    /// Child exited before completing the post-spawn health check.
-    HealthCheckFailed(String),
 }
-
-/// Reasons `Session::shutdown` can fail.
-///
-/// Distinct from `SendError` because the public surface should be able to
-/// tell "we successfully asked the reader task to wind down" from "the
-/// session was already torn down" without parsing strings.
-#[derive(Debug, PartialEq, Eq)]
-pub enum ShutdownError {
-    /// Reader task already exited; the channel is closed. Idempotent
-    /// callers can treat this as success, but explicit handlers can
-    /// surface "double shutdown" diagnostics.
-    AlreadyClosed,
-}
-
-impl std::fmt::Display for ShutdownError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::AlreadyClosed => write!(f, "session already closed"),
-        }
-    }
-}
-
-impl std::error::Error for ShutdownError {}
 
 impl std::fmt::Display for SessionStartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AlreadyLocked => write!(f, "session already running"),
             Self::Lock(e) => write!(f, "session lock failed: {e}"),
-            Self::Spawn(e) => write!(f, "session spawn failed: {e}"),
-            Self::HealthCheckFailed(msg) => write!(f, "health check failed: {msg}"),
         }
     }
 }
@@ -95,85 +82,6 @@ impl From<SessionLockError> for SessionStartError {
     }
 }
 
-impl From<SpawnError> for SessionStartError {
-    fn from(e: SpawnError) -> Self {
-        Self::Spawn(e)
-    }
-}
-
-/// Handle returned by `Session::send_user_message`.
-///
-/// `id` is the Chorus-side request id (suitable for logging or for
-/// matching against CLI events); `outcome` resolves once the turn
-/// completes, cancels, or the agent crashes. Drop the struct entirely if
-/// the caller does not need completion semantics — the session GC will
-/// reclaim the pending entry without further action.
-#[derive(Debug)]
-pub struct PendingRequest {
-    pub id: RequestId,
-    pub outcome: oneshot::Receiver<RequestOutcome>,
-}
-
-/// Outcome a pending request resolves to.
-#[derive(Debug, PartialEq, Eq)]
-pub enum RequestOutcome {
-    /// Assistant produced a `message-complete` event for this request.
-    /// Resolution by `crash_pending`/`cancel_pending` is wired today;
-    /// full message-id correlation against assistant `message-complete`
-    /// events lands in Phase 1e once we have CLI fixtures.
-    Completed,
-    /// Cancel succeeded (control JSON was acknowledged or the message
-    /// stream ended early as a result).
-    Cancelled,
-    /// Child crashed before this request could complete.
-    AgentCrashed,
-}
-
-/// Maximum time a pending entry stays in the table before being garbage
-/// collected. 5 minutes is well past the longest realistic Claude turn,
-/// so a still-live entry past this point almost certainly indicates a
-/// caller that dropped the receiver and forgot about the request.
-const PENDING_REQUEST_TTL: Duration = Duration::from_secs(5 * 60);
-
-/// Internal book-keeping for `pending`. Bundles the resolver with the
-/// timestamp used by the TTL sweep.
-/// `pub(crate)` for regression test access only. Production callers
-/// must go through the `Session` API — touching the table directly
-/// risks bypassing the lifecycle guarantees `Session` holds.
-pub(crate) struct PendingEntry {
-    responder: oneshot::Sender<RequestOutcome>,
-    pub(crate) created_at: Instant,
-}
-
-impl PendingEntry {
-    pub(crate) fn new(responder: oneshot::Sender<RequestOutcome>) -> Self {
-        Self { responder, created_at: Instant::now() }
-    }
-
-    /// Should this entry be evicted on the next sweep?
-    fn is_stale(&self) -> bool {
-        // Caller dropped its `Receiver` — nobody is going to await this
-        // outcome, so resolving would be a no-op. Drop the entry now to
-        // free the table.
-        if self.responder.is_closed() {
-            return true;
-        }
-        // TTL backstop in case a caller held a `Receiver` past any
-        // reasonable turn duration.
-        self.created_at.elapsed() > PENDING_REQUEST_TTL
-    }
-}
-
-/// `pub(crate)` for regression test access only — see `PendingEntry`.
-pub(crate) type PendingTable = HashMap<RequestId, PendingEntry>;
-
-/// Drop entries whose receiver was dropped or whose TTL elapsed. Cheap
-/// enough to run on every `send_user_message` because the table never
-/// grows past the count of in-flight turns (~1 per tab in practice).
-fn sweep_pending(table: &mut PendingTable) {
-    table.retain(|_, entry| !entry.is_stale());
-}
-
 /// Configuration for `Session::start`.
 pub struct SessionConfig {
     pub tab_id: TabId,
@@ -181,50 +89,21 @@ pub struct SessionConfig {
     pub args: Vec<String>,
     pub cwd: ValidatedCwd,
     pub extra_env: ValidatedEnv,
+    /// Upstream session id to resume from on the very first turn
+    /// (`resume_session_at` from the IPC request). When `None`, the
+    /// first turn mints a fresh UUID. Subsequent turns always use the
+    /// id observed in the previous turn's `system.init` event.
+    pub initial_session_id: Option<String>,
+    /// Append `--fork-session` on the first resume turn. Ignored when
+    /// `initial_session_id` is `None`; that combination is rejected at
+    /// the IPC boundary.
+    pub fork_session: bool,
 }
 
-/// Commands the public surface enqueues for the reader task.
-///
-/// `Reader` qualifier disambiguates from `tauri::command` and command-line
-/// arguments — every variant is something the reader task consumes.
-#[derive(Debug)]
-enum ReaderTaskCmd {
-    SendUserText {
-        request_id: RequestId,
-        text: String,
-        responder: oneshot::Sender<Result<(), SendError>>,
-    },
-    Cancel {
-        responder: oneshot::Sender<Result<(), SendError>>,
-    },
-    Shutdown,
-}
-
-/// Per-tab session handle.
-///
-/// Tear-down has three distinct entry points so each context can pick the
-/// right one:
-/// * `shutdown()` — async, the graceful path. Closes stdin, lets the CLI
-///   exit cleanly, escalates to SIGTERM/SIGKILL after a 3 s grace.
-/// * `kill_now()` — sync, the emergency path. Sends SIGKILL to the process
-///   group immediately. Used from non-async contexts like Tauri's
-///   `WindowEvent::Destroyed` where a 3 s sleep would orphan children.
-/// * `Drop` — the safety net. Tries `try_send(Shutdown)` first, then
-///   falls back to `kill_now` so a forgotten handle never leaks the child.
-pub struct Session {
-    tab_id: TabId,
-    cmd_tx: mpsc::Sender<ReaderTaskCmd>,
-    pending: Arc<Mutex<PendingTable>>,
-    /// PID + group-kill helpers. `Arc` so the reader task can keep its own
-    /// handle for in-task SIGKILL while the public surface uses this copy
-    /// for the synchronous emergency path.
-    killer: Arc<ProcessKiller>,
-    _lock: Arc<SessionLock>,
-}
-
-/// Captures just enough of a `ChildProcessTransport` to issue SIGTERM/
-/// SIGKILL synchronously without holding the transport itself across the
-/// reader task boundary.
+/// Captures just enough of an in-flight child to issue SIGKILL
+/// synchronously without holding the transport across await
+/// boundaries.
+#[derive(Clone)]
 struct ProcessKiller {
     pid: u32,
 }
@@ -234,9 +113,8 @@ impl ProcessKiller {
         Self { pid: t.pid() }
     }
 
-    /// Best-effort SIGKILL of the process group, then a fallback direct
-    /// SIGKILL. Synchronous so it can run from `Drop` and from Tauri's
-    /// non-async window-destroy handler.
+    /// Best-effort SIGKILL of the process group. Synchronous so it can
+    /// run from `Drop` and from non-async contexts.
     fn kill_now(&self) {
         unsafe {
             if libc::kill(-(self.pid as i32), libc::SIGKILL) == 0 {
@@ -247,426 +125,399 @@ impl ProcessKiller {
     }
 }
 
+/// State for the single in-flight turn. Held in `Session::in_flight`
+/// while a child is alive; replaced with `None` by the run task only
+/// when its own `turn_id` still owns the slot.
+struct InFlightTurn {
+    turn_id: u64,
+    killer: ProcessKiller,
+    handle: JoinHandle<()>,
+}
+
+/// Per-task context. Cloned out of `Session` once at spawn time so the
+/// run task does not borrow the session itself across `await` points.
+#[derive(Clone)]
+struct TurnContext {
+    app: AppHandle,
+    tab_id: TabId,
+    upstream_session_id: Arc<Mutex<Option<String>>>,
+    fork_on_next_turn: Arc<Mutex<bool>>,
+    in_flight: Arc<Mutex<Option<InFlightTurn>>>,
+    turn_id: u64,
+}
+
+/// Per-tab session handle. See module doc for the lifecycle model.
+pub struct Session {
+    tab_id: TabId,
+    command: String,
+    base_args: Vec<String>,
+    cwd: ValidatedCwd,
+    extra_env: ValidatedEnv,
+    app: AppHandle,
+    /// Upstream session id used for the next spawn. Seeded from
+    /// `SessionConfig::initial_session_id` and refreshed on every turn
+    /// from the upstream `system.init` event. `None` only when the
+    /// user never asked for a resume *and* no turn has completed yet.
+    upstream_session_id: Arc<Mutex<Option<String>>>,
+    /// Spend the `--fork-session` flag on the next resume turn. Cleared
+    /// the first time `capture_session_id` observes a new id (so a
+    /// failed first attempt can still benefit from the fork).
+    fork_on_next_turn: Arc<Mutex<bool>>,
+    /// In-flight turn slot. `Some` exactly while a child is alive.
+    in_flight: Arc<Mutex<Option<InFlightTurn>>>,
+    /// Monotonic id used to detect "is this still my slot?" on cleanup
+    /// after a kill / respawn race.
+    next_turn_id: AtomicU64,
+    _lock: Arc<SessionLock>,
+}
+
 impl Session {
-    /// Start a session: acquire the lock, spawn the CLI, fork the reader
-    /// task. Emits `Status::Idle` when the pipe is healthy enough to
-    /// accept a `send_user_message`.
-    pub async fn start(
-        config: SessionConfig,
-        app: AppHandle,
-    ) -> Result<Self, SessionStartError> {
-        let SessionConfig { tab_id, command, args, cwd, extra_env } = config;
+    pub async fn start(config: SessionConfig, app: AppHandle) -> Result<Self, SessionStartError> {
+        let SessionConfig {
+            tab_id,
+            command,
+            args,
+            cwd,
+            extra_env,
+            initial_session_id,
+            fork_session,
+        } = config;
 
-        let lock = SessionLock::try_acquire(&tab_id)?.ok_or(SessionStartError::AlreadyLocked)?;
-        let lock = Arc::new(lock);
+        let lock = SessionLock::try_acquire(&tab_id)?
+            .ok_or(SessionStartError::AlreadyLocked)?;
 
-        let mut transport = ChildProcessTransport::spawn(&command, &args, &cwd, &extra_env)?;
-        post_spawn_health_check(&mut transport, SPAWN_HEALTH_CHECK_GRACE).await?;
+        // Optimistic: tell the UI we are ready to take input. The first
+        // child is spawned lazily on the first `send_user_message`.
+        emit_status(&app, &tab_id, SessionStatus::Idle, None, None);
+        info!(tab_id = %tab_id, "headless session ready");
 
-        let killer = Arc::new(ProcessKiller::from_transport(&transport));
-
-        let pending: Arc<Mutex<PendingTable>> = Arc::new(Mutex::new(PendingTable::new()));
-        let (cmd_tx, cmd_rx) = mpsc::channel::<ReaderTaskCmd>(64);
-
-        let reader_pending = pending.clone();
-        let reader_app = app.clone();
-        let reader_tab = tab_id.clone();
-        let reader_lock = lock.clone();
-        tokio::spawn(reader_loop(
-            transport,
-            cmd_rx,
-            reader_app,
-            reader_tab,
-            reader_pending,
-            reader_lock,
-        ));
-
-        // Optimistic: tell the UI we are ready to take input. A stronger
-        // health-check (peeking stderr / waiting for `system-init`) lands
-        // in Phase 1e once we have fixture-driven coverage.
-        emit(&app, HeadlessEvent::Status {
-            tab_id: tab_id.clone(),
-            status: SessionStatus::Idle,
-            error_kind: None,
-            message: None,
-        });
-
-        info!(tab_id = %tab_id, pid = killer.pid, "headless session started");
-        Ok(Self { tab_id, cmd_tx, pending, killer, _lock: lock })
+        Ok(Self {
+            tab_id,
+            command,
+            base_args: args,
+            cwd,
+            extra_env,
+            app,
+            upstream_session_id: Arc::new(Mutex::new(initial_session_id)),
+            fork_on_next_turn: Arc::new(Mutex::new(fork_session)),
+            in_flight: Arc::new(Mutex::new(None)),
+            next_turn_id: AtomicU64::new(1),
+            _lock: Arc::new(lock),
+        })
     }
 
-    /// Tab ID this session belongs to.
     pub fn tab_id(&self) -> &str {
         &self.tab_id
     }
 
-    /// Send a free-form user message.
+    /// Send a user message: spawn a fresh child, write the message,
+    /// close stdin so claude starts responding, then forward the entire
+    /// stream-json output until the child exits.
     ///
-    /// Returns a `PendingRequest` with the freshly-minted `RequestId` and
-    /// a `oneshot::Receiver<RequestOutcome>` that will fire when the turn
-    /// completes, is cancelled, or the agent crashes. The receiver may be
-    /// dropped if the caller does not need completion semantics — the
-    /// session sweeps caller-dropped entries on every subsequent send,
-    /// and a 5-minute TTL backstops any held-but-forgotten receivers.
-    ///
-    /// Pending registration happens **before** the channel send so that a
-    /// crash mid-send is still observable. On send failure we explicitly
-    /// remove the entry to keep the table from drifting.
-    ///
-    /// Note: pending entries currently resolve via `crash_pending`,
-    /// `cancel_pending`, and the GC sweep. Per-message `Completed`
-    /// resolution lands in Phase 1e once we have CLI fixtures to drive
-    /// message-id correlation deterministically.
-    pub async fn send_user_message(
-        &self,
-        text: String,
-    ) -> Result<PendingRequest, SendError> {
-        let request_id = RequestId::new();
-        let (outcome_tx, outcome_rx) = oneshot::channel();
-
-        {
-            let mut table = self.pending.lock();
-            sweep_pending(&mut table);
-            table.insert(request_id.clone(), PendingEntry::new(outcome_tx));
+    /// Rejects with `SendError::Busy` if a previous turn is still in
+    /// flight — the caller must wait for the next `Status::Idle` /
+    /// `Status::Error` event before retrying.
+    pub async fn send_user_message(&self, text: String) -> Result<RequestId, SendError> {
+        // Hold the in-flight guard across the entire body so the
+        // busy-check and slot reservation are atomic. The body has no
+        // `.await` (every step — `Command::spawn`, `tokio::spawn`,
+        // emit) is synchronous — so keeping a `parking_lot::MutexGuard`
+        // here cannot deadlock the runtime. Releasing the guard between
+        // check and write would let two concurrent calls both pass the
+        // check and spawn two children racing on the same upstream id.
+        let mut guard = self.in_flight.lock();
+        if guard.is_some() {
+            return Err(SendError::Busy);
         }
 
-        let (responder, response) = oneshot::channel();
-        if self
-            .cmd_tx
-            .send(ReaderTaskCmd::SendUserText { request_id: request_id.clone(), text, responder })
-            .await
-            .is_err()
-        {
-            self.pending.lock().remove(&request_id);
-            return Err(SendError::PeerClosed);
-        }
+        let turn_id = self.next_turn_id.fetch_add(1, Ordering::SeqCst);
+        let args = self.build_turn_args();
 
-        match response.await {
-            Ok(Ok(())) => Ok(PendingRequest { id: request_id, outcome: outcome_rx }),
-            Ok(Err(e)) => {
-                self.pending.lock().remove(&request_id);
-                Err(e)
-            }
-            Err(_) => {
-                self.pending.lock().remove(&request_id);
-                Err(SendError::PeerClosed)
-            }
-        }
+        let transport =
+            ChildProcessTransport::spawn(&self.command, &args, &self.cwd, &self.extra_env)
+                .map_err(|e| {
+                    warn!(tab_id = %self.tab_id, "spawn failed: {e}");
+                    // Surface the failure so the UI can leave the
+                    // "thinking" / disabled-input state.
+                    emit_status(
+                        &self.app,
+                        &self.tab_id,
+                        SessionStatus::Error,
+                        Some(ErrorKind::CliIncompatible),
+                        Some(format!("spawn failed: {e}")),
+                    );
+                    SendError::PeerClosed
+                })?;
+
+        let killer = ProcessKiller::from_transport(&transport);
+        emit_status(&self.app, &self.tab_id, SessionStatus::Thinking, None, None);
+
+        let ctx = TurnContext {
+            app: self.app.clone(),
+            tab_id: self.tab_id.clone(),
+            upstream_session_id: self.upstream_session_id.clone(),
+            fork_on_next_turn: self.fork_on_next_turn.clone(),
+            in_flight: self.in_flight.clone(),
+            turn_id,
+        };
+        let handle = tokio::spawn(run_turn(transport, text, ctx));
+
+        *guard = Some(InFlightTurn { turn_id, killer, handle });
+
+        Ok(RequestId::new())
     }
 
-    /// Send the protocol-level cancel envelope. Note: the actual semantics
-    /// of mid-stream cancel depend on the CLI; if it does not respond, the
-    /// caller should escalate to `kill` after a grace window.
-    pub async fn cancel_current(&self) -> Result<(), SendError> {
-        let (responder, response) = oneshot::channel();
-        self.cmd_tx
-            .send(ReaderTaskCmd::Cancel { responder })
-            .await
-            .map_err(|_| SendError::PeerClosed)?;
-        response.await.map_err(|_| SendError::PeerClosed)?
-    }
-
-    /// Tell the reader task to wind down: close stdin, give the CLI a
-    /// chance to exit, then SIGTERM/SIGKILL the group.
-    ///
-    /// Returns `Err(ShutdownError::AlreadyClosed)` when the reader task has
-    /// already exited. Callers that want idempotent semantics can simply
-    /// ignore this error, but having it surfaced lets diagnostics
-    /// distinguish "graceful shutdown sent" from "double shutdown".
-    pub async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.cmd_tx
-            .send(ReaderTaskCmd::Shutdown)
-            .await
-            .map_err(|_| ShutdownError::AlreadyClosed)
-    }
-
-    /// Synchronous emergency tear-down: send SIGKILL to the process group
-    /// immediately, then nudge the reader task. Use when the caller cannot
-    /// `await` (e.g. Tauri `WindowEvent::Destroyed`) and would otherwise
-    /// risk leaving children alive past app exit.
+    /// Synchronously SIGKILL the in-flight child, if any. No-op
+    /// between turns. Idempotent. Callable from sync (`Drop`, window
+    /// destroy) and async paths alike — the single tear-down verb for
+    /// both "user pressed cancel" and "tab is closing" UX flows.
     pub fn kill_now(&self) {
-        self.killer.kill_now();
-        // Best-effort wakeup so the reader task observes EOF promptly. If
-        // the channel is full or closed, the SIGKILL above is enough.
-        let _ = self.cmd_tx.try_send(ReaderTaskCmd::Shutdown);
+        if let Some(in_flight) = self.in_flight.lock().as_ref() {
+            in_flight.killer.kill_now();
+        }
+    }
+
+    /// Build per-turn argv. Continuity flags (`--session-id` /
+    /// `--resume` / `--fork-session`) live here so the rest of
+    /// `send_user_message` is just spawn + bookkeeping.
+    fn build_turn_args(&self) -> Vec<String> {
+        let mut args = self.base_args.clone();
+        match self.upstream_session_id.lock().clone() {
+            Some(prev) => {
+                args.push("--resume".into());
+                args.push(prev);
+                let mut fork = self.fork_on_next_turn.lock();
+                if *fork {
+                    args.push("--fork-session".into());
+                    *fork = false;
+                }
+            }
+            None => {
+                args.push("--session-id".into());
+                args.push(uuid::Uuid::new_v4().to_string());
+            }
+        }
+        args
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        // Two-step safety net: nudge the reader task to wind down via the
-        // graceful path, and if the channel is full or closed (unusual,
-        // but observable when the runtime is mid-shutdown) escalate to a
-        // synchronous SIGKILL so the child is never left running.
-        if self.cmd_tx.try_send(ReaderTaskCmd::Shutdown).is_err() {
-            self.killer.kill_now();
+        // Take the slot atomically: kill the child, abort the run
+        // task, and ensure the task cannot observe its own clear path
+        // after we have torn down. Without `abort` a delayed task
+        // could clobber a freshly-registered successor session that
+        // happens to share the same `Arc<Mutex<...>>` shape.
+        if let Some(in_flight) = self.in_flight.lock().take() {
+            in_flight.killer.kill_now();
+            in_flight.handle.abort();
         }
     }
 }
 
-/// The single owner of the child transport. Pumps records to the frontend
-/// and routes outbound commands back to stdin.
-///
-/// Holds an `Arc<SessionLock>` for its full lifetime so the lock cannot be
-/// dropped while the reader is still draining stdout — otherwise a fresh
-/// `Session::start` for the same `tab_id` could win the lock mid-shutdown
-/// and end up writing to a half-dead pipe.
-async fn reader_loop(
-    mut transport: ChildProcessTransport,
-    mut cmd_rx: mpsc::Receiver<ReaderTaskCmd>,
-    app: AppHandle,
-    tab_id: TabId,
-    pending: Arc<Mutex<PendingTable>>,
-    _lock: Arc<SessionLock>,
-) {
+// --- run_turn split into 3 stages: send → drain → finish ---
+
+async fn run_turn(mut transport: ChildProcessTransport, text: String, ctx: TurnContext) {
     let pid = transport.pid();
-    debug!(tab_id = %tab_id, pid, "reader loop started");
-    loop {
-        tokio::select! {
-            // Bias toward draining stdout so streamed text is not delayed
-            // by a flood of outbound commands.
-            biased;
-            record = transport.next_record() => {
-                match record {
-                    Some(record) => handle_record(record, &app, &tab_id, &pending),
-                    None => {
-                        // EOF on stdout: child exited or closed its pipes.
-                        // Fail every pending request so the UI does not
-                        // dangle on "thinking".
-                        crash_pending(&pending, &app, &tab_id, "child exited unexpectedly");
-                        break;
-                    }
-                }
-            }
-            cmd = cmd_rx.recv() => {
-                match cmd {
-                    Some(ReaderTaskCmd::SendUserText { request_id: _, text, responder }) => {
-                        // Phase 1e will resolve `request_id` against the
-                        // matching `message-complete` event so the pending
-                        // entry fires `Completed`. Today registration is
-                        // already done by `Session::send_user_message`; this
-                        // task just needs to forward the user line.
-                        let payload = build_user_text_line(&text);
-                        let result = transport.send_line(&payload).await;
-                        let _ = responder.send(result);
-                    }
-                    Some(ReaderTaskCmd::Cancel { responder }) => {
-                        let payload = json!({ "type": "control", "action": "cancel" }).to_string();
-                        let result = transport.send_line(&payload).await;
-                        if result.is_ok() {
-                            // The control envelope has been delivered;
-                            // resolve every pending entry as `Cancelled`
-                            // so awaiting callers learn the turn is done
-                            // even if the CLI never emits a confirmation.
-                            let count = cancel_pending(&pending);
-                            if count > 0 {
-                                debug!(tab_id = %tab_id, count, "pending requests cancelled");
-                            }
-                        }
-                        let _ = responder.send(result);
-                    }
-                    Some(ReaderTaskCmd::Shutdown) | None => {
-                        // Public surface dropped or asked us to wind down.
-                        let _ = transport.close_send().await;
-                        graceful_kill(&transport).await;
-                        crash_pending(&pending, &app, &tab_id, "session shutdown");
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    debug!(tab_id = %tab_id, pid, "reader loop ended");
-}
+    debug!(tab_id = %ctx.tab_id, turn_id = ctx.turn_id, pid, "turn started");
 
-/// Translate one record into a Tauri event. Unknown shapes go through
-/// `unknown_event` so a malformed line never tears down the session.
-///
-/// Phase 1e adds a heuristic resolution path: when the CLI emits a
-/// `message-complete` shape (`type` plus a `finish_reason` field), we
-/// drain the **oldest** pending entry and resolve it with `Completed`
-/// (`Cancelled` if `finish_reason == "cancel"`). FIFO is a safe
-/// approximation today because Chorus serialises user turns through the
-/// reader task — a real `request_id` ↔ `message_id` correlation lands
-/// once we have CLI fixtures (Phase 1f).
-fn handle_record(
-    record: LineRecord,
-    app: &AppHandle,
-    tab_id: &str,
-    pending: &Arc<Mutex<PendingTable>>,
-) {
-    match record {
-        LineRecord::Line(s) => match serde_json::from_str::<serde_json::Value>(&s) {
-            Ok(value) => {
-                if let Some(reason) = detect_message_complete(&value) {
-                    resolve_oldest_pending(pending, reason);
-                }
-                emit(
-                    app,
-                    super::event::unknown_event(tab_id.to_string(), value),
-                );
-            }
-            Err(_) => emit(app, HeadlessEvent::Status {
-                tab_id: tab_id.to_string(),
-                status: SessionStatus::Error,
-                error_kind: Some(ErrorKind::ProtocolViolation),
-                message: Some("non-JSON line on stdout".into()),
-            }),
-        },
-        LineRecord::Violation(LineViolation::LineTooLong) => {
-            emit(app, HeadlessEvent::Status {
-                tab_id: tab_id.to_string(),
-                status: SessionStatus::Error,
-                error_kind: Some(ErrorKind::ProtocolViolation),
-                message: Some("stdout line exceeded 8 MiB cap".into()),
-            });
-        }
-        LineRecord::Violation(LineViolation::Io(msg)) => {
-            warn!(tab_id, "stdout io violation: {msg}");
-            emit(app, HeadlessEvent::Status {
-                tab_id: tab_id.to_string(),
-                status: SessionStatus::Error,
-                error_kind: Some(ErrorKind::ProtocolViolation),
-                message: Some(msg),
-            });
-        }
-    }
-}
-
-/// Turn-end shapes the heuristic recognises:
-///
-/// * Anthropic stream-json: `type: "message-complete"` (Phase 1+ canonical)
-/// * Claude Code's CLI: `type: "message_stop"`
-/// * `--print --output-format=json` summary: `type: "result"`
-///
-/// `finish_reason` keys nested inside other shapes (e.g. a `tool-use` whose
-/// `input` object happens to contain `finish_reason`) are **deliberately
-/// ignored**: matching only the discriminator field keeps the heuristic
-/// from firing on incidental key names.
-const TURN_END_TYPES: &[&str] = &["message-complete", "message_stop", "result"];
-
-/// Inspect a parsed JSONL line for a turn-end shape.
-///
-/// Returns the canonical `RequestOutcome` for the matched line so the
-/// caller can resolve a pending entry; `None` for any other line.
-///
-/// `finish_reason` is read **only** at the top level of a line whose
-/// `type` is in `TURN_END_TYPES`. A `finish_reason` of `"cancel"` maps to
-/// `Cancelled`; anything else (including missing / non-string) maps to
-/// `Completed`, since the assistant turn has clearly ended.
-fn detect_message_complete(value: &serde_json::Value) -> Option<RequestOutcome> {
-    let obj = value.as_object()?;
-    let type_str = obj.get("type").and_then(|t| t.as_str())?;
-    if !TURN_END_TYPES.contains(&type_str) {
-        return None;
-    }
-    let finish_reason = obj
-        .get("finish_reason")
-        .or_else(|| obj.get("finishReason"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    Some(if finish_reason == "cancel" {
-        RequestOutcome::Cancelled
-    } else {
-        RequestOutcome::Completed
-    })
-}
-
-/// Resolve the oldest pending entry with the supplied outcome.
-///
-/// The "oldest" rule is a heuristic until Phase 1f wires real
-/// `request_id` ↔ `message_id` correlation. It works because Chorus
-/// serialises user turns through the reader task — there is at most one
-/// in-flight request per session at a given moment in normal operation.
-/// `pub(crate)` for regression test access only — production code goes
-/// through `handle_record`, which owns the timing of when this fires.
-pub(crate) fn resolve_oldest_pending(
-    pending: &Arc<Mutex<PendingTable>>,
-    outcome: RequestOutcome,
-) {
-    let mut table = pending.lock();
-    let Some(oldest_id) = table
-        .iter()
-        .min_by_key(|(_, entry)| entry.created_at)
-        .map(|(id, _)| id.clone())
-    else {
+    if let Err(detail) = send_user_turn(&mut transport, &text).await {
+        finish_turn(transport, ctx, TurnOutcome::SendFailed(detail)).await;
         return;
-    };
-    if let Some(entry) = table.remove(&oldest_id) {
-        let _ = entry.responder.send(outcome);
     }
+
+    let outcome = drain_stream_json(&mut transport, &ctx).await;
+    finish_turn(transport, ctx, outcome).await;
 }
 
-/// SIGTERM the process group, give it 3 seconds to exit, then SIGKILL.
-/// Best-effort — kill_on_drop is the ultimate backstop.
-async fn graceful_kill(transport: &ChildProcessTransport) {
-    let _ = transport.terminate_group();
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let _ = transport.kill_group();
+/// What the drain loop saw. Replaces the earlier `had_error +
+/// error_message` pair with a closed enumeration so `classify` can
+/// pattern-match exhaustively.
+enum TurnOutcome {
+    /// Child closed stdout cleanly (the only happy path).
+    Drained,
+    /// Could not write the user line. Detail goes into the status event.
+    SendFailed(String),
+    /// 8 MiB-per-line cap hit.
+    LineCapExceeded,
+    /// Underlying stdout IO error.
+    StdoutIo(String),
 }
 
-/// Resolve every pending request with `AgentCrashed` and emit an Error
-/// status so the UI can prompt the user to retry.
-fn crash_pending(
-    pending: &Arc<Mutex<PendingTable>>,
-    app: &AppHandle,
-    tab_id: &str,
-    reason: &str,
-) {
-    let drained: Vec<_> = pending.lock().drain().collect();
-    for (_id, entry) in drained {
-        let _ = entry.responder.send(RequestOutcome::AgentCrashed);
+async fn send_user_turn(t: &mut ChildProcessTransport, text: &str) -> Result<(), String> {
+    let payload = build_user_text_line(text);
+    if let Err(e) = t.send_line(&payload).await {
+        return Err(format!("stdin write failed: {e}"));
     }
-    emit(app, HeadlessEvent::Status {
-        tab_id: tab_id.to_string(),
-        status: SessionStatus::Error,
-        error_kind: Some(ErrorKind::AgentCrashed),
-        message: Some(reason.to_string()),
-    });
-}
-
-/// Drain pending and resolve every entry with `Cancelled`. Triggered by
-/// the protocol-level cancel flow — the assumption is that any in-flight
-/// turn has been told to stop, so callers waiting on a `RequestOutcome`
-/// should observe `Cancelled` rather than `Completed`.
-fn cancel_pending(pending: &Arc<Mutex<PendingTable>>) -> usize {
-    let drained: Vec<_> = pending.lock().drain().collect();
-    let count = drained.len();
-    for (_id, entry) in drained {
-        let _ = entry.responder.send(RequestOutcome::Cancelled);
-    }
-    count
-}
-
-/// Grace period for the post-spawn health check. A CLI that dies on argv
-/// (missing binary, bad flag, ENOEXEC, auth refusal) typically exits within
-/// tens of milliseconds. 200 ms is far below human-perceptible spawn
-/// latency yet long enough to catch the common failure modes.
-const SPAWN_HEALTH_CHECK_GRACE: Duration = Duration::from_millis(200);
-
-/// Catch CLIs that die immediately after spawn before the reader_loop is
-/// attached. Two probes — one before the sleep and one after — let us detect
-/// both "already gone before we got the handle" and "died during the grace
-/// window" without busy-waiting.
-///
-/// Failures are fatal: callers should not auto-restart, since a CLI that
-/// can't survive its own health check would just respawn-loop.
-async fn post_spawn_health_check(
-    transport: &mut ChildProcessTransport,
-    grace: Duration,
-) -> Result<(), SessionStartError> {
-    if let Some(status) = transport.try_check_exit() {
-        return Err(SessionStartError::HealthCheckFailed(format!(
-            "child exited before health check: {status:?}"
-        )));
-    }
-    tokio::time::sleep(grace).await;
-    if let Some(status) = transport.try_check_exit() {
-        return Err(SessionStartError::HealthCheckFailed(format!(
-            "child exited during health check: {status:?}"
-        )));
+    if let Err(e) = t.close_send().await {
+        warn!("stdin close failed: {e}");
     }
     Ok(())
+}
+
+async fn drain_stream_json(t: &mut ChildProcessTransport, ctx: &TurnContext) -> TurnOutcome {
+    let mut parser = StreamParser::new();
+    let mut lines_seen = 0u32;
+    while let Some(record) = t.next_record().await {
+        match record {
+            LineRecord::Line(line) => {
+                lines_seen += 1;
+                process_jsonl_line(&line, ctx, &mut parser);
+            }
+            LineRecord::Violation(LineViolation::LineTooLong) => return TurnOutcome::LineCapExceeded,
+            LineRecord::Violation(LineViolation::Io(msg)) => return TurnOutcome::StdoutIo(msg),
+        }
+    }
+    debug!(tab_id = %ctx.tab_id, turn_id = ctx.turn_id, lines_seen, "turn drain finished");
+    TurnOutcome::Drained
+}
+
+/// Translate one JSONL line into typed events (via `StreamParser`)
+/// and forward each one to the frontend. Always-on debug copy is sent
+/// as `unknown` so the raw payload remains inspectable until a typed
+/// renderer exists for every claude envelope.
+fn process_jsonl_line(line: &str, ctx: &TurnContext, parser: &mut StreamParser) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        warn!(tab_id = %ctx.tab_id, "non-JSON stdout line ignored");
+        return;
+    };
+    if let Some(captured) = capture_session_id(
+        &value,
+        &ctx.upstream_session_id,
+        &ctx.fork_on_next_turn,
+    ) {
+        emit_event(
+            &ctx.app,
+            HeadlessEvent::SessionIdCaptured {
+                tab_id: ctx.tab_id.clone(),
+                session_id: captured,
+            },
+        );
+    }
+
+    let typed = parser.translate(&value, &ctx.tab_id);
+    let envelope = value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?")
+        .to_string();
+    debug!(
+        tab_id = %ctx.tab_id,
+        turn_id = ctx.turn_id,
+        envelope = %envelope,
+        typed_count = typed.len(),
+        "headless line",
+    );
+    for event in typed {
+        emit_event(&ctx.app, event);
+    }
+    emit_event(
+        &ctx.app,
+        super::event::unknown_event(ctx.tab_id.clone(), value),
+    );
+}
+
+async fn finish_turn(
+    mut transport: ChildProcessTransport,
+    ctx: TurnContext,
+    outcome: TurnOutcome,
+) {
+    // If drain bailed early (cap / io violation), the child may still
+    // be writing. Kill the group before waiting so the wait does not
+    // hang on a producer with a closed reader.
+    if !matches!(outcome, TurnOutcome::Drained) {
+        let _ = transport.kill_group();
+    }
+    let exit_code = transport.wait_for_exit().await.and_then(|s| s.code());
+
+    // Only clear the slot if we still own it. If a kill_now already
+    // replaced or cleared us, leave the new state alone — otherwise a
+    // delayed task would clobber the next turn's slot.
+    {
+        let mut g = ctx.in_flight.lock();
+        let owns_slot = g.as_ref().map(|f| f.turn_id) == Some(ctx.turn_id);
+        if owns_slot {
+            *g = None;
+        }
+    }
+
+    let (status, kind, message) = classify_turn(outcome, exit_code);
+    emit_status(&ctx.app, &ctx.tab_id, status, kind, message);
+}
+
+fn classify_turn(
+    outcome: TurnOutcome,
+    exit_code: Option<i32>,
+) -> (SessionStatus, Option<ErrorKind>, Option<String>) {
+    match outcome {
+        TurnOutcome::Drained => match exit_code {
+            Some(0) => (SessionStatus::Idle, None, None),
+            Some(c) => (
+                SessionStatus::Error,
+                Some(ErrorKind::AgentCrashed),
+                Some(format!("exit code {c}")),
+            ),
+            None => (
+                SessionStatus::Error,
+                Some(ErrorKind::AgentCrashed),
+                Some("child exited with no status".into()),
+            ),
+        },
+        TurnOutcome::SendFailed(detail) => (
+            SessionStatus::Error,
+            Some(ErrorKind::AgentCrashed),
+            Some(detail),
+        ),
+        TurnOutcome::LineCapExceeded => (
+            SessionStatus::Error,
+            Some(ErrorKind::ProtocolViolation),
+            Some("stdout line exceeded 8 MiB cap".into()),
+        ),
+        TurnOutcome::StdoutIo(msg) => (
+            SessionStatus::Error,
+            Some(ErrorKind::ProtocolViolation),
+            Some(msg),
+        ),
+    }
+}
+
+/// Pull the upstream `session_id` out of any line that carries one.
+/// Validates against the IPC allowlist before storing — the upstream
+/// stream is not a trust boundary, so a malformed value (anything that
+/// `validate_session_id` would reject) is silently dropped with a
+/// warn-level log.
+/// Returns `Some(id)` if a *new* upstream session id was stored —
+/// callers emit a `SessionIdCaptured` wire event on a non-`None`
+/// result so the frontend can persist it for future `--resume` use.
+/// Returns `None` for missing / malformed / already-stored ids.
+fn capture_session_id(
+    value: &serde_json::Value,
+    slot: &Arc<Mutex<Option<String>>>,
+    fork_on_next_turn: &Arc<Mutex<bool>>,
+) -> Option<String> {
+    let id = value
+        .as_object()
+        .and_then(|o| o.get("session_id"))
+        .and_then(|v| v.as_str())?;
+    if id.is_empty() {
+        return None;
+    }
+    if !is_valid_session_id(id) {
+        warn!(id, "ignoring malformed upstream session_id");
+        return None;
+    }
+
+    let mut guard = slot.lock();
+    if guard.as_deref() == Some(id) {
+        return None;
+    }
+    *guard = Some(id.to_string());
+    // A `--fork-session` only makes sense on the *first* turn of a
+    // resumed conversation. Once we have observed any upstream id
+    // (which every successful turn produces exactly once), the
+    // fork has been spent.
+    *fork_on_next_turn.lock() = false;
+    Some(id.to_string())
 }
 
 /// Stream-json envelope claude expects on stdin for a fresh user turn.
@@ -681,48 +532,40 @@ fn build_user_text_line(text: &str) -> String {
     .to_string()
 }
 
-/// Emit on the per-tab Tauri channel `headless:<tabId>:event`. Routing
-/// uses `HeadlessEvent::tab_id`, so adding a variant only requires
-/// updating that single method — not every emit site.
-fn emit(app: &AppHandle, event: HeadlessEvent) {
+fn emit_status(
+    app: &AppHandle,
+    tab_id: &str,
+    status: SessionStatus,
+    error_kind: Option<ErrorKind>,
+    message: Option<String>,
+) {
+    emit_event(
+        app,
+        HeadlessEvent::Status {
+            tab_id: tab_id.to_string(),
+            status,
+            error_kind,
+            message,
+        },
+    );
+}
+
+fn emit_event(app: &AppHandle, event: HeadlessEvent) {
     let channel = format!("headless:{}:event", event.tab_id());
     if let Err(e) = app.emit(&channel, &event) {
         warn!(channel, "headless emit failed: {e}");
     }
-    // Also emit on a sticky compatibility channel so subscribers that wire
-    // up *after* the per-tab listener can still see the most recent event
-    // type when they call `app.listen("headless:event")` blanket-wise.
     let _ = app.emit("headless:event", &event);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::headless::validation::{sanitize_extra_env, validate_cwd};
-    use std::collections::HashMap;
 
-    #[allow(dead_code)]
-    fn config(tab_id: &str, command: &str, args: &[&str]) -> SessionConfig {
-        SessionConfig {
-            tab_id: tab_id.into(),
-            command: command.into(),
-            args: args.iter().map(|s| (*s).into()).collect(),
-            cwd: validate_cwd("/tmp").unwrap(),
-            extra_env: ValidatedEnv::empty(),
-        }
+    fn slot_pair() -> (Arc<Mutex<Option<String>>>, Arc<Mutex<bool>>) {
+        (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(false)))
     }
 
-    fn cwd() -> ValidatedCwd {
-        validate_cwd("/tmp").unwrap()
-    }
-
-    fn empty_env() -> ValidatedEnv {
-        let (env, _) = sanitize_extra_env(HashMap::new());
-        env
-    }
-
-    /// `build_user_text_line` produces exactly one JSON object per call,
-    /// terminated by a newline at the framing layer (not here).
     #[test]
     fn build_user_text_line_shapes_envelope() {
         let line = build_user_text_line("hello");
@@ -734,244 +577,118 @@ mod tests {
     }
 
     #[test]
-    fn session_start_error_displays_each_variant() {
-        // Smoke-test that the error wrapper compiles and Display fires;
-        // detailed coverage of the underlying causes lives in their own
-        // modules.
-        let e = SessionStartError::AlreadyLocked;
-        assert!(format!("{e}").contains("already running"));
-        let e = SessionStartError::HealthCheckFailed("boom".into());
-        assert!(format!("{e}").contains("health check"));
+    fn capture_session_id_stores_first_seen_id() {
+        let (slot, fork) = slot_pair();
+        let v = serde_json::json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "abc-123",
+        });
+        let captured = capture_session_id(&v, &slot, &fork);
+        assert_eq!(captured.as_deref(), Some("abc-123"));
+        assert_eq!(slot.lock().as_deref(), Some("abc-123"));
     }
 
     #[test]
-    fn shutdown_error_displays_already_closed() {
-        assert_eq!(
-            ShutdownError::AlreadyClosed.to_string(),
-            "session already closed",
-        );
-    }
-
-    /// `post_spawn_health_check` must fail when the child has already exited
-    /// before the reader loop is attached. We simulate this with `sh -c
-    /// "exit 9"` — the kernel reaps it within the grace window.
-    #[tokio::test]
-    async fn health_check_fails_for_quick_exit() {
-        let mut transport = ChildProcessTransport::spawn(
-            "/bin/sh",
-            &["-c".into(), "exit 9".into()],
-            &cwd(),
-            &empty_env(),
-        )
-        .expect("spawn /bin/sh exit 9");
-        let result = post_spawn_health_check(&mut transport, Duration::from_millis(150)).await;
-        match result {
-            Err(SessionStartError::HealthCheckFailed(msg)) => {
-                assert!(msg.contains("exited"), "{msg}");
-            }
-            other => panic!("expected HealthCheckFailed, got {other:?}"),
-        }
-    }
-
-    /// `sweep_pending` must drop entries whose `oneshot::Sender::is_closed`
-    /// returns true (the receiver was dropped) and entries past TTL. Active
-    /// entries with live receivers must survive the sweep.
-    #[test]
-    fn sweep_drops_caller_dropped_and_ttl_expired_entries() {
-        let mut table: PendingTable = PendingTable::new();
-
-        // Live receiver: should survive.
-        let (tx_live, _rx_live) = oneshot::channel::<RequestOutcome>();
-        table.insert(RequestId::from("live"), PendingEntry::new(tx_live));
-
-        // Receiver dropped: should be swept.
-        let (tx_dropped, rx_dropped) = oneshot::channel::<RequestOutcome>();
-        drop(rx_dropped);
-        table.insert(RequestId::from("dropped"), PendingEntry::new(tx_dropped));
-
-        // TTL-expired entry: backdate created_at.
-        let (tx_expired, _rx_expired) = oneshot::channel::<RequestOutcome>();
-        let mut expired = PendingEntry::new(tx_expired);
-        expired.created_at = Instant::now() - PENDING_REQUEST_TTL - Duration::from_secs(1);
-        table.insert(RequestId::from("expired"), expired);
-
-        sweep_pending(&mut table);
-
-        assert!(table.contains_key(&RequestId::from("live")));
-        assert!(!table.contains_key(&RequestId::from("dropped")));
-        assert!(!table.contains_key(&RequestId::from("expired")));
-    }
-
-    /// `detect_message_complete` matches every turn-end discriminator
-    /// Chorus expects to see in the wild, with optional `finish_reason`
-    /// driving Completed vs Cancelled.
-    #[test]
-    fn detect_message_complete_handles_known_shapes() {
-        use serde_json::json;
-        assert_eq!(
-            detect_message_complete(&json!({"type": "message-complete"})),
-            Some(RequestOutcome::Completed),
-        );
-        assert_eq!(
-            detect_message_complete(&json!({"type": "message_stop"})),
-            Some(RequestOutcome::Completed),
-        );
-        assert_eq!(
-            detect_message_complete(&json!({"type": "result"})),
-            Some(RequestOutcome::Completed),
-        );
-        assert_eq!(
-            detect_message_complete(&json!({
-                "type": "message-complete",
-                "finish_reason": "stop",
-            })),
-            Some(RequestOutcome::Completed),
-        );
-        assert_eq!(
-            detect_message_complete(&json!({
-                "type": "result",
-                "finishReason": "cancel",
-            })),
-            Some(RequestOutcome::Cancelled),
-        );
-    }
-
-    /// Critical: do not fire on a nested `finish_reason` that happens to
-    /// appear inside an unrelated shape (e.g. a tool-use whose `input`
-    /// payload mentions `finish_reason`). The discriminator must always
-    /// be the top-level `type`.
-    #[test]
-    fn detect_message_complete_ignores_nested_finish_reason() {
-        use serde_json::json;
-        assert!(
-            detect_message_complete(&json!({
-                "type": "tool-use",
-                "input": { "finish_reason": "stop" },
-            }))
-            .is_none(),
-        );
-        // Top-level `finish_reason` without a recognised `type` is also
-        // ignored — turn-end events always carry a `type` discriminator.
-        assert!(
-            detect_message_complete(&json!({"finish_reason": "stop"})).is_none(),
-        );
+    fn capture_session_id_ignores_unrelated_lines() {
+        let (slot, fork) = slot_pair();
+        assert!(capture_session_id(
+            &serde_json::json!({"type": "message-delta"}),
+            &slot,
+            &fork,
+        ).is_none());
+        assert!(slot.lock().is_none());
+        assert!(capture_session_id(&serde_json::json!(42), &slot, &fork).is_none());
+        assert!(slot.lock().is_none());
     }
 
     #[test]
-    fn detect_message_complete_returns_none_for_other_shapes() {
-        use serde_json::json;
-        assert!(detect_message_complete(&json!({"type": "message-delta"})).is_none());
-        assert!(detect_message_complete(&json!({"type": "tool-use"})).is_none());
-        assert!(detect_message_complete(&json!({"unrelated": 42})).is_none());
-        assert!(detect_message_complete(&json!(null)).is_none());
-        assert!(detect_message_complete(&json!("just a string")).is_none());
-        // Non-object JSON values must be rejected before the `type` lookup.
-        assert!(detect_message_complete(&json!([1, 2, 3])).is_none());
-        assert!(detect_message_complete(&json!(42)).is_none());
-        assert!(detect_message_complete(&json!(true)).is_none());
+    fn capture_session_id_returns_none_when_unchanged() {
+        let (slot, fork) = slot_pair();
+        let v = serde_json::json!({"session_id": "abc-123"});
+        assert_eq!(capture_session_id(&v, &slot, &fork).as_deref(), Some("abc-123"));
+        // Second call with the same id must return None so the caller
+        // does not re-emit a duplicate `SessionIdCaptured` wire event.
+        assert!(capture_session_id(&v, &slot, &fork).is_none());
     }
 
-    /// FIFO heuristic: the oldest entry resolves first. Phase 1f will
-    /// replace this with a real id-keyed lookup once we have a fixture
-    /// recording of Claude's stream-json envelope shape.
-    #[tokio::test]
-    async fn resolve_oldest_pending_drains_eldest_first() {
-        let pending: Arc<Mutex<PendingTable>> = Arc::new(Mutex::new(PendingTable::new()));
-
-        let (tx_a, rx_a) = oneshot::channel::<RequestOutcome>();
-        let mut entry_a = PendingEntry::new(tx_a);
-        entry_a.created_at = Instant::now() - Duration::from_secs(2);
-        pending.lock().insert(RequestId::from("a"), entry_a);
-
-        let (tx_b, rx_b) = oneshot::channel::<RequestOutcome>();
-        pending.lock().insert(RequestId::from("b"), PendingEntry::new(tx_b));
-
-        // First resolve picks `a` (older), second picks `b`.
-        resolve_oldest_pending(&pending, RequestOutcome::Completed);
-        assert_eq!(rx_a.await.unwrap(), RequestOutcome::Completed);
-
-        resolve_oldest_pending(&pending, RequestOutcome::Cancelled);
-        assert_eq!(rx_b.await.unwrap(), RequestOutcome::Cancelled);
-
-        assert!(pending.lock().is_empty());
+    #[test]
+    fn capture_session_id_overwrites_on_change() {
+        let (slot, fork) = slot_pair();
+        *slot.lock() = Some("old".into());
+        let captured = capture_session_id(
+            &serde_json::json!({"session_id": "new-id"}),
+            &slot,
+            &fork,
+        );
+        assert_eq!(captured.as_deref(), Some("new-id"));
+        assert_eq!(slot.lock().as_deref(), Some("new-id"));
     }
 
-    #[tokio::test]
-    async fn resolve_oldest_pending_is_safe_when_empty() {
-        let pending: Arc<Mutex<PendingTable>> = Arc::new(Mutex::new(PendingTable::new()));
-        // Just verify the call does not panic and leaves the table empty.
-        resolve_oldest_pending(&pending, RequestOutcome::Completed);
-        assert!(pending.lock().is_empty());
+    /// Argv-injection guard: a poisoned upstream line that puts a
+    /// flag-shaped string in `session_id` must be ignored, otherwise
+    /// the next turn would smuggle it into the spawn argv.
+    #[test]
+    fn capture_session_id_rejects_argv_injection() {
+        let (slot, fork) = slot_pair();
+        assert!(capture_session_id(
+            &serde_json::json!({"session_id": "--dangerously-skip-permissions"}),
+            &slot,
+            &fork,
+        ).is_none(), "leading-dash id must not be stored");
+        assert!(slot.lock().is_none());
+
+        assert!(capture_session_id(
+            &serde_json::json!({"session_id": "abc;rm -rf /"}),
+            &slot,
+            &fork,
+        ).is_none(), "shell metas must not be stored");
+        assert!(slot.lock().is_none());
     }
 
-    /// FIFO ordering must hold across more than two entries. Resolves in
-    /// strict eldest-first order regardless of insertion order.
-    #[tokio::test]
-    async fn resolve_oldest_pending_preserves_fifo_across_many_entries() {
-        let pending: Arc<Mutex<PendingTable>> = Arc::new(Mutex::new(PendingTable::new()));
-
-        let now = Instant::now();
-        let make_entry = |sender: oneshot::Sender<RequestOutcome>, age_secs: u64| {
-            let mut e = PendingEntry::new(sender);
-            e.created_at = now - Duration::from_secs(age_secs);
-            e
-        };
-
-        let (tx_a, rx_a) = oneshot::channel::<RequestOutcome>();
-        let (tx_b, rx_b) = oneshot::channel::<RequestOutcome>();
-        let (tx_c, rx_c) = oneshot::channel::<RequestOutcome>();
-
-        // Insert in non-FIFO order: middle, oldest, youngest. The resolver
-        // must still pick by age.
-        pending.lock().insert(RequestId::from("b"), make_entry(tx_b, 5));
-        pending.lock().insert(RequestId::from("a"), make_entry(tx_a, 10));
-        pending.lock().insert(RequestId::from("c"), make_entry(tx_c, 1));
-
-        resolve_oldest_pending(&pending, RequestOutcome::Completed);
-        assert_eq!(rx_a.await.unwrap(), RequestOutcome::Completed);
-
-        resolve_oldest_pending(&pending, RequestOutcome::Completed);
-        assert_eq!(rx_b.await.unwrap(), RequestOutcome::Completed);
-
-        resolve_oldest_pending(&pending, RequestOutcome::Cancelled);
-        assert_eq!(rx_c.await.unwrap(), RequestOutcome::Cancelled);
-
-        assert!(pending.lock().is_empty());
+    /// The fork flag is one-shot: the very first observed upstream id
+    /// (failed turn or otherwise) must consume it, so a later retry
+    /// cannot accidentally fork a second time.
+    #[test]
+    fn capture_session_id_consumes_pending_fork() {
+        let (slot, fork) = slot_pair();
+        *fork.lock() = true;
+        capture_session_id(
+            &serde_json::json!({"session_id": "abc-123"}),
+            &slot,
+            &fork,
+        );
+        assert!(!*fork.lock(), "fork flag must be cleared once an id lands");
     }
 
-    /// `cancel_pending` resolves every entry with `Cancelled` and reports
-    /// the count drained, regardless of whether the receiver still cared.
-    #[tokio::test]
-    async fn cancel_pending_resolves_each_outcome_with_cancelled() {
-        let pending: Arc<Mutex<PendingTable>> = Arc::new(Mutex::new(PendingTable::new()));
-
-        let (tx_a, rx_a) = oneshot::channel::<RequestOutcome>();
-        let (tx_b, rx_b) = oneshot::channel::<RequestOutcome>();
-        pending.lock().insert(RequestId::from("a"), PendingEntry::new(tx_a));
-        pending.lock().insert(RequestId::from("b"), PendingEntry::new(tx_b));
-
-        let count = cancel_pending(&pending);
-        assert_eq!(count, 2);
-        assert!(pending.lock().is_empty());
-        assert_eq!(rx_a.await.unwrap(), RequestOutcome::Cancelled);
-        assert_eq!(rx_b.await.unwrap(), RequestOutcome::Cancelled);
+    #[test]
+    fn classify_turn_drained_zero_is_idle() {
+        let (status, kind, _) = classify_turn(TurnOutcome::Drained, Some(0));
+        assert_eq!(status, SessionStatus::Idle);
+        assert!(kind.is_none());
     }
 
-    /// A long-running child must clear the health check.
-    #[tokio::test]
-    async fn health_check_passes_for_long_running_child() {
-        let mut transport = ChildProcessTransport::spawn(
-            "/bin/sh",
-            &["-c".into(), "sleep 60".into()],
-            &cwd(),
-            &empty_env(),
-        )
-        .expect("spawn /bin/sh sleep");
-        // Use a tiny grace window so the test runs quickly. Real callers
-        // pass `SPAWN_HEALTH_CHECK_GRACE`.
-        post_spawn_health_check(&mut transport, Duration::from_millis(50))
-            .await
-            .expect("long-running child should pass health check");
-        transport.kill_group().expect("kill_group");
+    #[test]
+    fn classify_turn_drained_nonzero_is_agent_crashed() {
+        let (status, kind, msg) = classify_turn(TurnOutcome::Drained, Some(7));
+        assert_eq!(status, SessionStatus::Error);
+        assert_eq!(kind, Some(ErrorKind::AgentCrashed));
+        assert!(msg.unwrap().contains('7'));
+    }
+
+    #[test]
+    fn classify_turn_line_cap_is_protocol_violation() {
+        let (status, kind, _) = classify_turn(TurnOutcome::LineCapExceeded, Some(0));
+        assert_eq!(status, SessionStatus::Error);
+        assert_eq!(kind, Some(ErrorKind::ProtocolViolation));
+    }
+
+    #[test]
+    fn classify_turn_send_failed_is_agent_crashed() {
+        let (status, kind, msg) =
+            classify_turn(TurnOutcome::SendFailed("pipe broken".into()), None);
+        assert_eq!(status, SessionStatus::Error);
+        assert_eq!(kind, Some(ErrorKind::AgentCrashed));
+        assert_eq!(msg.as_deref(), Some("pipe broken"));
     }
 }

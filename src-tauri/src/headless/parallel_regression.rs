@@ -2,9 +2,8 @@
 //!
 //! The Phase 1+ headless engine targets 20 concurrent CLI sessions. This
 //! module pins the wall-clock budget for the lower-level mechanisms the
-//! real `Session` is built from (`MockTransport`, `LineReader`,
-//! `PendingTable`) so a future change cannot quietly degrade the
-//! 20-parallel use case.
+//! real `Session` is built from (`MockTransport`, `LineReader`) so a
+//! future change cannot quietly degrade the 20-parallel use case.
 //!
 //! All async tests run under a `multi_thread` runtime so `tokio::spawn`
 //! actually fans out across worker threads — the default
@@ -21,10 +20,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
-use tokio::sync::oneshot;
-
-use super::event::RequestId;
 use super::line_reader::{LineReader, LineRecord};
 use super::transport::{JsonlTransport, MockTransport};
 
@@ -123,40 +118,9 @@ async fn line_reader_drains_20_parallel_500kib_streams_within_budget() {
     assert_within_budget("20-parallel line reader drain", start.elapsed());
 }
 
-/// `Session::handle_record` resolves the oldest pending entry on every
-/// assistant `message-complete`. Pin that the FIFO walk stays cheap and
-/// strictly ordered when the table is at peak occupancy (one entry per
-/// tab plus a handful of stragglers). Test is sequential by design —
-/// `PendingTable` is `Mutex`-guarded, so a "parallel resolve" benchmark
-/// would just measure lock contention rather than ordering correctness.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pending_table_resolves_20_entries_in_fifo_order() {
-    use super::session::{PendingEntry, PendingTable, RequestOutcome};
-
-    let pending: Arc<Mutex<PendingTable>> = Arc::new(Mutex::new(PendingTable::new()));
-
-    // Seed N entries with strictly increasing `created_at`.
-    let now = Instant::now();
-    let mut receivers = Vec::with_capacity(TAB_COUNT);
-    for t in 0..TAB_COUNT {
-        let (tx, rx) = oneshot::channel::<RequestOutcome>();
-        let mut entry = PendingEntry::new(tx);
-        entry.created_at = now - Duration::from_micros((TAB_COUNT - t) as u64);
-        pending.lock().insert(RequestId::from(format!("req-{t}")), entry);
-        receivers.push(rx);
-    }
-
-    let start = Instant::now();
-    for _ in 0..TAB_COUNT {
-        super::session::resolve_oldest_pending(&pending, RequestOutcome::Completed);
-    }
-
-    assert!(pending.lock().is_empty());
-    assert_within_budget("20 sequential FIFO resolves", start.elapsed());
-
-    // Every receiver must have received `Completed` in FIFO order.
-    for (i, rx) in receivers.into_iter().enumerate() {
-        let outcome = rx.await.expect("oneshot dropped");
-        assert_eq!(outcome, RequestOutcome::Completed, "entry {i} not resolved");
-    }
-}
+// Note: the FIFO `PendingTable` regression that lived here was removed
+// alongside the actor-style `Session` in Phase 1g. The per-turn model
+// has no in-memory pending table — completion is signalled by the
+// child's exit, surfaced as a `Status` event on the per-tab channel.
+// `transport drain` and `line reader` budgets above are the load-bearing
+// 20-parallel pins for the new design.

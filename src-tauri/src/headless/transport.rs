@@ -27,6 +27,10 @@ pub enum SendError {
     /// The peer closed its stdin / the channel is gone. Caller should treat
     /// the session as dead and decide whether to respawn.
     PeerClosed,
+    /// A turn is already in flight on this session. The per-turn
+    /// `Session` rejects concurrent `send_user_message` calls so two
+    /// children cannot race on the same upstream session id.
+    Busy,
     /// Something else went wrong at the IO layer (rare on stdin writes).
     Io(io::Error),
 }
@@ -35,6 +39,7 @@ impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::PeerClosed => write!(f, "peer closed transport"),
+            Self::Busy => write!(f, "session already has a turn in flight"),
             Self::Io(e) => write!(f, "transport io error: {e}"),
         }
     }
