@@ -152,6 +152,12 @@ struct TurnContext {
     fork_on_next_turn: Arc<Mutex<bool>>,
     in_flight: Arc<Mutex<Option<InFlightTurn>>>,
     turn_id: u64,
+    /// Last in-stream error message observed for this turn (e.g.
+    /// codex `error` / `turn.failed` envelopes carry the API's
+    /// human-readable reason). `finish_turn` prefers this string
+    /// over a bare `exit code N` so the user sees "model not
+    /// supported" instead of an opaque crash code.
+    captured_error: Arc<Mutex<Option<String>>>,
 }
 
 /// Per-tab session handle. See module doc for the lifecycle model.
@@ -275,6 +281,7 @@ impl Session {
             fork_on_next_turn: self.fork_on_next_turn.clone(),
             in_flight: self.in_flight.clone(),
             turn_id,
+            captured_error: Arc::new(Mutex::new(None)),
         };
         let handle = tokio::spawn(run_turn(transport, text, images, ctx));
 
@@ -479,6 +486,14 @@ fn process_jsonl_line(line: &str, ctx: &TurnContext, parser: &mut StreamParser) 
         );
     }
 
+    if let Some(detail) = extract_inline_error(&value) {
+        // Stash the most recent in-stream error so `finish_turn` can
+        // surface it when the child eventually exits non-zero. Codex
+        // emits the API's reason via `error` / `turn.failed`; without
+        // this capture the user just sees `exit code 1`.
+        *ctx.captured_error.lock() = Some(detail);
+    }
+
     let typed = parser.translate(&value, &ctx.tab_id);
     let envelope = value
         .get("type")
@@ -525,13 +540,15 @@ async fn finish_turn(
         }
     }
 
-    let (status, kind, message) = classify_turn(outcome, exit_code);
+    let captured_error = ctx.captured_error.lock().clone();
+    let (status, kind, message) = classify_turn(outcome, exit_code, captured_error);
     emit_status(&ctx.app, &ctx.tab_id, status, kind, message);
 }
 
 fn classify_turn(
     outcome: TurnOutcome,
     exit_code: Option<i32>,
+    captured_error: Option<String>,
 ) -> (SessionStatus, Option<ErrorKind>, Option<String>) {
     match outcome {
         TurnOutcome::Drained => match exit_code {
@@ -539,12 +556,15 @@ fn classify_turn(
             Some(c) => (
                 SessionStatus::Error,
                 Some(ErrorKind::AgentCrashed),
-                Some(format!("exit code {c}")),
+                Some(captured_error.unwrap_or_else(|| format!("exit code {c}"))),
             ),
             None => (
                 SessionStatus::Error,
                 Some(ErrorKind::AgentCrashed),
-                Some("child exited with no status".into()),
+                Some(
+                    captured_error
+                        .unwrap_or_else(|| "child exited with no status".into()),
+                ),
             ),
         },
         TurnOutcome::SendFailed(detail) => (
@@ -621,6 +641,31 @@ fn extract_upstream_session_id(value: &serde_json::Value) -> Option<&str> {
         }
     }
     None
+}
+
+/// Pull a human-readable reason from any in-stream error envelope.
+/// Today this fires only on codex events (claude surfaces failures
+/// via `Status::Error` already); kept generic so a future CLI can
+/// reuse the same plumbing.
+///
+/// Shapes handled:
+/// - `{"type":"error","message":"..."}` (codex direct)
+/// - `{"type":"turn.failed","error":{"message":"..."}}`
+fn extract_inline_error(value: &serde_json::Value) -> Option<String> {
+    let obj = value.as_object()?;
+    let envelope_type = obj.get("type").and_then(|v| v.as_str())?;
+    match envelope_type {
+        "error" => obj
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        "turn.failed" => obj
+            .get("error")
+            .and_then(|v| v.get("message"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        _ => None,
+    }
 }
 
 /// Stream-json envelope claude expects on stdin for a fresh user turn.
@@ -854,22 +899,45 @@ mod tests {
 
     #[test]
     fn classify_turn_drained_zero_is_idle() {
-        let (status, kind, _) = classify_turn(TurnOutcome::Drained, Some(0));
+        let (status, kind, _) = classify_turn(TurnOutcome::Drained, Some(0), None);
         assert_eq!(status, SessionStatus::Idle);
         assert!(kind.is_none());
     }
 
     #[test]
     fn classify_turn_drained_nonzero_is_agent_crashed() {
-        let (status, kind, msg) = classify_turn(TurnOutcome::Drained, Some(7));
+        let (status, kind, msg) = classify_turn(TurnOutcome::Drained, Some(7), None);
         assert_eq!(status, SessionStatus::Error);
         assert_eq!(kind, Some(ErrorKind::AgentCrashed));
         assert!(msg.unwrap().contains('7'));
     }
 
     #[test]
+    fn classify_turn_prefers_captured_error_over_exit_code() {
+        // Codex emits a useful reason in its `error` / `turn.failed`
+        // envelope before exiting non-zero. Without this preference
+        // the user only sees `exit code 1`.
+        let (_, _, msg) = classify_turn(
+            TurnOutcome::Drained,
+            Some(1),
+            Some("model not supported".into()),
+        );
+        assert_eq!(msg.as_deref(), Some("model not supported"));
+    }
+
+    #[test]
+    fn classify_turn_uses_captured_error_when_exit_status_missing() {
+        let (_, _, msg) = classify_turn(
+            TurnOutcome::Drained,
+            None,
+            Some("rate limited".into()),
+        );
+        assert_eq!(msg.as_deref(), Some("rate limited"));
+    }
+
+    #[test]
     fn classify_turn_line_cap_is_protocol_violation() {
-        let (status, kind, _) = classify_turn(TurnOutcome::LineCapExceeded, Some(0));
+        let (status, kind, _) = classify_turn(TurnOutcome::LineCapExceeded, Some(0), None);
         assert_eq!(status, SessionStatus::Error);
         assert_eq!(kind, Some(ErrorKind::ProtocolViolation));
     }
@@ -943,9 +1011,30 @@ mod tests {
     #[test]
     fn classify_turn_send_failed_is_agent_crashed() {
         let (status, kind, msg) =
-            classify_turn(TurnOutcome::SendFailed("pipe broken".into()), None);
+            classify_turn(TurnOutcome::SendFailed("pipe broken".into()), None, None);
         assert_eq!(status, SessionStatus::Error);
         assert_eq!(kind, Some(ErrorKind::AgentCrashed));
         assert_eq!(msg.as_deref(), Some("pipe broken"));
+    }
+
+    #[test]
+    fn extract_inline_error_handles_codex_error_envelope() {
+        let v = serde_json::json!({"type":"error","message":"model not supported"});
+        assert_eq!(extract_inline_error(&v).as_deref(), Some("model not supported"));
+    }
+
+    #[test]
+    fn extract_inline_error_handles_codex_turn_failed() {
+        let v = serde_json::json!({
+            "type": "turn.failed",
+            "error": {"message": "rate limited"}
+        });
+        assert_eq!(extract_inline_error(&v).as_deref(), Some("rate limited"));
+    }
+
+    #[test]
+    fn extract_inline_error_returns_none_for_unrelated_lines() {
+        assert!(extract_inline_error(&serde_json::json!({"type":"turn.started"})).is_none());
+        assert!(extract_inline_error(&serde_json::json!({"foo":"bar"})).is_none());
     }
 }
