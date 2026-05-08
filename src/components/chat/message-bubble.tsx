@@ -1,7 +1,7 @@
-import { For, Show, createMemo, createSignal, Index } from "solid-js";
+import { For, Show, createMemo, createSignal, Index, onCleanup } from "solid-js";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { ChatMessage, ChatBlock } from "../../types";
-import { escapeHtml, highlightDiffLine } from "../../lib/format/html";
+import { highlightDiffLine } from "../../lib/format/html";
 import { applyInline as applyInlineRaw } from "../../lib/format/inline";
 import { formatInline } from "../../lib/format/markdown";
 import { isValidTempImagePath } from "../../lib/validate-path";
@@ -12,6 +12,50 @@ interface MessageBubbleProps {
   message: ChatMessage;
 }
 
+function CopyIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+    </svg>
+  );
+}
+
+function CodeBlock(props: { code: string; lang?: string }) {
+  const [copied, setCopied] = createSignal(false);
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  onCleanup(() => clearTimeout(timeoutId));
+
+  function handleCopy() {
+    navigator.clipboard.writeText(props.code).then(() => {
+      setCopied(true);
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {
+      console.warn("Failed to copy code to clipboard");
+    });
+  }
+
+  return (
+    <div class={styles.codeBlock}>
+      <div class={styles.codeBlockHeader}>
+        <Show when={props.lang}>
+          <span class={styles.codeLang}>{props.lang}</span>
+        </Show>
+        <button
+          class={`${styles.copyBtn}${copied() ? ` ${styles.copied}` : ""}`}
+          onClick={handleCopy}
+          title="Copy to clipboard"
+        >
+          <Show when={copied()} fallback={<CopyIcon />}>✓</Show>
+        </button>
+      </div>
+      <pre class={styles.codeContent}><code>{props.code}</code></pre>
+    </div>
+  );
+}
+
 function renderMarkdown(text: string) {
   if (!text) return null;
   const parts = text.split(/(```[\s\S]*?```)/);
@@ -19,21 +63,15 @@ function renderMarkdown(text: string) {
     <div class={styles.markdown}>
       <For each={parts}>
         {(part) => {
-          if (part.startsWith("```")) {
+          // Only treat as code block when both opening and closing fences are present
+          if (part.startsWith("```") && part.endsWith("```") && part.length >= 6) {
             const inner = part.slice(3, -3);
             const lines = inner.split("\n");
             const lang = lines[0]?.trim() || undefined;
-            const codeLines = lang ? lines.slice(1) : lines;
-            // Strip leading/trailing empty lines
-            while (codeLines.length > 0 && codeLines[0] === "") codeLines.shift();
-            while (codeLines.length > 0 && codeLines[codeLines.length - 1] === "") codeLines.pop();
-            const code = codeLines.join("\n");
-            return (
-              <div class={styles.codeBlock}>
-                <Show when={lang}><div class={styles.codeLang}>{lang}</div></Show>
-                <pre class={styles.codeContent}><code>{code}</code></pre>
-              </div>
-            );
+            const rawLines = lang ? lines.slice(1) : lines;
+            // Strip leading/trailing empty lines without mutating the array
+            const code = rawLines.join("\n").replace(/^\n+|\n+$/g, "");
+            return <CodeBlock code={code} lang={lang} />;
           }
           return <span innerHTML={formatInline(part, applyInline, styles)} />;
         }}
@@ -131,11 +169,6 @@ function openContentAsTab(title: string, content: string) {
 }
 
 
-/** Text short enough to show without fade mask (~3 lines) */
-function isShortText(text: string): boolean {
-  return text.length < 150 && text.split("\n").length <= 3;
-}
-
 function truncate(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
   return text.slice(0, maxLen) + "…";
@@ -168,11 +201,18 @@ function DiffOutput(props: { text: string }) {
 }
 
 function ThinkingBlock(props: { block: ChatBlock & { kind: "thinking" }; isLast: boolean }) {
+  // Start open so users see the content; they can collapse via click
+  const [open, setOpen] = createSignal(true);
   const dotClass = () => props.block.isStreaming ? styles.dotProgress : styles.dotSuccess;
   return (
     <div class={`${styles.timelineRow} ${dotClass()}`}>
-      <details class={styles.thinking} open={props.block.isStreaming}>
+      <details
+        class={styles.thinking}
+        open={open()}
+        onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
+      >
         <summary class={styles.thinkingSummary}>
+          <span class={`${styles.thinkingToggle} ${open() ? styles.thinkingToggleOpen : ""}`}>▶</span>
           {props.block.isStreaming ? "Thinking…" : "Thinking"}
         </summary>
         <div class={styles.thinkingContent}>{props.block.text}</div>

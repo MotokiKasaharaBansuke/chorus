@@ -99,11 +99,15 @@ export function ChatPanel(props: ChatPanelProps) {
     isNearBottom = scrollHeight - scrollTop - clientHeight < NEAR_BOTTOM_THRESHOLD_PX;
   }
 
-  /** Scroll to the last message. Uses double-rAF so the scroll executes
-   *  AFTER batchMeasure has updated item sizes in the first rAF — this
-   *  eliminates layout shift caused by scrolling with estimateSize before
-   *  actual measurements arrive. The outer rAF coalesces multiple calls
-   *  per frame into a single scroll. */
+  /** Scroll to the absolute bottom of the scroll container.
+   *  Uses native scrollTop assignment instead of virtualizer.scrollToIndex so
+   *  the position is accurate even when virtual item heights haven't been
+   *  measured yet (the estimateSize underestimate causes scrollToIndex to land
+   *  short of the true bottom).
+   *
+   *  Double-rAF pattern: the outer rAF coalesces multiple rapid calls into one;
+   *  the inner rAF fires after a DOM paint so measurement-updated heights
+   *  (getTotalSize / scrollHeight) are stable before we set scrollTop. */
   let scrollRafId: number | null = null;
   function scrollToBottom() {
     if (scrollRafId !== null) return;
@@ -113,12 +117,16 @@ export function ChatPanel(props: ChatPanelProps) {
     isNearBottom = true;
     scrollRafId = requestAnimationFrame(() => {
       scrollRafId = null;
+      if (!unmounted && scrollRef) {
+        // First pass: scroll to estimated bottom so the virtualizer starts
+        // rendering bottom items immediately (makes them available to measure).
+        scrollRef.scrollTop = scrollRef.scrollHeight;
+      }
       requestAnimationFrame(() => {
-        if (unmounted) return;
-        const len = messages().length;
-        if (len > 0) {
-          virtualizer.scrollToIndex(len - 1, { align: "end" });
-        }
+        if (unmounted || !scrollRef) return;
+        // Second pass: scroll again after paint so any measurement-driven
+        // height increases (getTotalSize grew) are captured.
+        scrollRef.scrollTop = scrollRef.scrollHeight;
       });
     });
   }
@@ -152,6 +160,12 @@ export function ChatPanel(props: ChatPanelProps) {
       const batch = measureBatch;
       measureBatch = new Set();
       for (const e of batch) measureIfVisible(e);
+      // After measuring, item heights may have grown beyond their estimates,
+      // increasing getTotalSize / scrollHeight. Re-pin to the true bottom so
+      // the user is not left hovering above newly revealed content.
+      if (isNearBottom && scrollRef) {
+        scrollRef.scrollTop = scrollRef.scrollHeight;
+      }
     });
   }
 
@@ -265,7 +279,11 @@ export function ChatPanel(props: ChatPanelProps) {
 
   function applyUpdate(msgs: ChatMessage[]) {
     setMessages(msgs);
-    if (isNearBottom) scrollToBottom();
+    // Always scroll to the latest message. Users expect new content to be
+    // visible immediately; the previous isNearBottom guard was causing the
+    // view to stay at position 0 (after ContentPool transitions) instead of
+    // showing the latest message.
+    scrollToBottom();
 
     // O(1) — usage stats are accumulated incrementally inside StreamParser.
     const cliType = props.tab.cliConfig.cliType;
@@ -308,12 +326,18 @@ export function ChatPanel(props: ChatPanelProps) {
   // Throttle parser → DOM updates to ~20fps. The parser's rAF already limits
   // to 60fps, but SolidJS reconciliation + virtualizer measurement at higher
   // rates starves the main thread with 20 panes streaming simultaneously.
+  // lastParserEventAt is updated on every parser output event so the stall
+  // detector below can distinguish a slow-but-alive stream from a dead one.
+  let lastParserEventAt = 0;
   const throttle = useThrottledUpdate({
     onApply: applyUpdate,
     isActive: props.isActive,
     isDisposed: () => unmounted,
   });
-  const unsubUpdate = parser.onUpdate(throttle.handleUpdate);
+  const unsubUpdate = parser.onUpdate((msgs) => {
+    lastParserEventAt = Date.now();
+    throttle.handleUpdate(msgs);
+  });
   onCleanup(unsubUpdate);
   const unsubRateLimit = parser.onRateLimit((info) => {
     usageStore.updateRateLimit(info);
@@ -345,6 +369,26 @@ export function ChatPanel(props: ChatPanelProps) {
     if (!isTabStreaming(props.tab.status) && isStreaming()) {
       setIsStreaming(false);
     }
+  });
+
+  // Stall detector: if isStreaming has been true for 60s with no parser events,
+  // the PTY likely accepted the message but will never respond (e.g. it is busy
+  // running a long-lived subprocess). Reset so the user can type again without
+  // restarting the app.
+  const STREAM_STALL_MS = 60_000;
+  createEffect(() => {
+    if (!isStreaming()) return;
+    lastParserEventAt = Date.now();
+    const timer = setInterval(() => {
+      if (!isStreaming()) { clearInterval(timer); return; }
+      if (Date.now() - lastParserEventAt >= STREAM_STALL_MS) {
+        clearInterval(timer);
+        setIsStreaming(false);
+        store.updateStatus(props.tab.id, "waiting");
+        parser.addUserMessage("[Error: No response received. The process may be busy. Press ESC or try again.]");
+      }
+    }, 5_000);
+    onCleanup(() => clearInterval(timer));
   });
 
   // Reactive subscriptions — re-subscribe automatically when ptyId changes (e.g. after respawn)
@@ -413,6 +457,21 @@ export function ChatPanel(props: ChatPanelProps) {
   }
   window.addEventListener("mlm-refresh-tab", handleRefreshEvent);
   onCleanup(() => window.removeEventListener("mlm-refresh-tab", handleRefreshEvent));
+
+  // Window-level ESC handler — interrupts streaming even when textarea lacks focus
+  // (e.g. user scrolled up to read output). Registered only while this panel is active
+  // to avoid every mounted ChatPanel competing on the same keydown event (e.g. 20 panels).
+  function handleWindowEsc(e: KeyboardEvent) {
+    if (e.key === "Escape" && isStreaming()) {
+      e.preventDefault();
+      void handleInterrupt();
+    }
+  }
+  createEffect(() => {
+    if (!props.isActive) return;
+    window.addEventListener("keydown", handleWindowEsc);
+    onCleanup(() => window.removeEventListener("keydown", handleWindowEsc));
+  });
 
 
   // Throttle PTY respawns: at most once per 5 seconds
@@ -724,6 +783,7 @@ export function ChatPanel(props: ChatPanelProps) {
       await interruptPty(ptyId());
     } catch { /* session missing or already idle */ }
     parser.addInterrupted();
+    scrollToBottom();
   }
 
   const sendReview = useSendReview({
@@ -810,16 +870,7 @@ export function ChatPanel(props: ChatPanelProps) {
           </div>
         )}
       </Show>
-      <div ref={scrollRef} class={styles.messages} onScroll={scheduleStickyUpdate} onClick={(e) => {
-        const link = (e.target as HTMLElement).closest("a[data-external-link]") as HTMLAnchorElement | null;
-        if (link) {
-          e.preventDefault();
-          const url = link.getAttribute("href");
-          if (url && url !== "#") {
-            import("@tauri-apps/plugin-opener").then(m => m.openUrl(url)).catch(() => {});
-          }
-        }
-      }}>
+      <div ref={scrollRef} class={styles.messages} onScroll={scheduleStickyUpdate}>
         <Show when={messages().length === 0}>
           <div class={styles.welcome}>
             <div class={styles.welcomeIcon}>

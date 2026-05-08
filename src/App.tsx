@@ -1,4 +1,5 @@
 import { batch, createSignal, createEffect, createMemo, For, Show, onMount, onCleanup } from "solid-js";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { LogicalSize } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -38,6 +39,7 @@ import { useKeyboardShortcuts } from "./hooks/use-keyboard-shortcuts";
 import { useResizeHandle } from "./hooks/use-resize-handle";
 import { useActiveTabAttr } from "./hooks/use-active-tab-attr";
 import { removeParser } from "./lib/stream-parser-registry";
+import { isLocalHost } from "./lib/is-local-host";
 import { effectivePaneKind, effectivePtyId, isTabStreaming } from "./types";
 import type { CliConfig, CliMode, PaneKind, Tab } from "./types";
 import chorusIcon from "./assets/chorus-icon.png";
@@ -188,11 +190,13 @@ function App() {
   // so the freshest `upstreamSessionId` and last 200 ms of message
   // deltas survive `Cmd+Q`; otherwise the next launch would resume
   // claude against a stale session id and the histories would diverge.
-  window.addEventListener("beforeunload", () => {
+  const beforeUnloadHandler = () => {
     const session = buildCurrentSession();
     if (session) persistSession(session).catch(() => {});
     useHeadlessStore().flushAllPersist();
-  });
+  };
+  window.addEventListener("beforeunload", beforeUnloadHandler);
+  onCleanup(() => window.removeEventListener("beforeunload", beforeUnloadHandler));
 
   // --- IPC: open directory in existing instance (from mlm CLI) ---
   let ipcUnlistenRef: (() => void) | null = null;
@@ -308,6 +312,26 @@ function App() {
     }
     window.addEventListener("mlm-worktree-reset", handleWorktreeResetEvent);
     onCleanup(() => window.removeEventListener("mlm-worktree-reset", handleWorktreeResetEvent));
+
+    // Global external link interceptor — prevent Tauri webview from navigating in-app.
+    // Catches any <a href="https://..."> click (including ones missing data-external-link)
+    // and opens it in the OS default browser via plugin-opener instead.
+    function handleGlobalLinkClick(e: MouseEvent) {
+      const link = (e.target as Element).closest("a[href]") as HTMLAnchorElement | null;
+      if (!link) return;
+      const href = link.href;
+      if (!href) return;
+      try {
+        const url = new URL(href);
+        if ((url.protocol === "https:" || url.protocol === "http:") && !isLocalHost(url.hostname)) {
+          e.preventDefault();
+          openUrl(href).catch(() => {});
+        }
+      } catch { /* invalid URL, ignore */ }
+    }
+    // useCapture=true so this fires before any bubbling handlers (e.g. per-panel click)
+    document.addEventListener("click", handleGlobalLinkClick, true);
+    onCleanup(() => document.removeEventListener("click", handleGlobalLinkClick, true));
   });
 
   onCleanup(() => { dropUnlistenRef?.(); ipcUnlistenRef?.(); });
