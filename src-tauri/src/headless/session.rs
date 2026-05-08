@@ -335,40 +335,30 @@ impl Session {
     }
 
     /// Codex argv shape:
-    /// - First turn:  `exec <flags> -`
-    /// - Resumed turn: `exec resume <thread_id> <flags> -`
+    /// - First turn:   `exec <flags> -`
+    /// - Resumed turn: `exec <flags> resume <thread_id> -`
     ///
-    /// `base_args` already starts with `exec` (assembled by
-    /// `cli/registry.rs::resolve_command`), so we either splice
-    /// `resume <id>` in after that token or leave the array alone.
+    /// **Flag placement matters.** `codex exec resume` is a clap
+    /// sub-subcommand whose own option set is tiny (`--last`,
+    /// `--config`, `--enable`, `--disable`). `--full-auto`,
+    /// `--json`, `--skip-git-repo-check`, `--model` etc. all belong
+    /// to the parent `exec`, so they have to appear *before* the
+    /// `resume` token. Putting them after exits with code 2
+    /// ("unexpected argument").
+    ///
     /// The trailing `-` tells codex to read the prompt from stdin —
     /// the same channel `send_user_turn` writes to.
     fn build_codex_args(&self) -> Vec<String> {
-        // The resume splice below assumes the first token is `exec`.
-        // `cli/registry.rs::resolve_command` produces that ordering;
-        // a future change there that puts a flag before `exec` would
-        // silently corrupt the resume argv. The debug-only assert is
-        // a contract reminder, not a runtime cost in release builds.
         debug_assert_eq!(
             self.base_args.first().map(String::as_str),
             Some("exec"),
             "codex base_args must start with `exec` (see cli/registry.rs)",
         );
-        let prev = self.upstream_session_id.lock().clone();
-        let mut args = match prev {
-            Some(id) => {
-                let mut a = Vec::with_capacity(self.base_args.len() + 3);
-                a.push("exec".into());
-                a.push("resume".into());
-                a.push(id);
-                // Skip the leading `exec` already in base_args.
-                if let Some((_, rest)) = self.base_args.split_first() {
-                    a.extend_from_slice(rest);
-                }
-                a
-            }
-            None => self.base_args.clone(),
-        };
+        let mut args = self.base_args.clone();
+        if let Some(id) = self.upstream_session_id.lock().clone() {
+            args.push("resume".into());
+            args.push(id);
+        }
         args.push("-".into());
         args
     }
@@ -971,19 +961,33 @@ mod tests {
     }
 
     #[test]
-    fn build_codex_args_resumed_turn_inserts_resume_subcommand() {
-        let base = vec!["exec".into(), "--json".into(), "--skip-git-repo-check".into()];
+    fn build_codex_args_resumed_turn_appends_resume_after_flags() {
+        // Flags must precede `resume <id>`; otherwise `codex exec
+        // resume` rejects them with exit 2 because they belong to
+        // the parent `exec` subcommand.
+        let base = vec![
+            "exec".into(),
+            "--full-auto".into(),
+            "--json".into(),
+            "--skip-git-repo-check".into(),
+            "--model".into(),
+            "gpt-5.2".into(),
+        ];
         let args = codex_args_for_test(&base, Some("019e0580-72"));
         assert_eq!(
             args,
             vec![
                 "exec".to_string(),
-                "resume".into(),
-                "019e0580-72".into(),
+                "--full-auto".into(),
                 "--json".into(),
                 "--skip-git-repo-check".into(),
+                "--model".into(),
+                "gpt-5.2".into(),
+                "resume".into(),
+                "019e0580-72".into(),
                 "-".into(),
-            ]
+            ],
+            "flags must come before `resume <id>` per codex 0.66 grammar",
         );
     }
 
@@ -991,19 +995,11 @@ mod tests {
     /// argv shape can be unit-tested without a `Session` instance
     /// (which requires a Tauri `AppHandle`).
     fn codex_args_for_test(base: &[String], prev: Option<&str>) -> Vec<String> {
-        let mut args = match prev {
-            Some(id) => {
-                let mut a = Vec::with_capacity(base.len() + 3);
-                a.push("exec".into());
-                a.push("resume".into());
-                a.push(id.to_string());
-                if let Some((_, rest)) = base.split_first() {
-                    a.extend_from_slice(rest);
-                }
-                a
-            }
-            None => base.to_vec(),
-        };
+        let mut args = base.to_vec();
+        if let Some(id) = prev {
+            args.push("resume".into());
+            args.push(id.to_string());
+        }
         args.push("-".into());
         args
     }
