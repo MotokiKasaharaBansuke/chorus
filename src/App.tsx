@@ -685,7 +685,7 @@ function App() {
                   <For each={bottomTerminal.termTabs()}>
                     {(tab) => (
                       <div style={{ display: tab.id === bottomTerminal.activeTermId() ? "flex" : "none", flex: 1, "flex-direction": "column" }}>
-                        <TerminalPanel tab={tab} isActive={tab.id === bottomTerminal.activeTermId()} />
+                        <TerminalPanel tab={tab} isActive={() => tab.id === bottomTerminal.activeTermId()} />
                       </div>
                     )}
                   </For>

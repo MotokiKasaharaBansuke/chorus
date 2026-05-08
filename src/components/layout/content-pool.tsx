@@ -86,7 +86,7 @@ function PooledContent(props: { tab: Tab; isActive: () => boolean; onClose: () =
     return <FileViewer path={props.tab.filePath} onClose={props.onClose} contentOverride={props.tab.contentOverride} />;
   }
   if (props.tab.cliConfig.cliType === "claude-code" || props.tab.cliConfig.cliType === "codex") {
-    return <ChatPanel tab={props.tab} isActive={props.isActive()} />;
+    return <ChatPanel tab={props.tab} isActive={props.isActive} />;
   }
-  return <TerminalPanel tab={props.tab} isActive={props.isActive()} />;
+  return <TerminalPanel tab={props.tab} isActive={props.isActive} />;
 }
