@@ -77,12 +77,6 @@ fn start_to_app(e: SessionStartError) -> AppError {
         SessionStartError::Lock(inner) => {
             AppError::PtySpawnFailed(format!("session lock: {inner}"))
         }
-        SessionStartError::Spawn(inner) => {
-            AppError::PtySpawnFailed(format!("spawn: {inner}"))
-        }
-        SessionStartError::HealthCheckFailed(msg) => {
-            AppError::PtySpawnFailed(format!("health check: {msg}"))
-        }
     }
 }
 
@@ -119,26 +113,50 @@ pub async fn spawn_headless(
             "Shell CliType is not supported by headless pipeline".into(),
         ));
     }
+    if matches!(request.cli_type, CliType::Codex) {
+        // Codex headless is Phase 1f territory: `codex exec` reads a
+        // single positional prompt and emits `--json` events, but it
+        // does not accept stream-json on stdin. We need a small adapter
+        // that re-spawns per turn before this path can be lit.
+        return Err(AppError::CliNotFound(
+            "Codex headless support lands in Phase 1f".into(),
+        ));
+    }
     let (command, mut args) = resolve_command(&request.cli_type, &request.mode, &request.model)?;
 
-    // Append resume / fork flags for Claude. Codex resume uses a different
-    // subcommand path and lands in Phase 1e.
+    // Headless flags for Claude Code: stream-json bidirectional pipe,
+    // partial messages so the UI can render deltas, and either a fresh
+    // `--session-id` or `--resume <existing>` for continuity.
+    //
+    // `--verbose` is required by `--print` + `--output-format stream-json`
+    // on Claude Code 1.x — without it the CLI silently emits nothing.
     if matches!(request.cli_type, CliType::ClaudeCode) {
-        if let Some(session_id) = request.resume_session_at.as_deref() {
-            validate_session_id(session_id).map_err(validation_to_app)?;
-            args.push("--resume".into());
-            args.push(session_id.into());
-            if request.fork_session {
-                args.push("--fork-session".into());
-            }
-        } else if request.fork_session {
-            // Fail fast — silently dropping `fork_session` would mask a
-            // client bug where the user intended to fork. Surface it so
-            // the frontend can correct the argument shape.
-            return Err(AppError::PtySpawnFailed(
-                "fork_session requires resume_session_at".into(),
-            ));
+        args.push("-p".into());
+        args.push("--output-format".into());
+        args.push("stream-json".into());
+        args.push("--input-format".into());
+        args.push("stream-json".into());
+        args.push("--include-partial-messages".into());
+        args.push("--verbose".into());
+    }
+
+    // Continuity (`--session-id` first turn / `--resume <id>` after) is
+    // owned by `Session` itself, since the per-turn spawn model has to
+    // re-emit those flags on every turn and only the session knows
+    // whether the upstream id has been observed yet. Validate the
+    // resume id here so a bad payload fails fast.
+    let initial_session_id = match request.resume_session_at.as_deref() {
+        Some(id) => {
+            validate_session_id(id).map_err(validation_to_app)?;
+            Some(id.to_string())
         }
+        None => None,
+    };
+    if request.fork_session && initial_session_id.is_none() {
+        // Silently dropping `fork_session` would mask a client bug; surface it.
+        return Err(AppError::PtySpawnFailed(
+            "fork_session requires resume_session_at".into(),
+        ));
     }
 
     let config = SessionConfig {
@@ -147,6 +165,8 @@ pub async fn spawn_headless(
         args,
         cwd,
         extra_env,
+        initial_session_id,
+        fork_session: request.fork_session,
     };
 
     let session = Session::start(config, app).await.map_err(start_to_app)?;
@@ -200,14 +220,14 @@ pub async fn write_headless_input(
     let session = state
         .get(&request.tab_id)
         .ok_or_else(|| AppError::PtyNotFound(request.tab_id.clone()))?;
-    let pending = session
+    let request_id = session
         .send_user_message(request.text)
         .await
         .map_err(|e| AppError::PtyWriteFailed(format!("{e}")))?;
-    // The frontend correlates completion via the per-tab event channel;
-    // the outcome receiver is dropped here so the session GC can reclaim
-    // the pending entry once it is no longer needed.
-    Ok(pending.id.as_str().to_string())
+    // Per-turn model: the spawn + drain runs on a background tokio task,
+    // so the frontend correlates completion via the per-tab event
+    // channel rather than awaiting here.
+    Ok(request_id.as_str().to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -216,7 +236,10 @@ pub struct CancelHeadlessRequest {
     pub tab_id: String,
 }
 
-/// Send the protocol-level cancel envelope. Does not kill the process.
+/// Cancel the in-flight turn by SIGKILLing the child group. The
+/// underlying `Session::kill_now` is idempotent and a no-op when no
+/// turn is in flight, so the UI cancel button can be wired here
+/// without extra guards.
 #[tauri::command]
 pub async fn cancel_headless_message(
     state: State<'_, HeadlessManager>,
@@ -225,10 +248,8 @@ pub async fn cancel_headless_message(
     let session = state
         .get(&request.tab_id)
         .ok_or_else(|| AppError::PtyNotFound(request.tab_id.clone()))?;
-    session
-        .cancel_current()
-        .await
-        .map_err(|e| AppError::PtyWriteFailed(format!("{e}")))
+    session.kill_now();
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -284,8 +305,10 @@ pub async fn force_release_headless_lock(
         .map_err(|e| AppError::PtySpawnFailed(format!("force_release: {e}")))
 }
 
-/// Tear the session down: graceful close, then SIGTERM/SIGKILL escalation
-/// (handled inside the reader task).
+/// Tear the session down. `Session::kill_now` SIGKILLs the in-flight
+/// child, then `Drop` releases the per-tab `SessionLock` and aborts
+/// the run task — both are idempotent, so a double-call from the UI
+/// is safe.
 #[tauri::command]
 pub async fn kill_headless(
     state: State<'_, HeadlessManager>,
@@ -294,13 +317,7 @@ pub async fn kill_headless(
     let session = state
         .remove(&request.tab_id)
         .ok_or_else(|| AppError::PtyNotFound(request.tab_id.clone()))?;
-    // Already-closed is not a hard error here — `kill_headless` is meant to
-    // be idempotent. Log at debug so the double-shutdown case is still
-    // observable in trace builds. Drop still releases the SessionLock and
-    // triggers `kill_on_drop` for the underlying child.
-    if let Err(e) = session.shutdown().await {
-        tracing::debug!(tab_id = %request.tab_id, "shutdown returned: {e}");
-    }
+    session.kill_now();
     drop(session);
     Ok(())
 }

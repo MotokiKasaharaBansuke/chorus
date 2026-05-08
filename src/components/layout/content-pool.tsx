@@ -90,7 +90,7 @@ function PooledContent(props: { tab: Tab; isActive: () => boolean; onClose: () =
   }
   if (props.tab.cliConfig.cliType === "claude-code" || props.tab.cliConfig.cliType === "codex") {
     if (effectivePaneKind(props.tab) === "headless") {
-      return <HeadlessPanel tabId={props.tab.id} />;
+      return <HeadlessPanel tab={props.tab} />;
     }
     return <ChatPanel tab={props.tab} isActive={props.isActive()} />;
   }

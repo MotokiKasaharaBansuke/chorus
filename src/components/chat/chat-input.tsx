@@ -38,6 +38,12 @@ interface ChatInputProps {
     windowSize: number;
     onCompact: () => void;
   };
+  /** When true, the mode badge is rendered but click-to-cycle and
+   *  Shift+Tab are no-ops. Headless panes set this because the CLI
+   *  mode is fixed at spawn time — silently mutating the badge would
+   *  give the user a "Bypass" indicator while the backend still
+   *  enforces the original mode, masking the real safety state. */
+  readOnlyMode?: boolean;
 }
 
 const DONUT_RADIUS = 6;
@@ -132,6 +138,7 @@ export function ChatInput(props: ChatInputProps) {
   const modes = () => props.cliType === "claude-code" ? CLAUDE_MODES : CODEX_MODES;
 
   function cycleMode() {
+    if (props.readOnlyMode) return;
     const available = modes();
     const nextMode = available[(available.indexOf(props.mode) + 1) % available.length];
     store.updateMode(props.tabId, nextMode);
@@ -313,7 +320,8 @@ export function ChatInput(props: ChatInputProps) {
               [styles.modeDefault]: props.mode === "default",
             }}
             onClick={cycleMode}
-            title="Shift+Tab to cycle"
+            style={props.readOnlyMode ? { cursor: "default" } : undefined}
+            title={props.readOnlyMode ? "Mode is fixed for this pane (restart to change)" : "Shift+Tab to cycle"}
           >
             {MODE_LABELS[props.mode]}
           </span>

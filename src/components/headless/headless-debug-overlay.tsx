@@ -2,6 +2,7 @@ import { Show, createSignal } from "solid-js";
 
 import { killHeadless, spawnHeadless } from "../../lib/headless/commands";
 import { useHeadlessStore } from "../../stores/headless-store";
+import type { Tab } from "../../types";
 
 import { HeadlessPanel } from "./headless-panel";
 import styles from "./headless-debug-overlay.module.css";
@@ -51,6 +52,17 @@ export function HeadlessDebugOverlay() {
       setBusy(false);
     }
   };
+
+  // Synthesise a `Tab` for `<HeadlessPanel>` — the debug overlay never
+  // touches `useTabStore`, so this is a stand-in just rich enough for
+  // `<ChatInput>` (which reads `cliType` / `mode` / `workingDir`).
+  const debugTab = (id: string, cli: "claude-code" | "codex", workingDir: string): Tab => ({
+    id,
+    title: `headless:${id}`,
+    status: "idle",
+    paneKind: "headless",
+    cliConfig: { cliType: cli, mode: "default", workingDir },
+  });
 
   const close = async () => {
     const id = tabId();
@@ -137,7 +149,7 @@ export function HeadlessDebugOverlay() {
             </>
           }
         >
-          {(id) => <HeadlessPanel tabId={id()} />}
+          {(id) => <HeadlessPanel tab={debugTab(id(), cliType(), cwd())} />}
         </Show>
       </div>
     </div>

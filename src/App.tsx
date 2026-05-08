@@ -16,6 +16,7 @@ import { MIN_PANE_PX, getAllPaneGroups, findPaneGroupContainingTab } from "./lib
 import { TerminalPanel } from "./components/terminal/terminal-panel";
 import { HeadlessDebugOverlay } from "./components/headless/headless-debug-overlay";
 import { spawnHeadless, killHeadless } from "./lib/headless/commands";
+import { useHeadlessStore } from "./stores/headless-store";
 import { decidePaneKind } from "./lib/engine/decide-pane-kind";
 import { Sidebar } from "./components/sidebar/sidebar";
 import { LayoutRenderer } from "./components/layout/layout-renderer";
@@ -183,9 +184,14 @@ function App() {
   });
 
   // Ensure session is saved immediately before the window closes.
+  // `flushAllPersist` synchronously drains the per-tab debounce timers
+  // so the freshest `upstreamSessionId` and last 200 ms of message
+  // deltas survive `Cmd+Q`; otherwise the next launch would resume
+  // claude against a stale session id and the histories would diverge.
   window.addEventListener("beforeunload", () => {
     const session = buildCurrentSession();
     if (session) persistSession(session).catch(() => {});
+    useHeadlessStore().flushAllPersist();
   });
 
   // --- IPC: open directory in existing instance (from mlm CLI) ---
@@ -431,6 +437,11 @@ function App() {
       const paneKind = tab ? effectivePaneKind(tab) : "pty";
       if (paneKind === "headless") {
         try { await killHeadless(id); } catch { /* */ }
+        // Drop the persisted localStorage entry alongside the backend
+        // teardown — without this, closed-tab records would accumulate
+        // forever under `chorus:headless-session:v1:*` and eventually
+        // exhaust the per-origin quota, breaking save for live tabs.
+        useHeadlessStore().removeSession(id);
       } else {
         try { await killPty(tab ? effectivePtyId(tab) : id); } catch { /* */ }
       }
@@ -567,11 +578,13 @@ function App() {
   async function handleRestartTab(tab: Tab) {
     if (tab.cliConfig.cliType === "file-viewer") return;
     if (effectivePaneKind(tab) === "headless") {
-      // Headless restart is "kill + re-spawn" today; Phase 1e will expose
-      // a resume command that preserves the conversation state. Until
-      // then, kill via the headless route, drop the tab, and let the
-      // user re-open.
+      // Headless restart is "kill + re-spawn"; the user's intent here
+      // is to reset the conversation, so we drop the persisted state
+      // alongside the backend session. The new tab gets a fresh id
+      // and starts with empty localStorage — exactly what "restart"
+      // implies.
       try { await killHeadless(tab.id); } catch {}
+      useHeadlessStore().removeSession(tab.id);
       tabStore.closeTab(tab.id);
       await handleNewTab(tab.cliConfig);
       return;

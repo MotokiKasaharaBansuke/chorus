@@ -13,20 +13,17 @@
 //! * `child_transport` — production transport over `tokio::process::Child`
 //! * `system` — `RLIMIT_NOFILE` and per-tab advisory locks
 //! * `event` — `HeadlessEvent` wire vocabulary shared with the frontend
-//! * `session` — actor-style per-tab session, owns reader task + pending table
+//! * `session` — per-tab session: spawns one child per turn, drains
+//!   stdout to the frontend, persists the upstream `claude` session id
+//!   for `--resume` continuity
 //! * `manager` — process-wide registry of `Session`s
 //!
-//! ## Outstanding work (Phase 1d)
+//! ## Outstanding work
 //!
-//! * **Pending request lifecycle**: registration, message-id correlation
-//!   so assistant replies resolve `RequestOutcome::Completed`, and cancel
-//!   propagation that resolves `Cancelled`. Phase 1c intentionally ships
-//!   without auto-registration to avoid an unbounded pending table.
 //! * `resume_headless` / `fork_headless` commands with stale-lock detection
-//! * Stronger spawn health-check: peek stderr inside the grace window so
-//!   "auth required" / "rate-limited at startup" messages fail fast
+//! * Structured stream-json parsing (typed `message-delta` / `tool-use`
+//!   etc.) — Phase 1f. Today every line is forwarded as `unknown`.
 //! * Fixture-driven integration tests in `tests/fixtures/claude/*.jsonl`
-//! * `RequestId` / `MessageId` / `ToolUseId` newtypes (currently aliases)
 
 pub mod child_transport;
 pub mod event;
@@ -34,6 +31,7 @@ pub mod line_reader;
 pub mod manager;
 #[cfg(test)]
 mod parallel_regression;
+pub mod parser;
 pub mod redaction;
 pub mod session;
 pub mod system;

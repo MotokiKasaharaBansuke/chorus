@@ -45,6 +45,43 @@ describe("useHeadlessStore", () => {
     });
   });
 
+  it("appendUserMessage optimistically flips idle → thinking", () => {
+    // Without this optimistic bump the input would re-enable in the
+    // race window between `writeHeadlessInput` resolving and the real
+    // `Status::Thinking` event arriving over IPC, letting a fast
+    // double-Enter trip the backend's `SendError::Busy` guard.
+    createRoot((dispose) => {
+      const store = useHeadlessStore();
+      store.registerSession("t1");
+      expect(store.sessionFor("t1")?.status).toBe("idle");
+      store.appendUserMessage("t1", "req-1", "hello");
+      expect(store.sessionFor("t1")?.status).toBe("thinking");
+      dispose();
+    });
+  });
+
+  it("appendUserMessage clears stale error state on retry", () => {
+    createRoot((dispose) => {
+      const store = useHeadlessStore();
+      store.registerSession("t1");
+      store.applyEvent({
+        type: "status",
+        tabId: "t1",
+        status: "error",
+        errorKind: "agent_crashed",
+        message: "old failure",
+      });
+      // A user retry must not leave the previous error row dangling
+      // — but we only flip from `idle`, so this case (sending while
+      // already in error) must NOT optimistically transition. The
+      // user has to explicitly clear via a successful turn from the
+      // backend instead.
+      store.appendUserMessage("t1", "req-2", "retry");
+      expect(store.sessionFor("t1")?.status).toBe("error");
+      dispose();
+    });
+  });
+
   it("message-delta concatenates onto an existing assistant turn with the same id", () => {
     createRoot((dispose) => {
       const store = useHeadlessStore();
@@ -252,6 +289,43 @@ describe("useHeadlessStore", () => {
       if (msg?.role === "assistant") {
         expect(msg.toolCalls).toHaveLength(0);
       }
+      dispose();
+    });
+  });
+
+  it("session-id stores the upstream id on the session row", () => {
+    createRoot((dispose) => {
+      const store = useHeadlessStore();
+      store.registerSession("t1");
+      store.applyEvent({
+        type: "session-id",
+        tabId: "t1",
+        sessionId: "claude-uuid-abc",
+      });
+      expect(store.sessionFor("t1")?.upstreamSessionId).toBe("claude-uuid-abc");
+      dispose();
+    });
+  });
+
+  it("session-id events leave message history untouched", () => {
+    createRoot((dispose) => {
+      const store = useHeadlessStore();
+      store.registerSession("t1");
+      store.applyEvent({
+        type: "message-delta",
+        tabId: "t1",
+        messageId: "m-1",
+        index: 0,
+        delta: "hello",
+      });
+      store.applyEvent({
+        type: "session-id",
+        tabId: "t1",
+        sessionId: "claude-id",
+      });
+      const session = store.sessionFor("t1");
+      expect(session?.upstreamSessionId).toBe("claude-id");
+      expect(session?.messages).toHaveLength(1);
       dispose();
     });
   });

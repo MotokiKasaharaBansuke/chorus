@@ -89,6 +89,7 @@ export type HeadlessEvent =
       message?: string;
     }
   | { type: "rate-limit"; tabId: TabId; detail: RateLimitDetail }
+  | { type: "session-id"; tabId: TabId; sessionId: string }
   | { type: "unknown"; tabId: TabId; raw: unknown };
 
 /**
@@ -107,6 +108,7 @@ const KNOWN_HEADLESS_EVENT_TYPES = {
   usage: true,
   status: true,
   "rate-limit": true,
+  "session-id": true,
   unknown: true,
 } satisfies Record<HeadlessEvent["type"], true>;
 
@@ -126,6 +128,11 @@ export interface HeadlessSessionState {
   messages: HeadlessMessage[];
   usage: UsageReport;
   rateLimit?: RateLimitDetail;
+  /** Upstream `claude` session id reported by the backend via the
+   *  `session-id` event. Persisted to localStorage so a subsequent
+   *  app launch can pass it back as `resumeSessionAt` and reattach
+   *  the conversation. */
+  upstreamSessionId?: string;
 }
 
 /** A user or assistant turn in the conversation, derived from the wire stream. */
