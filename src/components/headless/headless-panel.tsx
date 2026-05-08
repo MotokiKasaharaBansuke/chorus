@@ -41,6 +41,7 @@ import {
 } from "../../lib/headless/commands";
 import { subscribeToHeadlessTab } from "../../lib/headless/event-channel";
 import { findStickyPromptText } from "../../lib/find-sticky-prompt-text";
+import { STREAM_STALL_MS, STALL_CHECK_INTERVAL_MS, STALL_INTERRUPTED_MESSAGE } from "../../lib/stall-constants";
 import { useHeadlessStore } from "../../stores/headless-store";
 import type { Tab } from "../../types";
 
@@ -201,6 +202,46 @@ export function HeadlessPanel(props: HeadlessPanelProps) {
     return total;
   });
 
+  // Stall detector: if isStreaming has been true for STREAM_STALL_MS with no
+  // message events from the backend, the turn is likely stuck (e.g., a
+  // subprocess that will never exit). Cancel the turn and reset status so
+  // the user can type again without closing the app.
+  // lastActivityAt tracks the last time a message or streaming token arrived,
+  // serving as a proxy for "the backend is still producing output".
+  let lastActivityAt = 0;
+
+  createEffect(
+    on(
+      () => [messages().length, streamingCharCount()] as const,
+      () => { lastActivityAt = Date.now(); },
+      { defer: true },
+    ),
+  );
+
+  createEffect(() => {
+    if (!isStreaming()) return;
+    lastActivityAt = Date.now();
+    const timer = setInterval(() => {
+      if (!isStreaming()) { clearInterval(timer); return; }
+      if (Date.now() - lastActivityAt >= STREAM_STALL_MS) {
+        clearInterval(timer);
+        // Always reset the UI regardless of whether the IPC cancel succeeds —
+        // the user must be able to type again even if the backend is unresponsive.
+        void cancelHeadlessMessage(props.tab.id).catch((e) =>
+          console.warn("[headless] stall cancel failed", e),
+        );
+        store.applyEvent({
+          type: "status",
+          tabId: props.tab.id,
+          status: "error",
+          errorKind: "other",
+          message: STALL_INTERRUPTED_MESSAGE,
+        });
+      }
+    }, STALL_CHECK_INTERVAL_MS);
+    onCleanup(() => clearInterval(timer));
+  });
+
   // Auto-scroll on either layout change (new message / new block) or
   // text-length growth (delta streaming). The `isNearBottom` gate
   // means the user can scroll up to read earlier output without being
@@ -315,7 +356,9 @@ export function HeadlessPanel(props: HeadlessPanelProps) {
   }
 
   function handleInterrupt() {
-    void cancelHeadlessMessage(props.tab.id);
+    void cancelHeadlessMessage(props.tab.id).catch((e) =>
+      console.warn("[headless] interrupt cancel failed", e),
+    );
   }
 
   // Slash commands: claude itself interprets `/help`, `/compact`, etc.

@@ -28,6 +28,7 @@ import { SlashCommandQueue } from "./slash-command-queue";
 import { useThrottledUpdate } from "../../hooks/use-throttled-update";
 import { useImageAttachment } from "../../hooks/use-image-attachment";
 import { findStickyPromptText } from "../../lib/find-sticky-prompt-text";
+import { STREAM_STALL_MS, STALL_CHECK_INTERVAL_MS, STALL_INTERRUPTED_MESSAGE } from "../../lib/stall-constants";
 import styles from "./chat-panel.module.css";
 
 
@@ -326,16 +327,16 @@ export function ChatPanel(props: ChatPanelProps) {
   // Throttle parser → DOM updates to ~20fps. The parser's rAF already limits
   // to 60fps, but SolidJS reconciliation + virtualizer measurement at higher
   // rates starves the main thread with 20 panes streaming simultaneously.
-  // lastParserEventAt is updated on every parser output event so the stall
+  // lastActivityAt is updated on every parser output event so the stall
   // detector below can distinguish a slow-but-alive stream from a dead one.
-  let lastParserEventAt = 0;
+  let lastActivityAt = 0;
   const throttle = useThrottledUpdate({
     onApply: applyUpdate,
     isActive: props.isActive,
     isDisposed: () => unmounted,
   });
   const unsubUpdate = parser.onUpdate((msgs) => {
-    lastParserEventAt = Date.now();
+    lastActivityAt = Date.now();
     throttle.handleUpdate(msgs);
   });
   onCleanup(unsubUpdate);
@@ -371,23 +372,31 @@ export function ChatPanel(props: ChatPanelProps) {
     }
   });
 
-  // Stall detector: if isStreaming has been true for 60s with no parser events,
-  // the PTY likely accepted the message but will never respond (e.g. it is busy
-  // running a long-lived subprocess). Reset so the user can type again without
-  // restarting the app.
-  const STREAM_STALL_MS = 60_000;
+  // Stall detector: if isStreaming has been true for STREAM_STALL_MS with no
+  // parser events, the PTY likely accepted the message but will never respond
+  // (e.g. it is busy running a long-lived subprocess). Mirrors the full state
+  // reset that handleInterrupt performs (interrupted flag, slash queue, generation
+  // counters, autoCompactTriggered, Ctrl+C, scroll) but skips addInterrupted()
+  // to avoid the double-message that would result from also calling addUserMessage.
   createEffect(() => {
     if (!isStreaming()) return;
-    lastParserEventAt = Date.now();
+    lastActivityAt = Date.now();
     const timer = setInterval(() => {
       if (!isStreaming()) { clearInterval(timer); return; }
-      if (Date.now() - lastParserEventAt >= STREAM_STALL_MS) {
+      if (Date.now() - lastActivityAt >= STREAM_STALL_MS) {
         clearInterval(timer);
+        interrupted = true;
         setIsStreaming(false);
         store.updateStatus(props.tab.id, "waiting");
-        parser.addUserMessage("[Error: No response received. The process may be busy. Press ESC or try again.]");
+        slashQueue.clear();
+        autoCompactTriggered = false;
+        pendingDrainGeneration += 1;
+        pendingAutoCompactGeneration += 1;
+        interruptPty(ptyId()).catch((e) => console.warn("[pty] stall interrupt failed", e));
+        parser.addUserMessage(STALL_INTERRUPTED_MESSAGE);
+        scrollToBottom();
       }
-    }, 5_000);
+    }, STALL_CHECK_INTERVAL_MS);
     onCleanup(() => clearInterval(timer));
   });
 
@@ -468,7 +477,7 @@ export function ChatPanel(props: ChatPanelProps) {
     }
   }
   createEffect(() => {
-    if (!props.isActive) return;
+    if (!props.isActive()) return;
     window.addEventListener("keydown", handleWindowEsc);
     onCleanup(() => window.removeEventListener("keydown", handleWindowEsc));
   });
