@@ -4,7 +4,10 @@
 //! `kill_pty`) so the verb set stays uniform: `spawn_headless`,
 //! `write_headless_input`, `cancel_headless_message`, `kill_headless`.
 //! Resume / fork are folded into `spawn_headless` (the `resumeSessionAt`
-//! and `forkSession` fields). Codex resume support follows in Phase 1e.
+//! and `forkSession` fields). Both claude (`--resume <session-id>`) and
+//! codex (`exec resume <thread-id>`) wire continuity through the same
+//! frontend field — see `Session::build_turn_args` for the per-CLI
+//! argv shape.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -47,12 +50,14 @@ pub struct SpawnHeadlessRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub extra_env: HashMap<String, String>,
-    /// When set, append `--resume <id>` to the Claude argv so the new
-    /// process continues an existing session rather than starting fresh.
-    /// The id is validated as session-id-shaped before being passed
-    /// through, so a crafted value cannot inject arbitrary CLI flags.
-    /// Currently only honoured for `CliType::ClaudeCode`; Codex resume
-    /// uses the `codex exec resume <id>` subcommand and lands in Phase 1e.
+    /// When set, the new process continues an existing conversation
+    /// rather than starting fresh. The id is validated as
+    /// session-id-shaped before being passed through, so a crafted
+    /// value cannot inject arbitrary CLI flags.
+    ///
+    /// `Session::build_turn_args` translates this into the per-CLI
+    /// argv shape: `--resume <id>` for Claude, `exec resume <id>` for
+    /// Codex.
     #[serde(default)]
     pub resume_session_at: Option<String>,
     /// When true and `resume_session_at` is set, also append
@@ -113,31 +118,36 @@ pub async fn spawn_headless(
             "Shell CliType is not supported by headless pipeline".into(),
         ));
     }
-    if matches!(request.cli_type, CliType::Codex) {
-        // Codex headless is Phase 1f territory: `codex exec` reads a
-        // single positional prompt and emits `--json` events, but it
-        // does not accept stream-json on stdin. We need a small adapter
-        // that re-spawns per turn before this path can be lit.
-        return Err(AppError::CliNotFound(
-            "Codex headless support lands in Phase 1f".into(),
-        ));
-    }
     let (command, mut args) = resolve_command(&request.cli_type, &request.mode, &request.model)?;
 
-    // Headless flags for Claude Code: stream-json bidirectional pipe,
-    // partial messages so the UI can render deltas, and either a fresh
-    // `--session-id` or `--resume <existing>` for continuity.
-    //
-    // `--verbose` is required by `--print` + `--output-format stream-json`
-    // on Claude Code 1.x — without it the CLI silently emits nothing.
-    if matches!(request.cli_type, CliType::ClaudeCode) {
-        args.push("-p".into());
-        args.push("--output-format".into());
-        args.push("stream-json".into());
-        args.push("--input-format".into());
-        args.push("stream-json".into());
-        args.push("--include-partial-messages".into());
-        args.push("--verbose".into());
+    match request.cli_type {
+        CliType::ClaudeCode => {
+            // Stream-json bidirectional pipe + partial messages so the
+            // UI can render deltas. `--verbose` is required by
+            // `--print` + `--output-format stream-json` on Claude Code
+            // 1.x — without it the CLI silently emits nothing.
+            args.push("-p".into());
+            args.push("--output-format".into());
+            args.push("stream-json".into());
+            args.push("--input-format".into());
+            args.push("stream-json".into());
+            args.push("--include-partial-messages".into());
+            args.push("--verbose".into());
+        }
+        CliType::Codex => {
+            // Codex `exec --json` reads the prompt from stdin (we
+            // append `-` per-turn in `Session::build_codex_args`)
+            // and emits one JSONL event per high-level item. The
+            // `--skip-git-repo-check` flag matches what users see
+            // when running `codex exec` outside a repo and avoids
+            // an interactive prompt that would deadlock the spawn.
+            args.push("--json".into());
+            args.push("--skip-git-repo-check".into());
+        }
+        CliType::Shell => {
+            // Defended above by `resolve_command`'s rejection of
+            // shell-type panes; this arm exists for exhaustiveness.
+        }
     }
 
     // Continuity (`--session-id` first turn / `--resume <id>` after) is
@@ -161,6 +171,7 @@ pub async fn spawn_headless(
 
     let config = SessionConfig {
         tab_id: request.tab_id.clone(),
+        cli_type: request.cli_type,
         command,
         args,
         cwd,
@@ -201,9 +212,10 @@ const MAX_USER_TEXT_BYTES: usize = 256 * 1024;
 /// single image, not the sum.
 const MAX_IMAGES_PER_TURN: usize = 16;
 
-/// Returns Ok(()) when `text` is within the per-message budget.
-/// Extracted so the budget can be exercised by unit tests without
-/// spinning up a Tauri runtime.
+/// Returns Ok(()) when `text` is within the per-message budget and
+/// free of bytes that would confuse the downstream CLI's stdin
+/// framing. Extracted so the budget can be exercised by unit tests
+/// without spinning up a Tauri runtime.
 fn check_user_text_bytes(text: &str) -> Result<(), AppError> {
     if text.len() > MAX_USER_TEXT_BYTES {
         return Err(AppError::PtyWriteFailed(format!(
@@ -211,6 +223,14 @@ fn check_user_text_bytes(text: &str) -> Result<(), AppError> {
             text.len(),
             MAX_USER_TEXT_BYTES,
         )));
+    }
+    // NUL bytes terminate POSIX C strings early — many CLIs would
+    // silently truncate the prompt. Reject them at the boundary so
+    // the user gets an error instead of a half-sent message.
+    if text.contains('\0') {
+        return Err(AppError::PtyWriteFailed(
+            "user text contains NUL byte".into(),
+        ));
     }
     Ok(())
 }
@@ -376,6 +396,15 @@ mod tests {
     fn user_text_at_exact_budget_is_accepted() {
         let text = "a".repeat(MAX_USER_TEXT_BYTES);
         check_user_text_bytes(&text).expect("exact-cap input must pass");
+    }
+
+    #[test]
+    fn user_text_with_nul_byte_is_rejected() {
+        let err = check_user_text_bytes("hello\0world").expect_err("NUL byte must reject");
+        match err {
+            AppError::PtyWriteFailed(msg) => assert!(msg.contains("NUL"), "{msg}"),
+            other => panic!("expected PtyWriteFailed, got {other:?}"),
+        }
     }
 
     #[test]
