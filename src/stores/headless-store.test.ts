@@ -45,6 +45,40 @@ describe("useHeadlessStore", () => {
     });
   });
 
+  it("appendUserMessage stores attached images alongside the text", () => {
+    createRoot((dispose) => {
+      const store = useHeadlessStore();
+      store.appendUserMessage("t1", "req-1", "hi", [
+        { path: "/tmp/chorus-images/a.png", name: "a.png" },
+      ]);
+      const msg = store.sessionFor("t1")?.messages[0];
+      if (msg?.role === "user") {
+        expect(msg.images).toEqual([
+          { path: "/tmp/chorus-images/a.png", name: "a.png" },
+        ]);
+      } else {
+        throw new Error("expected user message");
+      }
+      dispose();
+    });
+  });
+
+  it("appendUserMessage omits the images field when none are attached", () => {
+    // Keeps text-only user turns byte-identical to legacy persisted
+    // payloads so localStorage round-trips do not produce noisy diffs.
+    createRoot((dispose) => {
+      const store = useHeadlessStore();
+      store.appendUserMessage("t1", "req-1", "hi");
+      const msg = store.sessionFor("t1")?.messages[0];
+      if (msg?.role === "user") {
+        expect(msg.images).toBeUndefined();
+      } else {
+        throw new Error("expected user message");
+      }
+      dispose();
+    });
+  });
+
   it("appendUserMessage optimistically flips idle → thinking", () => {
     // Without this optimistic bump the input would re-enable in the
     // race window between `writeHeadlessInput` resolving and the real

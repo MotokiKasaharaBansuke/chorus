@@ -39,6 +39,13 @@ export interface WorktreeSettings {
  */
 export type EngineDefault = "pty" | "headless";
 
+/**
+ * CLI pre-selected when the user opens the new-pane modal (or invokes
+ * a shortcut that does not specify one). Limited to the AI-assistant
+ * CLIs because `"shell"` already has its own dedicated entry points.
+ */
+export type DefaultCliType = "claude-code" | "codex";
+
 export interface Settings {
   reviewCliType: ReviewCliType;
   /**
@@ -46,6 +53,12 @@ export interface Settings {
    * old persisted settings — treated as `"pty"` for backwards compat.
    */
   engineDefault?: EngineDefault;
+  /**
+   * Pre-selection for the new-pane modal's CLI choice. Absent in old
+   * persisted settings — treated as `"claude-code"` for backwards
+   * compat (the historical hard-coded default).
+   */
+  defaultCliType?: DefaultCliType;
   worktree: WorktreeSettings;
 }
 
@@ -80,5 +93,6 @@ export const DEFAULT_WORKTREE_SETTINGS: WorktreeSettings = {
 export const DEFAULT_SETTINGS: Settings = {
   reviewCliType: "codex",
   engineDefault: "pty",
+  defaultCliType: "claude-code",
   worktree: DEFAULT_WORKTREE_SETTINGS,
 };

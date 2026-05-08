@@ -105,11 +105,28 @@ pub enum EngineDefault {
     Headless,
 }
 
+/// CLI pre-selected when the user opens the New Pane modal. Mirrors
+/// the frontend `DefaultCliType` — kebab-case on the wire so legacy
+/// `claude-code` JSON values round-trip cleanly.
+//
+// NOTE: `ReviewCliType` above uses camelCase (`claudeCode`) for
+// historical reasons. New CLI-typed enums should follow the
+// kebab-case convention used here so the wire format matches the
+// `cliType` vocabulary used everywhere else in the codebase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DefaultCliType {
+    #[default]
+    ClaudeCode,
+    Codex,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub review_cli_type: ReviewCliType,
     pub engine_default: EngineDefault,
+    pub default_cli_type: DefaultCliType,
     pub worktree: WorktreeSettings,
 }
 
@@ -118,6 +135,7 @@ impl Default for Settings {
         Self {
             review_cli_type: ReviewCliType::default(),
             engine_default: EngineDefault::default(),
+            default_cli_type: DefaultCliType::default(),
             worktree: WorktreeSettings::default(),
         }
     }
@@ -196,7 +214,25 @@ mod tests {
         let s: Settings = serde_json::from_str(json).unwrap();
         assert_eq!(s.review_cli_type, ReviewCliType::ClaudeCode);
         assert_eq!(s.engine_default, EngineDefault::Pty);
+        assert_eq!(s.default_cli_type, DefaultCliType::ClaudeCode);
         assert_eq!(s.worktree, WorktreeSettings::default());
+    }
+
+    #[test]
+    fn default_cli_type_round_trips_kebab_case() {
+        let s = Settings { default_cli_type: DefaultCliType::Codex, ..Default::default() };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"defaultCliType\":\"codex\""), "{json}");
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.default_cli_type, DefaultCliType::Codex);
+    }
+
+    #[test]
+    fn missing_default_cli_type_falls_back_to_claude_code() {
+        // Settings written before Phase 1h-cli-default — no field.
+        let json = r#"{"reviewCliType":"codex"}"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.default_cli_type, DefaultCliType::ClaudeCode);
     }
 
     #[test]

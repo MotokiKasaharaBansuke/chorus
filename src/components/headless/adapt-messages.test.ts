@@ -41,6 +41,49 @@ describe("adaptHeadlessMessages", () => {
     ]);
   });
 
+  it("expands attached images into trailing image blocks", () => {
+    const [m] = adaptHeadlessMessages(
+      emptySession({
+        messages: [
+          {
+            role: "user",
+            id: "req-1",
+            text: "look at this",
+            sentAt: 0,
+            images: [
+              { path: "/tmp/chorus-images/a.png", name: "a.png" },
+              { path: "/tmp/chorus-images/b.png", name: "b.png" },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(m!.blocks).toEqual([
+      { kind: "text", text: "look at this" },
+      { kind: "image", path: "/tmp/chorus-images/a.png", name: "a.png" },
+      { kind: "image", path: "/tmp/chorus-images/b.png", name: "b.png" },
+    ]);
+  });
+
+  it("renders an image-only user message (no leading empty text block)", () => {
+    const [m] = adaptHeadlessMessages(
+      emptySession({
+        messages: [
+          {
+            role: "user",
+            id: "req-1",
+            text: "",
+            sentAt: 0,
+            images: [{ path: "/tmp/chorus-images/x.png", name: "x.png" }],
+          },
+        ],
+      }),
+    );
+    expect(m!.blocks).toEqual([
+      { kind: "image", path: "/tmp/chorus-images/x.png", name: "x.png" },
+    ]);
+  });
+
   it("converts a streaming assistant message and preserves the streaming flag", () => {
     const out = adaptHeadlessMessages(
       emptySession({

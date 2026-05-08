@@ -1,9 +1,19 @@
-//! Translate claude's stream-json output into typed `HeadlessEvent`s.
+//! Translate the upstream stream-json output into typed `HeadlessEvent`s.
 //!
-//! The CLI's wire format is documented at
-//! <https://docs.anthropic.com/en/docs/claude-code/output> and mirrors
-//! the Anthropic Messages API streaming envelope. The shapes we care
-//! about for Phase 1g:
+//! Two CLI vocabularies are accepted — they share the same parser
+//! because their `type` values are disjoint, so dispatch by string is
+//! unambiguous:
+//!
+//! - **Claude Code** (Anthropic Messages streaming envelope):
+//!   `stream_event`, `assistant`, `user`, `result`. Documented at
+//!   <https://docs.anthropic.com/en/docs/claude-code/output>.
+//! - **Codex** (`codex exec --json`): `thread.started`,
+//!   `turn.started`, `item.completed`, `turn.completed`. Codex emits
+//!   the assistant turn as a single `agent_message` `item.completed`
+//!   (no streaming deltas as of `codex-cli 0.66`), so we synthesize
+//!   one `MessageDelta` + `MessageComplete` pair from each item.
+//!
+//! ## Claude envelope shapes:
 //!
 //! - `system.init` — captured upstream (session id continuity); not
 //!   produced by this parser.
@@ -34,14 +44,24 @@ use super::event::{FinishReason, HeadlessEvent, MessageId, TabId, ToolUseId, Usa
 
 /// Per-turn parser state. One instance per `run_turn`. Tracks the
 /// in-flight assistant `message_id`, a monotonic delta counter so the
-/// frontend store can detect out-of-order delivery, and the set of
-/// tool-use ids already emitted (claude can repeat the `assistant`
-/// envelope across sub-turns and we want one `MessageToolUse` per id).
+/// frontend store can detect out-of-order delivery, and dedupe sets
+/// for repeated envelopes.
+///
+/// `emitted_tool_uses` is shared between the claude `tool_use_id`
+/// space (`tu_xxx`) and the codex `call_id` space (`call_xxx`) — the
+/// two id formats are documented as disjoint, so a single `HashSet`
+/// is safe and saves an allocation.
+///
+/// `emitted_agent_messages` mirrors the same protection for codex's
+/// `agent_message` items: a future codex CLI version that re-emits
+/// the same `item.id` (e.g. for retry / partial replay) must not
+/// double-render the bubble or re-fire `MessageComplete`.
 #[derive(Default)]
 pub(super) struct StreamParser {
     message_id: Option<MessageId>,
     next_delta_index: u32,
     emitted_tool_uses: HashSet<String>,
+    emitted_agent_messages: HashSet<String>,
 }
 
 impl StreamParser {
@@ -57,10 +77,143 @@ impl StreamParser {
             return vec![];
         };
         match t {
+            // --- Claude ---
             "stream_event" => self.handle_stream_event(value, tab_id),
             "assistant" => self.handle_assistant_snapshot(value, tab_id),
             "user" => extract_tool_results(value, tab_id),
             "result" => extract_usage(value, tab_id),
+            // --- Codex ---
+            "item.completed" => self.handle_codex_item(value, tab_id),
+            "turn.completed" => extract_codex_usage(value, tab_id),
+            // `thread.started` carries `thread_id` which `session.rs`
+            // captures via `capture_session_id`. `turn.started` /
+            // `turn.failed` / `error` are surfaced through the
+            // `Status::Idle | Status::Error` lifecycle the run task
+            // already manages from the child's exit code, so the
+            // parser stays silent on them.
+            _ => vec![],
+        }
+    }
+
+    /// Codex emits one `item.completed` envelope per high-level
+    /// thing it produced this turn (assistant message, tool call,
+    /// tool result). Dispatch by the inner `item.type`.
+    fn handle_codex_item(&mut self, value: &Value, tab_id: &TabId) -> Vec<HeadlessEvent> {
+        let Some(item) = value.get("item") else {
+            return vec![];
+        };
+        let Some(item_type) = item.get("type").and_then(|v| v.as_str()) else {
+            return vec![];
+        };
+        let id = item
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if id.is_empty() {
+            return vec![];
+        }
+
+        match item_type {
+            "agent_message" => {
+                // Codex non-streaming: a full `text` field arrives
+                // once. Synthesize a single `MessageDelta` + the
+                // matching `MessageComplete` so the renderer treats
+                // it identically to a streamed claude turn.
+                let text = item
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if text.is_empty() {
+                    return vec![];
+                }
+                if !self.emitted_agent_messages.insert(id.clone()) {
+                    // A repeated `item.id` would otherwise concatenate
+                    // its text onto the existing bubble (frontend
+                    // store sums deltas by message id) and re-fire
+                    // `MessageComplete`. Drop the duplicate.
+                    return vec![];
+                }
+                let message_id = MessageId::new(id);
+                vec![
+                    HeadlessEvent::MessageDelta {
+                        tab_id: tab_id.clone(),
+                        message_id: message_id.clone(),
+                        index: 0,
+                        delta: text,
+                    },
+                    HeadlessEvent::MessageComplete {
+                        tab_id: tab_id.clone(),
+                        message_id,
+                        finish_reason: FinishReason::Stop,
+                    },
+                ]
+            }
+            "function_call" => {
+                // OpenAI tool-calling convention: `arguments` is a
+                // JSON-encoded string. Try to parse so the typed
+                // tool renderer sees structured input; fall back to
+                // the raw string so we never lose payload.
+                let call_id = item
+                    .get("call_id")
+                    .or_else(|| item.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if call_id.is_empty() {
+                    return vec![];
+                }
+                if !self.emitted_tool_uses.insert(call_id.clone()) {
+                    return vec![];
+                }
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if name.is_empty() {
+                    return vec![];
+                }
+                let input = match item.get("arguments") {
+                    Some(Value::String(s)) => {
+                        serde_json::from_str::<Value>(s).unwrap_or(Value::String(s.clone()))
+                    }
+                    Some(other) => other.clone(),
+                    None => Value::Null,
+                };
+                vec![HeadlessEvent::MessageToolUse {
+                    tab_id: tab_id.clone(),
+                    message_id: MessageId::new(id),
+                    tool_use_id: ToolUseId::new(call_id),
+                    name,
+                    input,
+                }]
+            }
+            "function_call_output" => {
+                let call_id = item
+                    .get("call_id")
+                    .or_else(|| item.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if call_id.is_empty() {
+                    return vec![];
+                }
+                let output = item
+                    .get("output")
+                    .and_then(|v| match v {
+                        Value::String(s) => Some(s.clone()),
+                        other => Some(other.to_string()),
+                    })
+                    .unwrap_or_default();
+                vec![HeadlessEvent::MessageToolResult {
+                    tab_id: tab_id.clone(),
+                    tool_use_id: ToolUseId::new(call_id),
+                    output,
+                    is_error: false,
+                }]
+            }
             _ => vec![],
         }
     }
@@ -268,6 +421,27 @@ fn extract_usage(value: &Value, tab_id: &TabId) -> Vec<HeadlessEvent> {
 
 fn read_u64(obj: &Value, key: &str) -> u64 {
     obj.get(key).and_then(|v| v.as_u64()).unwrap_or(0)
+}
+
+/// Codex `turn.completed` envelope shape:
+/// `{"type":"turn.completed","usage":{"input_tokens":...,"cached_input_tokens":...,"output_tokens":...}}`
+/// Codex does not separate cache-creation from cache-read tokens, so
+/// `cache_creation_tokens` ends up zero — the chat usage bar shows
+/// the same total either way.
+fn extract_codex_usage(value: &Value, tab_id: &TabId) -> Vec<HeadlessEvent> {
+    let Some(usage) = value.get("usage") else {
+        return vec![];
+    };
+    let report = UsageReport {
+        input_tokens: read_u64(usage, "input_tokens"),
+        output_tokens: read_u64(usage, "output_tokens"),
+        cache_read_tokens: read_u64(usage, "cached_input_tokens"),
+        cache_creation_tokens: 0,
+    };
+    vec![HeadlessEvent::Usage {
+        tab_id: tab_id.clone(),
+        usage: report,
+    }]
 }
 
 #[cfg(test)]
@@ -631,5 +805,225 @@ mod tests {
         let mut p = StreamParser::new();
         assert!(p.translate(&json!({"type": "system", "subtype": "init"}), &tab()).is_empty());
         assert!(p.translate(&json!({"foo": "bar"}), &tab()).is_empty());
+    }
+
+    // --- Codex ----------------------------------------------------
+
+    #[test]
+    fn codex_agent_message_emits_delta_then_complete() {
+        let mut p = StreamParser::new();
+        let events = p.translate(
+            &json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "item_0",
+                    "type": "agent_message",
+                    "text": "Hi there"
+                }
+            }),
+            &tab(),
+        );
+        assert_eq!(events.len(), 2, "expect delta + complete");
+        match &events[0] {
+            HeadlessEvent::MessageDelta { delta, message_id, index, .. } => {
+                assert_eq!(delta, "Hi there");
+                assert_eq!(message_id.as_str(), "item_0");
+                assert_eq!(*index, 0);
+            }
+            other => panic!("expected MessageDelta, got {other:?}"),
+        }
+        match &events[1] {
+            HeadlessEvent::MessageComplete { message_id, finish_reason, .. } => {
+                assert_eq!(message_id.as_str(), "item_0");
+                assert_eq!(*finish_reason, FinishReason::Stop);
+            }
+            other => panic!("expected MessageComplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn codex_agent_message_dedupes_repeated_item_ids() {
+        // A future codex CLI that re-emits the same `item.id` (retry
+        // / replay) must not double-render the bubble: the frontend
+        // store would otherwise concatenate the text onto the
+        // existing assistant turn and re-fire `MessageComplete`.
+        let mut p = StreamParser::new();
+        let line = json!({
+            "type": "item.completed",
+            "item": { "id": "item_0", "type": "agent_message", "text": "hi" }
+        });
+        let first = p.translate(&line, &tab());
+        let second = p.translate(&line, &tab());
+        assert_eq!(first.len(), 2, "first emission yields delta + complete");
+        assert!(second.is_empty(), "repeated item_id must not duplicate");
+    }
+
+    #[test]
+    fn codex_agent_message_with_empty_text_is_dropped() {
+        let mut p = StreamParser::new();
+        let events = p.translate(
+            &json!({
+                "type": "item.completed",
+                "item": { "id": "item_0", "type": "agent_message", "text": "" }
+            }),
+            &tab(),
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn codex_function_call_emits_tool_use_with_parsed_arguments() {
+        let mut p = StreamParser::new();
+        let events = p.translate(
+            &json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "exec_command",
+                    // OpenAI tool-calling convention: `arguments` is a
+                    // JSON-encoded *string*, not a structured object.
+                    "arguments": "{\"command\":\"ls -la\"}"
+                }
+            }),
+            &tab(),
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            HeadlessEvent::MessageToolUse { tool_use_id, name, input, .. } => {
+                assert_eq!(tool_use_id.as_str(), "call_1");
+                assert_eq!(name, "exec_command");
+                assert_eq!(input["command"], "ls -la");
+            }
+            other => panic!("expected MessageToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn codex_function_call_falls_back_to_raw_arguments_string() {
+        // When `arguments` is not valid JSON we keep the raw payload
+        // rather than dropping the tool call — losing the call would
+        // be worse for the user than rendering it as a plain string.
+        let mut p = StreamParser::new();
+        let events = p.translate(
+            &json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "weird_tool",
+                    "arguments": "not really json"
+                }
+            }),
+            &tab(),
+        );
+        match &events[0] {
+            HeadlessEvent::MessageToolUse { input, .. } => {
+                assert_eq!(input.as_str(), Some("not really json"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn codex_function_call_dedupes_repeated_call_ids() {
+        let mut p = StreamParser::new();
+        let line = json!({
+            "type": "item.completed",
+            "item": {
+                "id": "i1",
+                "type": "function_call",
+                "call_id": "c1",
+                "name": "tool",
+                "arguments": "{}"
+            }
+        });
+        let first = p.translate(&line, &tab());
+        let second = p.translate(&line, &tab());
+        assert_eq!(first.len(), 1);
+        assert!(second.is_empty(), "repeated call_id must not duplicate");
+    }
+
+    #[test]
+    fn codex_function_call_output_emits_tool_result() {
+        let mut p = StreamParser::new();
+        let events = p.translate(
+            &json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "item_2",
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "stdout: hi\n"
+                }
+            }),
+            &tab(),
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            HeadlessEvent::MessageToolResult { tool_use_id, output, is_error, .. } => {
+                assert_eq!(tool_use_id.as_str(), "call_1");
+                assert_eq!(output, "stdout: hi\n");
+                assert!(!is_error);
+            }
+            other => panic!("expected MessageToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn codex_turn_completed_emits_usage() {
+        let mut p = StreamParser::new();
+        let events = p.translate(
+            &json!({
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 42,
+                    "cached_input_tokens": 10,
+                    "output_tokens": 7
+                }
+            }),
+            &tab(),
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            HeadlessEvent::Usage { usage, .. } => {
+                assert_eq!(usage.input_tokens, 42);
+                assert_eq!(usage.output_tokens, 7);
+                assert_eq!(usage.cache_read_tokens, 10);
+                // Codex does not split cache-creation from cache-read.
+                assert_eq!(usage.cache_creation_tokens, 0);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn codex_thread_started_does_not_emit_typed_event() {
+        // `thread.started` carries the upstream thread_id which is
+        // captured by `session::capture_session_id`, not by the
+        // parser. Make sure it stays silent here.
+        let mut p = StreamParser::new();
+        let events = p.translate(
+            &json!({"type": "thread.started", "thread_id": "abc-123"}),
+            &tab(),
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn codex_turn_started_and_lifecycle_events_are_silent() {
+        // The Status::Idle / Status::Error transitions are owned by
+        // the run_turn machinery — the parser should not synthesize
+        // them from these envelopes.
+        let mut p = StreamParser::new();
+        for envelope in [
+            json!({"type": "turn.started"}),
+            json!({"type": "turn.failed", "error": {"message": "boom"}}),
+            json!({"type": "error", "message": "x"}),
+        ] {
+            assert!(p.translate(&envelope, &tab()).is_empty());
+        }
     }
 }

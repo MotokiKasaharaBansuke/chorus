@@ -50,11 +50,13 @@ use tracing::{debug, info, warn};
 
 use super::child_transport::ChildProcessTransport;
 use super::event::{ErrorKind, HeadlessEvent, RequestId, SessionStatus, TabId};
+use super::image::InlineImage;
 use super::line_reader::{LineRecord, LineViolation};
 use super::parser::StreamParser;
 use super::system::{SessionLock, SessionLockError};
 use super::transport::{JsonlTransport, SendError};
 use super::validation::{is_valid_session_id, ValidatedCwd, ValidatedEnv};
+use crate::cli::registry::CliType;
 
 /// Reasons `Session::start` can fail.
 #[derive(Debug)]
@@ -85,6 +87,11 @@ impl From<SessionLockError> for SessionStartError {
 /// Configuration for `Session::start`.
 pub struct SessionConfig {
     pub tab_id: TabId,
+    /// Which CLI this session drives. Branches `build_turn_args`,
+    /// `build_claude_user_message` (vs raw text for codex), and the
+    /// upstream-id capture rule — claude and codex use very
+    /// different stream-json shapes.
+    pub cli_type: CliType,
     pub command: String,
     pub args: Vec<String>,
     pub cwd: ValidatedCwd,
@@ -140,15 +147,23 @@ struct InFlightTurn {
 struct TurnContext {
     app: AppHandle,
     tab_id: TabId,
+    cli_type: CliType,
     upstream_session_id: Arc<Mutex<Option<String>>>,
     fork_on_next_turn: Arc<Mutex<bool>>,
     in_flight: Arc<Mutex<Option<InFlightTurn>>>,
     turn_id: u64,
+    /// Last in-stream error message observed for this turn (e.g.
+    /// codex `error` / `turn.failed` envelopes carry the API's
+    /// human-readable reason). `finish_turn` prefers this string
+    /// over a bare `exit code N` so the user sees "model not
+    /// supported" instead of an opaque crash code.
+    captured_error: Arc<Mutex<Option<String>>>,
 }
 
 /// Per-tab session handle. See module doc for the lifecycle model.
 pub struct Session {
     tab_id: TabId,
+    cli_type: CliType,
     command: String,
     base_args: Vec<String>,
     cwd: ValidatedCwd,
@@ -175,6 +190,7 @@ impl Session {
     pub async fn start(config: SessionConfig, app: AppHandle) -> Result<Self, SessionStartError> {
         let SessionConfig {
             tab_id,
+            cli_type,
             command,
             args,
             cwd,
@@ -189,10 +205,11 @@ impl Session {
         // Optimistic: tell the UI we are ready to take input. The first
         // child is spawned lazily on the first `send_user_message`.
         emit_status(&app, &tab_id, SessionStatus::Idle, None, None);
-        info!(tab_id = %tab_id, "headless session ready");
+        info!(tab_id = %tab_id, cli = ?cli_type, "headless session ready");
 
         Ok(Self {
             tab_id,
+            cli_type,
             command,
             base_args: args,
             cwd,
@@ -217,7 +234,11 @@ impl Session {
     /// Rejects with `SendError::Busy` if a previous turn is still in
     /// flight — the caller must wait for the next `Status::Idle` /
     /// `Status::Error` event before retrying.
-    pub async fn send_user_message(&self, text: String) -> Result<RequestId, SendError> {
+    pub async fn send_user_message(
+        &self,
+        text: String,
+        images: Vec<InlineImage>,
+    ) -> Result<RequestId, SendError> {
         // Hold the in-flight guard across the entire body so the
         // busy-check and slot reservation are atomic. The body has no
         // `.await` (every step — `Command::spawn`, `tokio::spawn`,
@@ -255,12 +276,14 @@ impl Session {
         let ctx = TurnContext {
             app: self.app.clone(),
             tab_id: self.tab_id.clone(),
+            cli_type: self.cli_type,
             upstream_session_id: self.upstream_session_id.clone(),
             fork_on_next_turn: self.fork_on_next_turn.clone(),
             in_flight: self.in_flight.clone(),
             turn_id,
+            captured_error: Arc::new(Mutex::new(None)),
         };
-        let handle = tokio::spawn(run_turn(transport, text, ctx));
+        let handle = tokio::spawn(run_turn(transport, text, images, ctx));
 
         *guard = Some(InFlightTurn { turn_id, killer, handle });
 
@@ -277,10 +300,21 @@ impl Session {
         }
     }
 
-    /// Build per-turn argv. Continuity flags (`--session-id` /
-    /// `--resume` / `--fork-session`) live here so the rest of
-    /// `send_user_message` is just spawn + bookkeeping.
+    /// Build per-turn argv. Continuity flags differ per CLI:
+    /// claude takes `--resume <id>` / `--session-id <new>` as a
+    /// trailing pair, while codex needs `resume <id>` injected as a
+    /// sub-subcommand right after `exec`.
     fn build_turn_args(&self) -> Vec<String> {
+        match self.cli_type {
+            CliType::ClaudeCode => self.build_claude_args(),
+            CliType::Codex => self.build_codex_args(),
+            // Shell never reaches headless — `headless_commands.rs`
+            // rejects it at the IPC boundary.
+            CliType::Shell => self.base_args.clone(),
+        }
+    }
+
+    fn build_claude_args(&self) -> Vec<String> {
         let mut args = self.base_args.clone();
         match self.upstream_session_id.lock().clone() {
             Some(prev) => {
@@ -297,6 +331,35 @@ impl Session {
                 args.push(uuid::Uuid::new_v4().to_string());
             }
         }
+        args
+    }
+
+    /// Codex argv shape:
+    /// - First turn:   `exec <flags> -`
+    /// - Resumed turn: `exec <flags> resume <thread_id> -`
+    ///
+    /// **Flag placement matters.** `codex exec resume` is a clap
+    /// sub-subcommand whose own option set is tiny (`--last`,
+    /// `--config`, `--enable`, `--disable`). `--full-auto`,
+    /// `--json`, `--skip-git-repo-check`, `--model` etc. all belong
+    /// to the parent `exec`, so they have to appear *before* the
+    /// `resume` token. Putting them after exits with code 2
+    /// ("unexpected argument").
+    ///
+    /// The trailing `-` tells codex to read the prompt from stdin —
+    /// the same channel `send_user_turn` writes to.
+    fn build_codex_args(&self) -> Vec<String> {
+        debug_assert_eq!(
+            self.base_args.first().map(String::as_str),
+            Some("exec"),
+            "codex base_args must start with `exec` (see cli/registry.rs)",
+        );
+        let mut args = self.base_args.clone();
+        if let Some(id) = self.upstream_session_id.lock().clone() {
+            args.push("resume".into());
+            args.push(id);
+        }
+        args.push("-".into());
         args
     }
 }
@@ -317,11 +380,16 @@ impl Drop for Session {
 
 // --- run_turn split into 3 stages: send → drain → finish ---
 
-async fn run_turn(mut transport: ChildProcessTransport, text: String, ctx: TurnContext) {
+async fn run_turn(
+    mut transport: ChildProcessTransport,
+    text: String,
+    images: Vec<InlineImage>,
+    ctx: TurnContext,
+) {
     let pid = transport.pid();
-    debug!(tab_id = %ctx.tab_id, turn_id = ctx.turn_id, pid, "turn started");
+    debug!(tab_id = %ctx.tab_id, turn_id = ctx.turn_id, pid, cli = ?ctx.cli_type, "turn started");
 
-    if let Err(detail) = send_user_turn(&mut transport, &text).await {
+    if let Err(detail) = send_user_turn(&mut transport, &text, &images, ctx.cli_type).await {
         finish_turn(transport, ctx, TurnOutcome::SendFailed(detail)).await;
         return;
     }
@@ -344,8 +412,21 @@ enum TurnOutcome {
     StdoutIo(String),
 }
 
-async fn send_user_turn(t: &mut ChildProcessTransport, text: &str) -> Result<(), String> {
-    let payload = build_user_text_line(text);
+async fn send_user_turn(
+    t: &mut ChildProcessTransport,
+    text: &str,
+    images: &[InlineImage],
+    cli_type: CliType,
+) -> Result<(), String> {
+    let payload = match cli_type {
+        CliType::ClaudeCode => build_claude_user_message(text, images),
+        // Codex reads the prompt as plain text from stdin (we add
+        // `-` to argv in `build_codex_args`). It does not accept
+        // images on stdin — those would go through `-i FILE...` at
+        // spawn time, which is out of scope for the first pass.
+        CliType::Codex => text.to_string(),
+        CliType::Shell => text.to_string(),
+    };
     if let Err(e) = t.send_line(&payload).await {
         return Err(format!("stdin write failed: {e}"));
     }
@@ -395,6 +476,19 @@ fn process_jsonl_line(line: &str, ctx: &TurnContext, parser: &mut StreamParser) 
         );
     }
 
+    // Short-circuit when we already have a message: skip both the
+    // envelope dispatch in `extract_inline_error` *and* the JSON
+    // detail unwrap inside it. A hostile or buggy CLI flooding the
+    // turn with `error` envelopes would otherwise pay two
+    // `serde_json::from_str` parses per line. The single-task
+    // ownership of `captured_error` (one tokio task per turn) makes
+    // this check race-free without a guard inside the helper.
+    if ctx.captured_error.lock().is_none() {
+        if let Some(message) = extract_inline_error(&value) {
+            store_first_inline_error(&ctx.captured_error, message);
+        }
+    }
+
     let typed = parser.translate(&value, &ctx.tab_id);
     let envelope = value
         .get("type")
@@ -441,13 +535,15 @@ async fn finish_turn(
         }
     }
 
-    let (status, kind, message) = classify_turn(outcome, exit_code);
+    let captured_error = ctx.captured_error.lock().clone();
+    let (status, kind, message) = classify_turn(outcome, exit_code, captured_error);
     emit_status(&ctx.app, &ctx.tab_id, status, kind, message);
 }
 
 fn classify_turn(
     outcome: TurnOutcome,
     exit_code: Option<i32>,
+    captured_error: Option<String>,
 ) -> (SessionStatus, Option<ErrorKind>, Option<String>) {
     match outcome {
         TurnOutcome::Drained => match exit_code {
@@ -455,12 +551,15 @@ fn classify_turn(
             Some(c) => (
                 SessionStatus::Error,
                 Some(ErrorKind::AgentCrashed),
-                Some(format!("exit code {c}")),
+                Some(captured_error.unwrap_or_else(|| format!("exit code {c}"))),
             ),
             None => (
                 SessionStatus::Error,
                 Some(ErrorKind::AgentCrashed),
-                Some("child exited with no status".into()),
+                Some(
+                    captured_error
+                        .unwrap_or_else(|| "child exited with no status".into()),
+                ),
             ),
         },
         TurnOutcome::SendFailed(detail) => (
@@ -490,15 +589,21 @@ fn classify_turn(
 /// callers emit a `SessionIdCaptured` wire event on a non-`None`
 /// result so the frontend can persist it for future `--resume` use.
 /// Returns `None` for missing / malformed / already-stored ids.
+///
+/// Two CLIs ship two different field names:
+/// - **Claude** stamps every line with `session_id`.
+/// - **Codex** carries the id only on the very first
+///   `thread.started` envelope, under `thread_id`.
+///
+/// Both are validated against the same `is_valid_session_id`
+/// allowlist so a poisoned upstream line cannot smuggle an
+/// argv-shaped string into the next turn's `--resume` / `resume`.
 fn capture_session_id(
     value: &serde_json::Value,
     slot: &Arc<Mutex<Option<String>>>,
     fork_on_next_turn: &Arc<Mutex<bool>>,
 ) -> Option<String> {
-    let id = value
-        .as_object()
-        .and_then(|o| o.get("session_id"))
-        .and_then(|v| v.as_str())?;
+    let id = extract_upstream_session_id(value)?;
     if id.is_empty() {
         return None;
     }
@@ -520,13 +625,115 @@ fn capture_session_id(
     Some(id.to_string())
 }
 
+fn extract_upstream_session_id(value: &serde_json::Value) -> Option<&str> {
+    let obj = value.as_object()?;
+    if let Some(id) = obj.get("session_id").and_then(|v| v.as_str()) {
+        return Some(id);
+    }
+    if obj.get("type").and_then(|v| v.as_str()) == Some("thread.started") {
+        if let Some(id) = obj.get("thread_id").and_then(|v| v.as_str()) {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// Pull a human-readable reason from any in-stream error envelope.
+/// Today this fires only on codex events (claude surfaces failures
+/// via `Status::Error` already); kept generic so a future CLI can
+/// reuse the same plumbing.
+///
+/// Shapes handled:
+/// - `{"type":"error","message":"..."}` (codex direct)
+/// - `{"type":"turn.failed","error":{"message":"..."}}`
+///
+/// Codex sometimes wraps the human text in a JSON-encoded string —
+/// `"{\"detail\":\"The 'gpt-5.1' model is not supported...\"}"` —
+/// so the raw `message` would render as escape-laden noise. We
+/// peel one layer if it parses as `{"detail": "..."}`; anything
+/// else is returned verbatim.
+fn extract_inline_error(value: &serde_json::Value) -> Option<String> {
+    let obj = value.as_object()?;
+    let envelope_type = obj.get("type").and_then(|v| v.as_str())?;
+    let raw = match envelope_type {
+        "error" => obj.get("message").and_then(|v| v.as_str())?,
+        "turn.failed" => obj
+            .get("error")
+            .and_then(|v| v.get("message"))
+            .and_then(|v| v.as_str())?,
+        _ => return None,
+    };
+    Some(unwrap_json_detail(raw))
+}
+
+/// Cap on the input size we will attempt to JSON-parse inside
+/// `unwrap_json_detail`. Codex's longest plausible human reason is
+/// roughly 1 KiB; 64 KiB leaves wide margin while preventing a
+/// hostile or buggy CLI from making us parse + tree-allocate an
+/// 8 MiB payload (the outer `LineReader` cap) on every error
+/// envelope. Larger payloads pass through verbatim.
+const MAX_DETAIL_UNWRAP_BYTES: usize = 64 * 1024;
+
+/// If `raw` parses as `{"detail": "..."}` (as codex sometimes
+/// produces), return the inner string; otherwise return the raw
+/// payload. Bounded to a single shallow `from_str` so a malformed
+/// nested document cannot recurse or allocate without limit, and
+/// gated on a cheap length / shape pre-flight so the parser is
+/// never even reached for plain prose or oversized strings.
+fn unwrap_json_detail(raw: &str) -> String {
+    // Pre-flight: skip the parser entirely for payloads that
+    // obviously cannot be a `{...}` JSON object. Saves an alloc on
+    // the common "human sentence" path and bounds the worst case.
+    if raw.len() > MAX_DETAIL_UNWRAP_BYTES || !raw.starts_with('{') {
+        return raw.to_string();
+    }
+    if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(raw) {
+        if let Some(detail) = obj.get("detail").and_then(|v| v.as_str()) {
+            return detail.to_string();
+        }
+        if let Some(message) = obj.get("message").and_then(|v| v.as_str()) {
+            return message.to_string();
+        }
+    }
+    raw.to_string()
+}
+
+/// First-write-wins helper for the `captured_error` slot. Extracted
+/// so the guard contract (`only the first observed reason is kept`)
+/// can be unit-tested without driving the full `process_jsonl_line`
+/// path — a regression that drops the `is_none()` check at the call
+/// site would still need this helper to enforce the invariant.
+fn store_first_inline_error(slot: &Mutex<Option<String>>, message: String) {
+    let mut current = slot.lock();
+    if current.is_none() {
+        *current = Some(message);
+    }
+}
+
 /// Stream-json envelope claude expects on stdin for a fresh user turn.
-fn build_user_text_line(text: &str) -> String {
+/// Builds a `content[]` with one `text` block followed by one `image`
+/// block per attachment. Empty `text` is dropped so a turn can be
+/// "image only" without sending a useless empty text block.
+fn build_claude_user_message(text: &str, images: &[InlineImage]) -> String {
+    let mut content = Vec::with_capacity(images.len() + 1);
+    if !text.is_empty() {
+        content.push(json!({ "type": "text", "text": text }));
+    }
+    for img in images {
+        content.push(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": img.media_type,
+                "data": img.data,
+            },
+        }));
+    }
     json!({
         "type": "user",
         "message": {
             "role": "user",
-            "content": [{ "type": "text", "text": text }],
+            "content": content,
         },
     })
     .to_string()
@@ -567,13 +774,47 @@ mod tests {
     }
 
     #[test]
-    fn build_user_text_line_shapes_envelope() {
-        let line = build_user_text_line("hello");
+    fn build_claude_user_message_text_only() {
+        let line = build_claude_user_message("hello", &[]);
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["type"], "user");
         assert_eq!(v["message"]["role"], "user");
         assert_eq!(v["message"]["content"][0]["type"], "text");
         assert_eq!(v["message"]["content"][0]["text"], "hello");
+        assert_eq!(v["message"]["content"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn build_claude_user_message_with_images_emits_image_blocks_after_text() {
+        let images = vec![
+            InlineImage { media_type: "image/png".into(), data: "AAAA".into() },
+            InlineImage { media_type: "image/jpeg".into(), data: "BBBB".into() },
+        ];
+        let line = build_claude_user_message("look:", &images);
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let content = v["message"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "AAAA");
+        assert_eq!(content[2]["source"]["media_type"], "image/jpeg");
+    }
+
+    #[test]
+    fn build_claude_user_message_image_only_drops_empty_text() {
+        // An "image only" turn (user pastes a screenshot, hits Enter
+        // with no text) must not send a useless empty text block —
+        // claude rejects empty text content.
+        let images = vec![InlineImage {
+            media_type: "image/png".into(),
+            data: "X".into(),
+        }];
+        let line = build_claude_user_message("", &images);
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let content = v["message"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "image");
     }
 
     #[test]
@@ -646,6 +887,43 @@ mod tests {
         assert!(slot.lock().is_none());
     }
 
+    /// Codex stamps the upstream id only on its very first
+    /// `thread.started` envelope, under `thread_id` (not the
+    /// `session_id` field claude uses).
+    #[test]
+    fn capture_session_id_picks_up_codex_thread_started() {
+        let (slot, fork) = slot_pair();
+        let captured = capture_session_id(
+            &serde_json::json!({
+                "type": "thread.started",
+                "thread_id": "019e0581-dff2-7a42-942c-e85ce089694b",
+            }),
+            &slot,
+            &fork,
+        );
+        assert_eq!(
+            captured.as_deref(),
+            Some("019e0581-dff2-7a42-942c-e85ce089694b"),
+        );
+    }
+
+    #[test]
+    fn capture_session_id_ignores_thread_id_outside_thread_started() {
+        // Defensive: only `thread.started` carries an id we trust.
+        // A made-up `{"type": "turn.started", "thread_id": "..."}`
+        // line should be ignored — codex never emits it, and we
+        // would not want a future codex change to silently start
+        // attaching ids to other envelopes.
+        let (slot, fork) = slot_pair();
+        assert!(capture_session_id(
+            &serde_json::json!({"type": "turn.started", "thread_id": "abc-123"}),
+            &slot,
+            &fork,
+        )
+        .is_none());
+        assert!(slot.lock().is_none());
+    }
+
     /// The fork flag is one-shot: the very first observed upstream id
     /// (failed turn or otherwise) must consume it, so a later retry
     /// cannot accidentally fork a second time.
@@ -663,32 +941,230 @@ mod tests {
 
     #[test]
     fn classify_turn_drained_zero_is_idle() {
-        let (status, kind, _) = classify_turn(TurnOutcome::Drained, Some(0));
+        let (status, kind, _) = classify_turn(TurnOutcome::Drained, Some(0), None);
         assert_eq!(status, SessionStatus::Idle);
         assert!(kind.is_none());
     }
 
     #[test]
     fn classify_turn_drained_nonzero_is_agent_crashed() {
-        let (status, kind, msg) = classify_turn(TurnOutcome::Drained, Some(7));
+        let (status, kind, msg) = classify_turn(TurnOutcome::Drained, Some(7), None);
         assert_eq!(status, SessionStatus::Error);
         assert_eq!(kind, Some(ErrorKind::AgentCrashed));
         assert!(msg.unwrap().contains('7'));
     }
 
     #[test]
+    fn classify_turn_prefers_captured_error_over_exit_code() {
+        // Codex emits a useful reason in its `error` / `turn.failed`
+        // envelope before exiting non-zero. Without this preference
+        // the user only sees `exit code 1`.
+        let (_, _, msg) = classify_turn(
+            TurnOutcome::Drained,
+            Some(1),
+            Some("model not supported".into()),
+        );
+        assert_eq!(msg.as_deref(), Some("model not supported"));
+    }
+
+    #[test]
+    fn classify_turn_uses_captured_error_when_exit_status_missing() {
+        let (_, _, msg) = classify_turn(
+            TurnOutcome::Drained,
+            None,
+            Some("rate limited".into()),
+        );
+        assert_eq!(msg.as_deref(), Some("rate limited"));
+    }
+
+    #[test]
     fn classify_turn_line_cap_is_protocol_violation() {
-        let (status, kind, _) = classify_turn(TurnOutcome::LineCapExceeded, Some(0));
+        let (status, kind, _) = classify_turn(TurnOutcome::LineCapExceeded, Some(0), None);
         assert_eq!(status, SessionStatus::Error);
         assert_eq!(kind, Some(ErrorKind::ProtocolViolation));
     }
 
     #[test]
+    fn build_codex_args_first_turn_appends_stdin_dash() {
+        // Construct just the argv shape — `Session` needs an
+        // `AppHandle`, but the arg builder reads only `cli_type`,
+        // `base_args`, and the `upstream_session_id` slot. We test
+        // it via free helpers below to avoid a Tauri runtime.
+        let base = vec![
+            "exec".into(),
+            "--json".into(),
+            "--skip-git-repo-check".into(),
+            "--model".into(),
+            "gpt-5.2".into(),
+        ];
+        let prev: Option<String> = None;
+        let args = codex_args_for_test(&base, prev.as_deref());
+        assert_eq!(
+            args,
+            vec![
+                "exec".to_string(),
+                "--json".into(),
+                "--skip-git-repo-check".into(),
+                "--model".into(),
+                "gpt-5.2".into(),
+                "-".into(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_codex_args_resumed_turn_appends_resume_after_flags() {
+        // Flags must precede `resume <id>`; otherwise `codex exec
+        // resume` rejects them with exit 2 because they belong to
+        // the parent `exec` subcommand.
+        let base = vec![
+            "exec".into(),
+            "--full-auto".into(),
+            "--json".into(),
+            "--skip-git-repo-check".into(),
+            "--model".into(),
+            "gpt-5.2".into(),
+        ];
+        let args = codex_args_for_test(&base, Some("019e0580-72"));
+        assert_eq!(
+            args,
+            vec![
+                "exec".to_string(),
+                "--full-auto".into(),
+                "--json".into(),
+                "--skip-git-repo-check".into(),
+                "--model".into(),
+                "gpt-5.2".into(),
+                "resume".into(),
+                "019e0580-72".into(),
+                "-".into(),
+            ],
+            "flags must come before `resume <id>` per codex 0.66 grammar",
+        );
+    }
+
+    /// Free-function mirror of `Session::build_codex_args` so the
+    /// argv shape can be unit-tested without a `Session` instance
+    /// (which requires a Tauri `AppHandle`).
+    fn codex_args_for_test(base: &[String], prev: Option<&str>) -> Vec<String> {
+        let mut args = base.to_vec();
+        if let Some(id) = prev {
+            args.push("resume".into());
+            args.push(id.to_string());
+        }
+        args.push("-".into());
+        args
+    }
+
+    #[test]
     fn classify_turn_send_failed_is_agent_crashed() {
         let (status, kind, msg) =
-            classify_turn(TurnOutcome::SendFailed("pipe broken".into()), None);
+            classify_turn(TurnOutcome::SendFailed("pipe broken".into()), None, None);
         assert_eq!(status, SessionStatus::Error);
         assert_eq!(kind, Some(ErrorKind::AgentCrashed));
         assert_eq!(msg.as_deref(), Some("pipe broken"));
+    }
+
+    #[test]
+    fn extract_inline_error_handles_codex_error_envelope() {
+        let v = serde_json::json!({"type":"error","message":"model not supported"});
+        assert_eq!(extract_inline_error(&v).as_deref(), Some("model not supported"));
+    }
+
+    #[test]
+    fn extract_inline_error_handles_codex_turn_failed() {
+        let v = serde_json::json!({
+            "type": "turn.failed",
+            "error": {"message": "rate limited"}
+        });
+        assert_eq!(extract_inline_error(&v).as_deref(), Some("rate limited"));
+    }
+
+    #[test]
+    fn extract_inline_error_returns_none_for_unrelated_lines() {
+        assert!(extract_inline_error(&serde_json::json!({"type":"turn.started"})).is_none());
+        assert!(extract_inline_error(&serde_json::json!({"foo":"bar"})).is_none());
+    }
+
+    /// Pins the first-write-wins guard via `store_first_inline_error`.
+    /// Codex emits a specific `error` envelope before a generic
+    /// `turn.failed` wrapper — without this rule the user would see
+    /// the wrapper text instead of the actionable reason. We drive
+    /// the same helper that `process_jsonl_line` calls so a
+    /// regression in the helper itself fails this test.
+    #[test]
+    fn store_first_inline_error_keeps_the_earliest_message() {
+        let slot: Mutex<Option<String>> = Mutex::new(None);
+        store_first_inline_error(&slot, "first specific".into());
+        store_first_inline_error(&slot, "second generic".into());
+        assert_eq!(slot.lock().as_deref(), Some("first specific"));
+    }
+
+    #[test]
+    fn store_first_inline_error_is_a_noop_on_empty_slot_after_fill() {
+        // The helper must be idempotent for our use: once filled,
+        // any number of further calls leaves the slot untouched.
+        let slot: Mutex<Option<String>> = Mutex::new(None);
+        store_first_inline_error(&slot, "kept".into());
+        for msg in ["a", "b", "c"] {
+            store_first_inline_error(&slot, msg.into());
+        }
+        assert_eq!(slot.lock().as_deref(), Some("kept"));
+    }
+
+    /// Codex sometimes JSON-encodes the human reason inside the
+    /// `message` field. We peel one layer so the user sees the raw
+    /// sentence instead of `{"detail": "..."}` with escape noise.
+    #[test]
+    fn extract_inline_error_unwraps_codex_json_detail() {
+        let v = serde_json::json!({
+            "type": "error",
+            "message": "{\"detail\":\"The 'gpt-5.1-codex-max' model is not supported when using Codex with a ChatGPT account.\"}",
+        });
+        let unwrapped = extract_inline_error(&v).expect("error envelope must yield message");
+        assert_eq!(
+            unwrapped,
+            "The 'gpt-5.1-codex-max' model is not supported when using Codex with a ChatGPT account.",
+        );
+    }
+
+    #[test]
+    fn extract_inline_error_passes_through_non_json_messages() {
+        let v = serde_json::json!({"type": "error", "message": "rate limited"});
+        assert_eq!(extract_inline_error(&v).as_deref(), Some("rate limited"));
+    }
+
+    #[test]
+    fn extract_inline_error_skips_unwrap_for_oversized_payloads() {
+        // A 100 KiB JSON-encoded message would otherwise trigger a
+        // tree allocation per envelope. We pass it through verbatim
+        // instead — the user sees the raw payload but the chorus
+        // process is not amplified. The pre-flight cap is the
+        // load-bearing defence here.
+        let huge_detail = "x".repeat(100 * 1024);
+        let huge_payload = format!("{{\"detail\":\"{huge_detail}\"}}");
+        let v = serde_json::json!({"type": "error", "message": huge_payload.clone()});
+        // Should round-trip the raw JSON-encoded string, not the
+        // unwrapped detail.
+        let result = extract_inline_error(&v).expect("envelope must yield message");
+        assert!(
+            result.starts_with("{\"detail\":"),
+            "oversized payloads must skip the JSON unwrap",
+        );
+    }
+
+    #[test]
+    fn extract_inline_error_passes_through_json_without_detail_key() {
+        // A future codex shape might emit `{"reason":"..."}` etc.
+        // We only know how to unwrap `detail` / `message`; other
+        // shapes round-trip as-is so the user still sees something.
+        let v = serde_json::json!({
+            "type": "error",
+            "message": "{\"reason\":\"too many requests\"}",
+        });
+        assert_eq!(
+            extract_inline_error(&v).as_deref(),
+            Some("{\"reason\":\"too many requests\"}"),
+        );
     }
 }

@@ -4,7 +4,10 @@
 //! `kill_pty`) so the verb set stays uniform: `spawn_headless`,
 //! `write_headless_input`, `cancel_headless_message`, `kill_headless`.
 //! Resume / fork are folded into `spawn_headless` (the `resumeSessionAt`
-//! and `forkSession` fields). Codex resume support follows in Phase 1e.
+//! and `forkSession` fields). Both claude (`--resume <session-id>`) and
+//! codex (`exec resume <thread-id>`) wire continuity through the same
+//! frontend field — see `Session::build_turn_args` for the per-CLI
+//! argv shape.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -47,12 +50,14 @@ pub struct SpawnHeadlessRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub extra_env: HashMap<String, String>,
-    /// When set, append `--resume <id>` to the Claude argv so the new
-    /// process continues an existing session rather than starting fresh.
-    /// The id is validated as session-id-shaped before being passed
-    /// through, so a crafted value cannot inject arbitrary CLI flags.
-    /// Currently only honoured for `CliType::ClaudeCode`; Codex resume
-    /// uses the `codex exec resume <id>` subcommand and lands in Phase 1e.
+    /// When set, the new process continues an existing conversation
+    /// rather than starting fresh. The id is validated as
+    /// session-id-shaped before being passed through, so a crafted
+    /// value cannot inject arbitrary CLI flags.
+    ///
+    /// `Session::build_turn_args` translates this into the per-CLI
+    /// argv shape: `--resume <id>` for Claude, `exec resume <id>` for
+    /// Codex.
     #[serde(default)]
     pub resume_session_at: Option<String>,
     /// When true and `resume_session_at` is set, also append
@@ -113,31 +118,36 @@ pub async fn spawn_headless(
             "Shell CliType is not supported by headless pipeline".into(),
         ));
     }
-    if matches!(request.cli_type, CliType::Codex) {
-        // Codex headless is Phase 1f territory: `codex exec` reads a
-        // single positional prompt and emits `--json` events, but it
-        // does not accept stream-json on stdin. We need a small adapter
-        // that re-spawns per turn before this path can be lit.
-        return Err(AppError::CliNotFound(
-            "Codex headless support lands in Phase 1f".into(),
-        ));
-    }
     let (command, mut args) = resolve_command(&request.cli_type, &request.mode, &request.model)?;
 
-    // Headless flags for Claude Code: stream-json bidirectional pipe,
-    // partial messages so the UI can render deltas, and either a fresh
-    // `--session-id` or `--resume <existing>` for continuity.
-    //
-    // `--verbose` is required by `--print` + `--output-format stream-json`
-    // on Claude Code 1.x — without it the CLI silently emits nothing.
-    if matches!(request.cli_type, CliType::ClaudeCode) {
-        args.push("-p".into());
-        args.push("--output-format".into());
-        args.push("stream-json".into());
-        args.push("--input-format".into());
-        args.push("stream-json".into());
-        args.push("--include-partial-messages".into());
-        args.push("--verbose".into());
+    match request.cli_type {
+        CliType::ClaudeCode => {
+            // Stream-json bidirectional pipe + partial messages so the
+            // UI can render deltas. `--verbose` is required by
+            // `--print` + `--output-format stream-json` on Claude Code
+            // 1.x — without it the CLI silently emits nothing.
+            args.push("-p".into());
+            args.push("--output-format".into());
+            args.push("stream-json".into());
+            args.push("--input-format".into());
+            args.push("stream-json".into());
+            args.push("--include-partial-messages".into());
+            args.push("--verbose".into());
+        }
+        CliType::Codex => {
+            // Codex `exec --json` reads the prompt from stdin (we
+            // append `-` per-turn in `Session::build_codex_args`)
+            // and emits one JSONL event per high-level item. The
+            // `--skip-git-repo-check` flag matches what users see
+            // when running `codex exec` outside a repo and avoids
+            // an interactive prompt that would deadlock the spawn.
+            args.push("--json".into());
+            args.push("--skip-git-repo-check".into());
+        }
+        CliType::Shell => {
+            // Defended above by `resolve_command`'s rejection of
+            // shell-type panes; this arm exists for exhaustiveness.
+        }
     }
 
     // Continuity (`--session-id` first turn / `--resume <id>` after) is
@@ -161,6 +171,7 @@ pub async fn spawn_headless(
 
     let config = SessionConfig {
         tab_id: request.tab_id.clone(),
+        cli_type: request.cli_type,
         command,
         args,
         cwd,
@@ -187,15 +198,50 @@ pub async fn spawn_headless(
 /// when the renderer is bypassed or compromised.
 const MAX_USER_TEXT_BYTES: usize = 256 * 1024;
 
-/// Returns Ok(()) when `text` is within the per-message budget.
-/// Extracted so the budget can be exercised by unit tests without
-/// spinning up a Tauri runtime.
+/// Hard cap on attachments per turn. Bounds the peak memory footprint
+/// while we read every attachment up-front (`load_attachment` keeps
+/// the base64 payload alive in `Vec<InlineImage>` until the
+/// stream-json line is built and written). 16 attachments × 20 MiB ×
+/// 4/3 base64 expansion ≈ 425 MiB worst case — survivable; lifting
+/// the cap would let a compromised renderer OOM the chorus process.
+///
+/// Note: this is the **chorus-side** memory budget, not the
+/// Anthropic API's per-message limit (which is higher). Once the
+/// per-image streaming write planned in Phase 1i lands, the cap can
+/// safely move up to 32 or 64 — the bound will then be largest
+/// single image, not the sum.
+const MAX_IMAGES_PER_TURN: usize = 16;
+
+/// Returns Ok(()) when `text` is within the per-message budget and
+/// free of bytes that would confuse the downstream CLI's stdin
+/// framing. Extracted so the budget can be exercised by unit tests
+/// without spinning up a Tauri runtime.
 fn check_user_text_bytes(text: &str) -> Result<(), AppError> {
     if text.len() > MAX_USER_TEXT_BYTES {
         return Err(AppError::PtyWriteFailed(format!(
             "user text {} bytes exceeds {} bytes",
             text.len(),
             MAX_USER_TEXT_BYTES,
+        )));
+    }
+    // NUL bytes terminate POSIX C strings early — many CLIs would
+    // silently truncate the prompt. Reject them at the boundary so
+    // the user gets an error instead of a half-sent message.
+    if text.contains('\0') {
+        return Err(AppError::PtyWriteFailed(
+            "user text contains NUL byte".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Same shape as `check_user_text_bytes` but for the attachment count.
+/// Reject early so a poisoned renderer cannot make us alloc megabytes
+/// of `Vec<ImageAttachment>` before any validation runs.
+fn check_image_count(count: usize) -> Result<(), AppError> {
+    if count > MAX_IMAGES_PER_TURN {
+        return Err(AppError::PtyWriteFailed(format!(
+            "too many image attachments: {count} (max {MAX_IMAGES_PER_TURN})",
         )));
     }
     Ok(())
@@ -206,6 +252,11 @@ fn check_user_text_bytes(text: &str) -> Result<(), AppError> {
 pub struct WriteHeadlessInputRequest {
     pub tab_id: String,
     pub text: String,
+    /// Optional image attachments. Each entry is validated against the
+    /// `/tmp/chorus-images/` allowlist and inlined as a base64 image
+    /// content block in the stream-json envelope claude expects.
+    #[serde(default)]
+    pub images: Vec<crate::headless::image::ImageAttachment>,
 }
 
 /// Send a user message to the running session. Returns the request id so
@@ -217,11 +268,20 @@ pub async fn write_headless_input(
     request: WriteHeadlessInputRequest,
 ) -> Result<String, AppError> {
     check_user_text_bytes(&request.text)?;
+    check_image_count(request.images.len())?;
     let session = state
         .get(&request.tab_id)
         .ok_or_else(|| AppError::PtyNotFound(request.tab_id.clone()))?;
+    // Validate + load each image before touching the backend session.
+    // Rejecting at this boundary means a poisoned attachment cannot
+    // half-spawn a child or leave the frontend in `thinking` state
+    // waiting for a turn that never starts.
+    let mut inline_images = Vec::with_capacity(request.images.len());
+    for att in &request.images {
+        inline_images.push(crate::headless::image::load_attachment(att)?);
+    }
     let request_id = session
-        .send_user_message(request.text)
+        .send_user_message(request.text, inline_images)
         .await
         .map_err(|e| AppError::PtyWriteFailed(format!("{e}")))?;
     // Per-turn model: the spawn + drain runs on a background tokio task,
@@ -339,6 +399,15 @@ mod tests {
     }
 
     #[test]
+    fn user_text_with_nul_byte_is_rejected() {
+        let err = check_user_text_bytes("hello\0world").expect_err("NUL byte must reject");
+        match err {
+            AppError::PtyWriteFailed(msg) => assert!(msg.contains("NUL"), "{msg}"),
+            other => panic!("expected PtyWriteFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn user_text_one_byte_over_budget_is_rejected() {
         let text = "a".repeat(MAX_USER_TEXT_BYTES + 1);
         let err = check_user_text_bytes(&text).expect_err("over-cap input must reject");
@@ -346,6 +415,25 @@ mod tests {
             AppError::PtyWriteFailed(msg) => {
                 assert!(msg.contains("exceeds"), "{msg}");
                 assert!(msg.contains(&MAX_USER_TEXT_BYTES.to_string()), "{msg}");
+            }
+            other => panic!("expected PtyWriteFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_count_within_cap_is_accepted() {
+        check_image_count(0).expect("zero images");
+        check_image_count(MAX_IMAGES_PER_TURN).expect("exactly the cap");
+    }
+
+    #[test]
+    fn image_count_one_over_cap_is_rejected() {
+        let err = check_image_count(MAX_IMAGES_PER_TURN + 1)
+            .expect_err("over-cap count must reject");
+        match err {
+            AppError::PtyWriteFailed(msg) => {
+                assert!(msg.contains("too many"), "{msg}");
+                assert!(msg.contains(&MAX_IMAGES_PER_TURN.to_string()), "{msg}");
             }
             other => panic!("expected PtyWriteFailed, got {other:?}"),
         }

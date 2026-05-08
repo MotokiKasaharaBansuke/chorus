@@ -32,6 +32,7 @@ import { ChatInput } from "../chat/chat-input";
 import { MessageBubble } from "../chat/message-bubble";
 import chatStyles from "../chat/chat-panel.module.css";
 import { appendToHistory } from "../chat/input-history";
+import { useImageAttachment } from "../../hooks/use-image-attachment";
 import {
   cancelHeadlessMessage,
   classifyHeadlessError,
@@ -51,6 +52,11 @@ interface HeadlessPanelProps {
 
 export function HeadlessPanel(props: HeadlessPanelProps) {
   const store = useHeadlessStore();
+  // Image attachment hook: handles clipboard paste, native drag/drop
+  // (via App.tsx's `mlm-image-drop` custom events), and temp-file
+  // bookkeeping. Mirrors the chat-panel wiring exactly so the same
+  // UX (drop overlay, paste-to-attach) lights up for headless panes.
+  const images = useImageAttachment({ tabId: props.tab.id });
 
   let scrollRef: HTMLDivElement | undefined;
 
@@ -220,9 +226,24 @@ export function HeadlessPanel(props: HeadlessPanelProps) {
   );
 
   async function handleSubmit(text: string) {
+    // Snapshot the attachments at submit time so a slow IPC followed
+    // by a fast paste cannot bleed the next turn's images into this
+    // one. Cleared as soon as the IPC accepts so the composer is
+    // ready for the next turn.
+    const attached = images.attachedImages();
     try {
-      const requestId = await writeHeadlessInput(props.tab.id, text);
-      store.appendUserMessage(props.tab.id, requestId, text);
+      const requestId = await writeHeadlessInput(
+        props.tab.id,
+        text,
+        attached.map(({ path, mediaType }) => ({ path, mediaType })),
+      );
+      store.appendUserMessage(
+        props.tab.id,
+        requestId,
+        text,
+        attached.map(({ path, name }) => ({ path, name })),
+      );
+      images.clearAll();
     } catch (error) {
       if (isTurnInFlightError(error)) {
         // The previous turn is still running — the optimistic status
@@ -234,6 +255,11 @@ export function HeadlessPanel(props: HeadlessPanelProps) {
         // succeed.
         return;
       }
+      // Permanent failure (image rejected, spawn died, etc). Drop
+      // the attached images so a retry does not re-send the same
+      // poisoned payload — the user can re-attach if the failure
+      // was transient. The error row that follows tells them why.
+      images.clearAll();
       // Surface the failure as an error status so the next render
       // shows the system row (`adaptHeadlessMessages` builds the
       // trailing system message from `errorMessage`).
@@ -305,6 +331,11 @@ export function HeadlessPanel(props: HeadlessPanelProps) {
 
   return (
     <div class={chatStyles.container}>
+      <Show when={images.isDragOver()}>
+        <div class={chatStyles.dropOverlay}>
+          <span>Drop files here</span>
+        </div>
+      </Show>
       <Show when={stickyPrompt()}>
         {(text) => (
           <div class={chatStyles.stickyOverlay}>
@@ -344,10 +375,9 @@ export function HeadlessPanel(props: HeadlessPanelProps) {
         mode={props.tab.cliConfig.mode}
         workingDir={props.tab.cliConfig.workingDir}
         isStreaming={isStreaming()}
-        // Image attachment is PTY-only; headless input is text-only.
-        attachedImages={[]}
-        onRemoveImage={() => {}}
-        onPaste={() => {}}
+        attachedImages={images.attachedImages()}
+        onRemoveImage={images.removeImage}
+        onPaste={images.handlePaste}
         onSubmit={(t) => void handleSubmit(t)}
         onSlashCommand={handleSlashCommand}
         onInterrupt={handleInterrupt}

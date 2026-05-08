@@ -125,7 +125,12 @@ function removeSession(tabId: TabId): void {
  * starts streaming. Carries the Chorus-side `requestId` so future
  * correlation work (Phase 1e) can pair it with the assistant turn.
  */
-function appendUserMessage(tabId: TabId, requestId: string, text: string): void {
+function appendUserMessage(
+  tabId: TabId,
+  requestId: string,
+  text: string,
+  images: ReadonlyArray<{ path: string; name: string }> = [],
+): void {
   ensureSession(tabId);
   setStore(
     produce((s) => {
@@ -136,6 +141,11 @@ function appendUserMessage(tabId: TabId, requestId: string, text: string): void 
         id: requestId,
         text,
         sentAt: Date.now(),
+        // Only carry the field when there is at least one image —
+        // keeps legacy localStorage snapshots that pre-date image
+        // support strictly equal to their adapted form, and avoids a
+        // useless empty array on every text-only turn.
+        ...(images.length > 0 ? { images: [...images] } : {}),
       });
       // Optimistic transition to "thinking" so the input gates
       // immediately, before the real `Status::Thinking` event arrives

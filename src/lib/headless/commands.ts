@@ -27,13 +27,32 @@ export async function spawnHeadless(request: SpawnHeadlessRequest): Promise<TabI
 }
 
 /**
+ * Wire shape for an image attachment passed to `writeHeadlessInput`.
+ * `path` must already live under `/tmp/chorus-images/` (enforced by
+ * the backend `image::load_attachment` allowlist) — frontend callers
+ * use the `saveTempImage` IPC to land bytes there before sending.
+ */
+export interface HeadlessImageAttachment {
+  path: string;
+  mediaType: string;
+}
+
+/**
  * Send a user message to the running session. Returns the Chorus-side
  * `requestId` so callers can correlate the assistant reply they later
  * receive on the per-tab event channel.
+ *
+ * Optional `images` attach to the same turn — the backend reads each
+ * file, base64-encodes it, and embeds an `image` content block in the
+ * stream-json envelope claude expects.
  */
-export async function writeHeadlessInput(tabId: TabId, text: string): Promise<RequestId> {
+export async function writeHeadlessInput(
+  tabId: TabId,
+  text: string,
+  images: HeadlessImageAttachment[] = [],
+): Promise<RequestId> {
   return invoke<RequestId>("write_headless_input", {
-    request: { tabId, text },
+    request: { tabId, text, images },
   });
 }
 
