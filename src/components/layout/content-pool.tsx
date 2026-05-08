@@ -1,8 +1,10 @@
 import { createContext, useContext, createSignal, For, Show, onCleanup, type JSX, type Accessor } from "solid-js";
 import { ChatPanel } from "../chat/chat-panel";
+import { HeadlessPanel } from "../headless/headless-panel";
 import { TerminalPanel } from "../terminal/terminal-panel";
 import { FileViewer } from "../sidebar/file-viewer";
 import type { Tab } from "../../types";
+import { effectivePaneKind } from "../../types";
 
 interface ContentPoolContextValue {
   /** Get the pool DOM element for a tab so PaneGroup can move it into a slot. */
@@ -77,15 +79,19 @@ export function ContentPool(props: ContentPoolProps) {
   );
 }
 
-/** Dispatches to the correct content component based on CLI type.
- *  Created once per tab by <For> -- tab identity is stable for the
- *  lifetime of this component, so the eager cliType read is safe.
- *  isActive is passed as an accessor to maintain SolidJS reactivity. */
+/** Dispatches to the correct content component based on CLI type and
+ *  pane kind. Created once per tab by `<For>` — tab identity is stable
+ *  for the lifetime of this component, so the eager `cliType` /
+ *  `paneKind` read is safe. `isActive` is an accessor to keep SolidJS
+ *  reactivity. */
 function PooledContent(props: { tab: Tab; isActive: () => boolean; onClose: () => void }) {
   if (props.tab.cliConfig.cliType === "file-viewer" && props.tab.filePath) {
     return <FileViewer path={props.tab.filePath} onClose={props.onClose} contentOverride={props.tab.contentOverride} />;
   }
   if (props.tab.cliConfig.cliType === "claude-code" || props.tab.cliConfig.cliType === "codex") {
+    if (effectivePaneKind(props.tab) === "headless") {
+      return <HeadlessPanel tab={props.tab} />;
+    }
     return <ChatPanel tab={props.tab} isActive={props.isActive} />;
   }
   return <TerminalPanel tab={props.tab} isActive={props.isActive} />;

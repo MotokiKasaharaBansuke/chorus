@@ -14,6 +14,10 @@ import { spawnPaneWithWorktree } from "./lib/worktree/spawn-pane";
 import { decideCloseAction } from "./lib/worktree/decide-close-action";
 import { MIN_PANE_PX, getAllPaneGroups, findPaneGroupContainingTab } from "./lib/layout/layout-tree";
 import { TerminalPanel } from "./components/terminal/terminal-panel";
+import { HeadlessDebugOverlay } from "./components/headless/headless-debug-overlay";
+import { spawnHeadless, killHeadless } from "./lib/headless/commands";
+import { useHeadlessStore } from "./stores/headless-store";
+import { decidePaneKind } from "./lib/engine/decide-pane-kind";
 import { Sidebar } from "./components/sidebar/sidebar";
 import { LayoutRenderer } from "./components/layout/layout-renderer";
 import { ContentPool } from "./components/layout/content-pool";
@@ -34,8 +38,8 @@ import { useKeyboardShortcuts } from "./hooks/use-keyboard-shortcuts";
 import { useResizeHandle } from "./hooks/use-resize-handle";
 import { useActiveTabAttr } from "./hooks/use-active-tab-attr";
 import { removeParser } from "./lib/stream-parser-registry";
-import { effectivePtyId, isTabStreaming } from "./types";
-import type { CliConfig, CliMode, Tab } from "./types";
+import { effectivePaneKind, effectivePtyId, isTabStreaming } from "./types";
+import type { CliConfig, CliMode, PaneKind, Tab } from "./types";
 import chorusIcon from "./assets/chorus-icon.png";
 import "./App.css";
 
@@ -75,6 +79,42 @@ function App() {
 
   function spawnPtyForTab(config: CliConfig): Promise<string> {
     return spawnPty(config);
+  }
+
+  /** Mint a fresh tab id for a headless pane. UUID v4 has 122 bits of
+   *  entropy — collision-free even under heavy parallel spawn, and the
+   *  `headless-` prefix keeps backend logs grep-friendly. */
+  function newHeadlessTabId(): string {
+    return `headless-${crypto.randomUUID()}`;
+  }
+
+  /**
+   * Engine-aware spawn helper. Returns the freshly-allocated pane id
+   * (PTY id for the legacy path, headless tab id for the new path).
+   * Used by the worktree orchestrator so the directory creation and the
+   * spawn end up using the same final cwd.
+   */
+  function spawnEngineForTab(
+    config: CliConfig,
+    paneKind: PaneKind,
+  ): Promise<string> {
+    if (paneKind !== "headless") {
+      return spawnPtyForTab(config);
+    }
+    if (config.cliType !== "claude-code" && config.cliType !== "codex") {
+      // `decidePaneKind` already excludes shell/file-viewer; this is a
+      // belt-and-braces check that fires loudly during development.
+      return Promise.reject(
+        new Error(`headless engine cannot host cliType=${config.cliType}`),
+      );
+    }
+    return spawnHeadless({
+      tabId: newHeadlessTabId(),
+      cliType: config.cliType,
+      mode: config.mode,
+      cwd: config.workingDir,
+      model: config.model,
+    });
   }
 
   const activeTabAccessor = () => tabStore.activeTab;
@@ -144,9 +184,14 @@ function App() {
   });
 
   // Ensure session is saved immediately before the window closes.
+  // `flushAllPersist` synchronously drains the per-tab debounce timers
+  // so the freshest `upstreamSessionId` and last 200 ms of message
+  // deltas survive `Cmd+Q`; otherwise the next launch would resume
+  // claude against a stale session id and the histories would diverge.
   window.addEventListener("beforeunload", () => {
     const session = buildCurrentSession();
     if (session) persistSession(session).catch(() => {});
+    useHeadlessStore().flushAllPersist();
   });
 
   // --- IPC: open directory in existing instance (from mlm CLI) ---
@@ -188,7 +233,15 @@ function App() {
     ipcUnlistenRef = await listen<{ dir: string; cliType?: string }>("mlm-open-dir", async (event) => {
       const { dir, cliType: rawCliType } = event.payload;
       if (!dir || !dir.startsWith("/")) return;
-      const cliType: "claude-code" | "codex" = rawCliType === "codex" ? "codex" : "claude-code";
+      // Honor an explicit `claude-code` / `codex` from the IPC payload;
+      // otherwise fall back to the user's default-CLI setting so the
+      // bare `mlm <dir>` invocation respects their preference.
+      const cliType: "claude-code" | "codex" =
+        rawCliType === "codex"
+          ? "codex"
+          : rawCliType === "claude-code"
+            ? "claude-code"
+            : settingsStore.defaultCliType;
       const config: CliConfig = { cliType, mode: quickLaunchMode(), workingDir: dir };
       try {
         await spawnAndOpenTab(config, { splitIntoNewPane: true });
@@ -265,6 +318,7 @@ function App() {
   async function spawnAndOpenTab(config: CliConfig, options?: { splitIntoNewPane?: boolean }) {
     spawningCount++;
     try {
+      const paneKind = decidePaneKind(config, settingsStore.engineDefault);
       const { paneId, finalConfig, worktree, repoRoot } = await spawnPaneWithWorktree(
         config,
         settingsStore.worktree,
@@ -280,7 +334,11 @@ function App() {
               shareCargoTarget: w.shareCargoTarget,
               spotlightExclude: w.spotlightExclude,
             }),
-          spawnPty: spawnPtyForTab,
+          // The orchestrator's `spawnPty` slot is engine-neutral despite
+          // the historical name; we route through `spawnEngineForTab` so
+          // a `headless` pane uses the JSONL pipeline while shell stays
+          // on PTY. Renaming the slot lands in Phase 4.
+          spawnPty: (cfg) => spawnEngineForTab(cfg, paneKind),
         },
       );
 
@@ -294,6 +352,9 @@ function App() {
         title,
         status: "waiting",
         cliConfig: finalConfig,
+        // Persist `paneKind` only for non-PTY panes. Absent field means
+        // "pty" so old session.json files round-trip unchanged.
+        ...(paneKind === "headless" ? { paneKind: "headless" as const } : {}),
         worktree: worktree
           ? { path: worktree.path, branch: worktree.branch, headSha: worktree.headSha, repoRoot: effectiveRoot }
           : undefined,
@@ -377,8 +438,21 @@ function App() {
 
   async function handleCloseTab(id: string) {
     const tab = tabStore.getTab(id);
+    // Engine-aware teardown: headless panes are killed via the JSONL
+    // command, PTY panes via the legacy path. file-viewer tabs have no
+    // backing process and skip both.
     if (tab?.cliConfig.cliType !== "file-viewer") {
-      try { await killPty(tab ? effectivePtyId(tab) : id); } catch { /* */ }
+      const paneKind = tab ? effectivePaneKind(tab) : "pty";
+      if (paneKind === "headless") {
+        try { await killHeadless(id); } catch { /* */ }
+        // Drop the persisted localStorage entry alongside the backend
+        // teardown — without this, closed-tab records would accumulate
+        // forever under `chorus:headless-session:v1:*` and eventually
+        // exhaust the per-origin quota, breaking save for live tabs.
+        useHeadlessStore().removeSession(id);
+      } else {
+        try { await killPty(tab ? effectivePtyId(tab) : id); } catch { /* */ }
+      }
     }
     tabStore.closeTab(id);
     removeParser(id);
@@ -412,8 +486,12 @@ function App() {
 
   function collectActivePtyIds(): string[] {
     return [
-      ...tabStore.tabs.map(t => effectivePtyId(t)),
-      ...bottomTerminal.termTabs().map(t => effectivePtyId(t)),
+      // Headless panes do not have a PTY id and would never collide with
+      // PTY zombies, so exclude them from the zombie-detection set.
+      ...tabStore.tabs
+        .filter((t) => effectivePaneKind(t) === "pty")
+        .map((t) => effectivePtyId(t)),
+      ...bottomTerminal.termTabs().map((t) => effectivePtyId(t)),
     ];
   }
 
@@ -450,6 +528,10 @@ function App() {
   async function handleRefreshActiveTab() {
     const tab = tabStore.activeTab;
     if (!tab || tab.cliConfig.cliType === "file-viewer") return;
+    // Refresh re-uses the PTY respawn path. Headless panes do not have
+    // an equivalent yet (Phase 1e brings a true resume); for now, the
+    // refresh button is a no-op on headless tabs.
+    if (effectivePaneKind(tab) === "headless") return;
     if (isRefreshing) return;
     if (isTabStreaming(tab.status)) return;
 
@@ -503,6 +585,18 @@ function App() {
 
   async function handleRestartTab(tab: Tab) {
     if (tab.cliConfig.cliType === "file-viewer") return;
+    if (effectivePaneKind(tab) === "headless") {
+      // Headless restart is "kill + re-spawn"; the user's intent here
+      // is to reset the conversation, so we drop the persisted state
+      // alongside the backend session. The new tab gets a fresh id
+      // and starts with empty localStorage — exactly what "restart"
+      // implies.
+      try { await killHeadless(tab.id); } catch {}
+      useHeadlessStore().removeSession(tab.id);
+      tabStore.closeTab(tab.id);
+      await handleNewTab(tab.cliConfig);
+      return;
+    }
     try { await killPty(effectivePtyId(tab)); } catch {}
     tabStore.closeTab(tab.id);
     removeParser(tab.id);
@@ -615,7 +709,11 @@ function App() {
           quickLaunchMode={quickLaunchMode()}
           onQuickLaunchModeChange={setQuickLaunchMode}
           reviewCliType={settingsStore.reviewCliType}
-          onReviewCliTypeChange={(t) => settingsStore.setReviewCliType(t)}
+          onReviewCliTypeChange={(type) => settingsStore.setReviewCliType(type)}
+          engineDefault={settingsStore.engineDefault}
+          onEngineDefaultChange={(engine) => settingsStore.setEngineDefault(engine)}
+          defaultCliType={settingsStore.defaultCliType}
+          onDefaultCliTypeChange={(cli) => settingsStore.setDefaultCliType(cli)}
           fontSize={fontSize()}
           onFontSizeChange={applyFontSize}
           onOpenWorktreeSettings={() => setIsWorktreeSettingsOpen(true)}
@@ -698,6 +796,7 @@ function App() {
 
       <CliSettingsModal
         isOpen={isModalOpen()}
+        defaultCliType={settingsStore.defaultCliType}
         defaultWorkingDir={sidebarStore.workingDir}
         onSubmit={(config) => { setIsModalOpen(false); handleNewTab(config); }}
         onCancel={() => setIsModalOpen(false)}
@@ -738,6 +837,10 @@ function App() {
           onClose={() => setShowUsageModal(false)}
         />
       </Show>
+
+      {/* Phase 2 preview: side-by-side headless agent panel.
+          DEV-only so release builds never see it. */}
+      {import.meta.env.DEV && <HeadlessDebugOverlay />}
     </div>
   );
 }

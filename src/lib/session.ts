@@ -1,4 +1,5 @@
-import type { CliConfig, CliMode, ReviewCliType, SessionFlags, TabWorktree, LayoutNode, PaneGroupNode, SplitNode, Tab } from "../types";
+import type { CliConfig, CliMode, PaneKind, ReviewCliType, SessionFlags, TabWorktree, LayoutNode, PaneGroupNode, SplitNode, Tab } from "../types";
+import { effectivePaneKind } from "../types";
 import { saveSession, loadSession } from "./commands/session-commands";
 import { spawnPty, sessionFileExists, restoreSessionFile } from "./commands";
 
@@ -11,6 +12,16 @@ interface SavedTab {
   cliConfig: CliConfig;
   lastSessionId?: string;
   worktree?: TabWorktree;
+  /** Engine the tab was running on at save time. Absent for legacy
+   *  sessions written before Phase 3 — interpreted as `"pty"`. */
+  paneKind?: PaneKind;
+  /** Logical tab id, persisted only for headless tabs. The frontend
+   *  stores the per-tab message history and `upstreamSessionId`
+   *  under `localStorage["chorus:headless-session:v1:<id>"]`, so
+   *  losing the id between launches orphans the saved conversation.
+   *  PTY tabs do not need a stable id — their continuity goes through
+   *  the CLI's own `--resume <lastSessionId>` instead. */
+  id?: string;
 }
 
 type SavedLayout = SavedSplit | SavedPaneGroup;
@@ -102,7 +113,22 @@ export function buildSavedSession(
 
   return {
     version: SESSION_VERSION,
-    tabs: tabs.map(t => ({ title: t.title, cliConfig: { ...t.cliConfig }, lastSessionId: t.lastSessionId, worktree: t.worktree })),
+    tabs: tabs.map((t) => {
+      // Persist `paneKind` only when non-default so legacy session.json
+      // files (no `paneKind` key) round-trip unchanged. Restore reads
+      // absent as `"pty"` via `effectivePaneKind`.
+      const kind = effectivePaneKind(t);
+      return {
+        title: t.title,
+        cliConfig: { ...t.cliConfig },
+        lastSessionId: t.lastSessionId,
+        worktree: t.worktree,
+        // Tab id is persisted only for headless panes — see SavedTab
+        // doc. PTY tabs intentionally get a fresh id on restore
+        // because their backend identifier (the PTY) is also new.
+        ...(kind === "headless" ? { paneKind: "headless" as const, id: t.id } : {}),
+      };
+    }),
     layout: savedLayout,
     sidebarOpen,
     sidebarWidth,
@@ -176,16 +202,48 @@ export async function restoreSession(data: string): Promise<RestoredWorkspace | 
     }),
   );
 
-  // Spawn PTYs for all tabs in parallel.
-  // When a tab has a lastSessionId, resume that session so the CLI
-  // restores conversation context from the previous app session.
+  // Spawn engines for all tabs in parallel.
+  //
+  // For PTY tabs: when a `lastSessionId` is present we resume the CLI's
+  // saved conversation so context survives the app restart.
+  //
+  // For headless tabs: spawn a new headless session, passing
+  // `resumeSessionAt` when available so Claude continues the previous
+  // conversation rather than starting fresh.
+  //
+  // Defence-in-depth: a hand-edited session.json that pairs `paneKind:
+  // "headless"` with a non-Claude/Codex `cliType` falls back to PTY here.
+  // The backend would also reject (`headless_commands.rs` rejects shell),
+  // but resolving it on the frontend keeps the user's tab alive in the
+  // legacy engine instead of silently failing the spawn.
   const spawnResults = await Promise.allSettled(
-    validatedTabs.map(t => {
+    validatedTabs.map((t) => {
+      const kind: PaneKind = t.paneKind ?? "pty";
+      const cliType = t.cliConfig.cliType;
       const flags: SessionFlags | undefined = t.lastSessionId && t.lastSessionId.length > 0
         ? { resumeSessionAt: t.lastSessionId }
         : undefined;
+
+      if (kind === "headless" && (cliType === "claude-code" || cliType === "codex")) {
+        // Headless tabs preserve their saved `id` across restart so
+        // the per-tab localStorage record (messages +
+        // `upstreamSessionId`) attaches to the same key — minting a
+        // fresh UUID here would orphan the saved conversation.
+        // Pre-Phase-1h-persist sessions did not write `id`; fall back
+        // to a fresh UUID for those so the tab still loads (its
+        // history is unrecoverable, but the rest of the workspace
+        // restores cleanly).
+        const restoredId = t.id ?? `headless-${crypto.randomUUID()}`;
+        // We deliberately skip the eager `spawnHeadless` call: the
+        // backend `Session` is process-scoped and would only need
+        // re-spawning anyway. `HeadlessPanel.ensureBackendSession`
+        // runs on first mount with the persisted state in hand and
+        // hands the upstream session id back as `resumeSessionAt`,
+        // letting claude reattach to the prior conversation.
+        return Promise.resolve(restoredId);
+      }
       return spawnPty(t.cliConfig, undefined, undefined, flags);
-    })
+    }),
   );
 
   const newIds: string[] = [];
@@ -203,6 +261,9 @@ export async function restoreSession(data: string): Promise<RestoredWorkspace | 
         cliConfig: { ...saved.cliConfig },
         lastSessionId: saved.lastSessionId,
         worktree: saved.worktree,
+        // Propagate `paneKind` only for non-PTY panes so legacy round-trip
+        // stays bit-identical for shell + PTY claude/codex tabs.
+        ...(saved.paneKind === "headless" ? { paneKind: "headless" as const } : {}),
       };
     } else {
       newIds.push(""); // placeholder for failed spawns

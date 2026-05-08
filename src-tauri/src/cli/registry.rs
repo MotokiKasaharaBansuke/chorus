@@ -3,6 +3,12 @@ use std::path::PathBuf;
 
 use crate::error::AppError;
 
+/// Fallback codex model used when the user has not picked one. Chosen
+/// because it is available on the broadest plan tier (including the
+/// ChatGPT subscription plan) — codex's own default is plan-gated and
+/// errors mid-turn for many users without a clear UI signal.
+const DEFAULT_CODEX_MODEL: &str = "gpt-5.2";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CliType {
@@ -18,9 +24,10 @@ impl CliType {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum CliMode {
+    #[default]
     Default,
     Plan,
     DangerouslySkipPermissions,
@@ -39,12 +46,17 @@ pub fn find_binary(name: &str) -> Option<PathBuf> {
     for path in &paths {
         let p = PathBuf::from(path);
         if p.exists() {
+            tracing::info!(binary = name, path = %p.display(), "cli binary resolved");
             return Some(p);
         }
     }
 
     // Try PATH
-    which::which(name).ok()
+    if let Ok(p) = which::which(name) {
+        tracing::info!(binary = name, path = %p.display(), "cli binary resolved via PATH");
+        return Some(p);
+    }
+    None
 }
 
 pub fn resolve_command(
@@ -95,10 +107,14 @@ pub fn resolve_command(
                 CliMode::Plan => {}
             }
 
-            if let Some(m) = model {
-                args.push("--model".into());
-                args.push(m.clone());
-            }
+            // Codex's built-in default (`gpt-5.1-codex-max`) is gated
+            // behind an API plan that ChatGPT-account users do not
+            // have, so an unspecified model crashes the CLI with
+            // `exit 1` mid-turn. Pin a sensible fallback that works
+            // on the broadest plan tier; users can still override
+            // via `cliConfig.model` per pane.
+            args.push("--model".into());
+            args.push(model.clone().unwrap_or_else(|| DEFAULT_CODEX_MODEL.into()));
 
             Ok((binary.to_string_lossy().to_string(), args))
         }

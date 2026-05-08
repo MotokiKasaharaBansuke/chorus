@@ -245,3 +245,14 @@
 .usageBannerWarn .usageLink {
   color: #8a7a3a;
 }
+
+/* Inline tag pinned to a dropdown item (e.g. "default", "experimental",
+   "DANGER"). Shared layout; color comes from a sibling modifier so the
+   semantic intent stays in the class name. */
+.itemTag {
+  font-size: 10px;
+  margin-left: 4px;
+}
+.itemTagMuted { color: #888; }
+.itemTagWarn { color: #e6b450; }
+.itemTagDanger { color: #c74e39; }

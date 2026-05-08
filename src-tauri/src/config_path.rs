@@ -25,6 +25,17 @@ pub fn settings_tmp_file() -> PathBuf {
     config_dir().join("settings.json.tmp")
 }
 
+/// Directory holding per-session lock files for the headless pipeline.
+/// One file per `tab_id` ensures only a single Chorus instance owns a
+/// session at a time (flock semantics).
+pub fn headless_locks_dir() -> PathBuf {
+    config_dir().join("headless-locks")
+}
+
+pub fn headless_session_lock(tab_id: &str) -> PathBuf {
+    headless_locks_dir().join(format!("{tab_id}.lock"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
