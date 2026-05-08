@@ -476,16 +476,16 @@ fn process_jsonl_line(line: &str, ctx: &TurnContext, parser: &mut StreamParser) 
         );
     }
 
-    if let Some(message) = extract_inline_error(&value) {
-        // First-write-wins. Codex emits `error` (specific API reason
-        // like "model not supported") *before* `turn.failed` (a
-        // generic "turn failed" wrapper), so blindly overwriting the
-        // slot would discard the more useful detail. The downstream
-        // contract is "show the user the first explanation we got";
-        // only the absence of any prior message lets a later one win.
-        let mut slot = ctx.captured_error.lock();
-        if slot.is_none() {
-            *slot = Some(message);
+    // Short-circuit when we already have a message: skip both the
+    // envelope dispatch in `extract_inline_error` *and* the JSON
+    // detail unwrap inside it. A hostile or buggy CLI flooding the
+    // turn with `error` envelopes would otherwise pay two
+    // `serde_json::from_str` parses per line. The single-task
+    // ownership of `captured_error` (one tokio task per turn) makes
+    // this check race-free without a guard inside the helper.
+    if ctx.captured_error.lock().is_none() {
+        if let Some(message) = extract_inline_error(&value) {
+            store_first_inline_error(&ctx.captured_error, message);
         }
     }
 
@@ -666,11 +666,27 @@ fn extract_inline_error(value: &serde_json::Value) -> Option<String> {
     Some(unwrap_json_detail(raw))
 }
 
+/// Cap on the input size we will attempt to JSON-parse inside
+/// `unwrap_json_detail`. Codex's longest plausible human reason is
+/// roughly 1 KiB; 64 KiB leaves wide margin while preventing a
+/// hostile or buggy CLI from making us parse + tree-allocate an
+/// 8 MiB payload (the outer `LineReader` cap) on every error
+/// envelope. Larger payloads pass through verbatim.
+const MAX_DETAIL_UNWRAP_BYTES: usize = 64 * 1024;
+
 /// If `raw` parses as `{"detail": "..."}` (as codex sometimes
 /// produces), return the inner string; otherwise return the raw
 /// payload. Bounded to a single shallow `from_str` so a malformed
-/// nested document cannot recurse or allocate without limit.
+/// nested document cannot recurse or allocate without limit, and
+/// gated on a cheap length / shape pre-flight so the parser is
+/// never even reached for plain prose or oversized strings.
 fn unwrap_json_detail(raw: &str) -> String {
+    // Pre-flight: skip the parser entirely for payloads that
+    // obviously cannot be a `{...}` JSON object. Saves an alloc on
+    // the common "human sentence" path and bounds the worst case.
+    if raw.len() > MAX_DETAIL_UNWRAP_BYTES || !raw.starts_with('{') {
+        return raw.to_string();
+    }
     if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(raw) {
         if let Some(detail) = obj.get("detail").and_then(|v| v.as_str()) {
             return detail.to_string();
@@ -680,6 +696,18 @@ fn unwrap_json_detail(raw: &str) -> String {
         }
     }
     raw.to_string()
+}
+
+/// First-write-wins helper for the `captured_error` slot. Extracted
+/// so the guard contract (`only the first observed reason is kept`)
+/// can be unit-tested without driving the full `process_jsonl_line`
+/// path — a regression that drops the `is_none()` check at the call
+/// site would still need this helper to enforce the invariant.
+fn store_first_inline_error(slot: &Mutex<Option<String>>, message: String) {
+    let mut current = slot.lock();
+    if current.is_none() {
+        *current = Some(message);
+    }
 }
 
 /// Stream-json envelope claude expects on stdin for a fresh user turn.
@@ -1058,22 +1086,30 @@ mod tests {
         assert!(extract_inline_error(&serde_json::json!({"foo":"bar"})).is_none());
     }
 
-    /// Pins the first-write-wins guard in `process_jsonl_line`.
+    /// Pins the first-write-wins guard via `store_first_inline_error`.
     /// Codex emits a specific `error` envelope before a generic
     /// `turn.failed` wrapper — without this rule the user would see
-    /// the wrapper text instead of the actionable reason.
+    /// the wrapper text instead of the actionable reason. We drive
+    /// the same helper that `process_jsonl_line` calls so a
+    /// regression in the helper itself fails this test.
     #[test]
-    fn captured_error_slot_first_write_wins() {
-        let slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let observe = |msg: &str| {
-            let mut g = slot.lock();
-            if g.is_none() {
-                *g = Some(msg.to_string());
-            }
-        };
-        observe("first specific");
-        observe("second generic");
+    fn store_first_inline_error_keeps_the_earliest_message() {
+        let slot: Mutex<Option<String>> = Mutex::new(None);
+        store_first_inline_error(&slot, "first specific".into());
+        store_first_inline_error(&slot, "second generic".into());
         assert_eq!(slot.lock().as_deref(), Some("first specific"));
+    }
+
+    #[test]
+    fn store_first_inline_error_is_a_noop_on_empty_slot_after_fill() {
+        // The helper must be idempotent for our use: once filled,
+        // any number of further calls leaves the slot untouched.
+        let slot: Mutex<Option<String>> = Mutex::new(None);
+        store_first_inline_error(&slot, "kept".into());
+        for msg in ["a", "b", "c"] {
+            store_first_inline_error(&slot, msg.into());
+        }
+        assert_eq!(slot.lock().as_deref(), Some("kept"));
     }
 
     /// Codex sometimes JSON-encodes the human reason inside the
@@ -1096,6 +1132,25 @@ mod tests {
     fn extract_inline_error_passes_through_non_json_messages() {
         let v = serde_json::json!({"type": "error", "message": "rate limited"});
         assert_eq!(extract_inline_error(&v).as_deref(), Some("rate limited"));
+    }
+
+    #[test]
+    fn extract_inline_error_skips_unwrap_for_oversized_payloads() {
+        // A 100 KiB JSON-encoded message would otherwise trigger a
+        // tree allocation per envelope. We pass it through verbatim
+        // instead — the user sees the raw payload but the chorus
+        // process is not amplified. The pre-flight cap is the
+        // load-bearing defence here.
+        let huge_detail = "x".repeat(100 * 1024);
+        let huge_payload = format!("{{\"detail\":\"{huge_detail}\"}}");
+        let v = serde_json::json!({"type": "error", "message": huge_payload.clone()});
+        // Should round-trip the raw JSON-encoded string, not the
+        // unwrapped detail.
+        let result = extract_inline_error(&v).expect("envelope must yield message");
+        assert!(
+            result.starts_with("{\"detail\":"),
+            "oversized payloads must skip the JSON unwrap",
+        );
     }
 
     #[test]
