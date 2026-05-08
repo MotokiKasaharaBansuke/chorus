@@ -56,6 +56,7 @@ use super::parser::StreamParser;
 use super::system::{SessionLock, SessionLockError};
 use super::transport::{JsonlTransport, SendError};
 use super::validation::{is_valid_session_id, ValidatedCwd, ValidatedEnv};
+use crate::cli::registry::CliType;
 
 /// Reasons `Session::start` can fail.
 #[derive(Debug)]
@@ -86,6 +87,11 @@ impl From<SessionLockError> for SessionStartError {
 /// Configuration for `Session::start`.
 pub struct SessionConfig {
     pub tab_id: TabId,
+    /// Which CLI this session drives. Branches `build_turn_args`,
+    /// `build_claude_user_message` (vs raw text for codex), and the
+    /// upstream-id capture rule — claude and codex use very
+    /// different stream-json shapes.
+    pub cli_type: CliType,
     pub command: String,
     pub args: Vec<String>,
     pub cwd: ValidatedCwd,
@@ -141,6 +147,7 @@ struct InFlightTurn {
 struct TurnContext {
     app: AppHandle,
     tab_id: TabId,
+    cli_type: CliType,
     upstream_session_id: Arc<Mutex<Option<String>>>,
     fork_on_next_turn: Arc<Mutex<bool>>,
     in_flight: Arc<Mutex<Option<InFlightTurn>>>,
@@ -150,6 +157,7 @@ struct TurnContext {
 /// Per-tab session handle. See module doc for the lifecycle model.
 pub struct Session {
     tab_id: TabId,
+    cli_type: CliType,
     command: String,
     base_args: Vec<String>,
     cwd: ValidatedCwd,
@@ -176,6 +184,7 @@ impl Session {
     pub async fn start(config: SessionConfig, app: AppHandle) -> Result<Self, SessionStartError> {
         let SessionConfig {
             tab_id,
+            cli_type,
             command,
             args,
             cwd,
@@ -190,10 +199,11 @@ impl Session {
         // Optimistic: tell the UI we are ready to take input. The first
         // child is spawned lazily on the first `send_user_message`.
         emit_status(&app, &tab_id, SessionStatus::Idle, None, None);
-        info!(tab_id = %tab_id, "headless session ready");
+        info!(tab_id = %tab_id, cli = ?cli_type, "headless session ready");
 
         Ok(Self {
             tab_id,
+            cli_type,
             command,
             base_args: args,
             cwd,
@@ -260,6 +270,7 @@ impl Session {
         let ctx = TurnContext {
             app: self.app.clone(),
             tab_id: self.tab_id.clone(),
+            cli_type: self.cli_type,
             upstream_session_id: self.upstream_session_id.clone(),
             fork_on_next_turn: self.fork_on_next_turn.clone(),
             in_flight: self.in_flight.clone(),
@@ -282,10 +293,21 @@ impl Session {
         }
     }
 
-    /// Build per-turn argv. Continuity flags (`--session-id` /
-    /// `--resume` / `--fork-session`) live here so the rest of
-    /// `send_user_message` is just spawn + bookkeeping.
+    /// Build per-turn argv. Continuity flags differ per CLI:
+    /// claude takes `--resume <id>` / `--session-id <new>` as a
+    /// trailing pair, while codex needs `resume <id>` injected as a
+    /// sub-subcommand right after `exec`.
     fn build_turn_args(&self) -> Vec<String> {
+        match self.cli_type {
+            CliType::ClaudeCode => self.build_claude_args(),
+            CliType::Codex => self.build_codex_args(),
+            // Shell never reaches headless — `headless_commands.rs`
+            // rejects it at the IPC boundary.
+            CliType::Shell => self.base_args.clone(),
+        }
+    }
+
+    fn build_claude_args(&self) -> Vec<String> {
         let mut args = self.base_args.clone();
         match self.upstream_session_id.lock().clone() {
             Some(prev) => {
@@ -302,6 +324,45 @@ impl Session {
                 args.push(uuid::Uuid::new_v4().to_string());
             }
         }
+        args
+    }
+
+    /// Codex argv shape:
+    /// - First turn:  `exec <flags> -`
+    /// - Resumed turn: `exec resume <thread_id> <flags> -`
+    ///
+    /// `base_args` already starts with `exec` (assembled by
+    /// `cli/registry.rs::resolve_command`), so we either splice
+    /// `resume <id>` in after that token or leave the array alone.
+    /// The trailing `-` tells codex to read the prompt from stdin —
+    /// the same channel `send_user_turn` writes to.
+    fn build_codex_args(&self) -> Vec<String> {
+        // The resume splice below assumes the first token is `exec`.
+        // `cli/registry.rs::resolve_command` produces that ordering;
+        // a future change there that puts a flag before `exec` would
+        // silently corrupt the resume argv. The debug-only assert is
+        // a contract reminder, not a runtime cost in release builds.
+        debug_assert_eq!(
+            self.base_args.first().map(String::as_str),
+            Some("exec"),
+            "codex base_args must start with `exec` (see cli/registry.rs)",
+        );
+        let prev = self.upstream_session_id.lock().clone();
+        let mut args = match prev {
+            Some(id) => {
+                let mut a = Vec::with_capacity(self.base_args.len() + 3);
+                a.push("exec".into());
+                a.push("resume".into());
+                a.push(id);
+                // Skip the leading `exec` already in base_args.
+                if let Some((_, rest)) = self.base_args.split_first() {
+                    a.extend_from_slice(rest);
+                }
+                a
+            }
+            None => self.base_args.clone(),
+        };
+        args.push("-".into());
         args
     }
 }
@@ -329,9 +390,9 @@ async fn run_turn(
     ctx: TurnContext,
 ) {
     let pid = transport.pid();
-    debug!(tab_id = %ctx.tab_id, turn_id = ctx.turn_id, pid, "turn started");
+    debug!(tab_id = %ctx.tab_id, turn_id = ctx.turn_id, pid, cli = ?ctx.cli_type, "turn started");
 
-    if let Err(detail) = send_user_turn(&mut transport, &text, &images).await {
+    if let Err(detail) = send_user_turn(&mut transport, &text, &images, ctx.cli_type).await {
         finish_turn(transport, ctx, TurnOutcome::SendFailed(detail)).await;
         return;
     }
@@ -358,8 +419,17 @@ async fn send_user_turn(
     t: &mut ChildProcessTransport,
     text: &str,
     images: &[InlineImage],
+    cli_type: CliType,
 ) -> Result<(), String> {
-    let payload = build_user_message(text, images);
+    let payload = match cli_type {
+        CliType::ClaudeCode => build_claude_user_message(text, images),
+        // Codex reads the prompt as plain text from stdin (we add
+        // `-` to argv in `build_codex_args`). It does not accept
+        // images on stdin — those would go through `-i FILE...` at
+        // spawn time, which is out of scope for the first pass.
+        CliType::Codex => text.to_string(),
+        CliType::Shell => text.to_string(),
+    };
     if let Err(e) = t.send_line(&payload).await {
         return Err(format!("stdin write failed: {e}"));
     }
@@ -504,15 +574,21 @@ fn classify_turn(
 /// callers emit a `SessionIdCaptured` wire event on a non-`None`
 /// result so the frontend can persist it for future `--resume` use.
 /// Returns `None` for missing / malformed / already-stored ids.
+///
+/// Two CLIs ship two different field names:
+/// - **Claude** stamps every line with `session_id`.
+/// - **Codex** carries the id only on the very first
+///   `thread.started` envelope, under `thread_id`.
+///
+/// Both are validated against the same `is_valid_session_id`
+/// allowlist so a poisoned upstream line cannot smuggle an
+/// argv-shaped string into the next turn's `--resume` / `resume`.
 fn capture_session_id(
     value: &serde_json::Value,
     slot: &Arc<Mutex<Option<String>>>,
     fork_on_next_turn: &Arc<Mutex<bool>>,
 ) -> Option<String> {
-    let id = value
-        .as_object()
-        .and_then(|o| o.get("session_id"))
-        .and_then(|v| v.as_str())?;
+    let id = extract_upstream_session_id(value)?;
     if id.is_empty() {
         return None;
     }
@@ -534,11 +610,24 @@ fn capture_session_id(
     Some(id.to_string())
 }
 
+fn extract_upstream_session_id(value: &serde_json::Value) -> Option<&str> {
+    let obj = value.as_object()?;
+    if let Some(id) = obj.get("session_id").and_then(|v| v.as_str()) {
+        return Some(id);
+    }
+    if obj.get("type").and_then(|v| v.as_str()) == Some("thread.started") {
+        if let Some(id) = obj.get("thread_id").and_then(|v| v.as_str()) {
+            return Some(id);
+        }
+    }
+    None
+}
+
 /// Stream-json envelope claude expects on stdin for a fresh user turn.
 /// Builds a `content[]` with one `text` block followed by one `image`
 /// block per attachment. Empty `text` is dropped so a turn can be
 /// "image only" without sending a useless empty text block.
-fn build_user_message(text: &str, images: &[InlineImage]) -> String {
+fn build_claude_user_message(text: &str, images: &[InlineImage]) -> String {
     let mut content = Vec::with_capacity(images.len() + 1);
     if !text.is_empty() {
         content.push(json!({ "type": "text", "text": text }));
@@ -598,8 +687,8 @@ mod tests {
     }
 
     #[test]
-    fn build_user_message_text_only() {
-        let line = build_user_message("hello", &[]);
+    fn build_claude_user_message_text_only() {
+        let line = build_claude_user_message("hello", &[]);
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["type"], "user");
         assert_eq!(v["message"]["role"], "user");
@@ -609,12 +698,12 @@ mod tests {
     }
 
     #[test]
-    fn build_user_message_with_images_emits_image_blocks_after_text() {
+    fn build_claude_user_message_with_images_emits_image_blocks_after_text() {
         let images = vec![
             InlineImage { media_type: "image/png".into(), data: "AAAA".into() },
             InlineImage { media_type: "image/jpeg".into(), data: "BBBB".into() },
         ];
-        let line = build_user_message("look:", &images);
+        let line = build_claude_user_message("look:", &images);
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         let content = v["message"]["content"].as_array().unwrap();
         assert_eq!(content.len(), 3);
@@ -626,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn build_user_message_image_only_drops_empty_text() {
+    fn build_claude_user_message_image_only_drops_empty_text() {
         // An "image only" turn (user pastes a screenshot, hits Enter
         // with no text) must not send a useless empty text block —
         // claude rejects empty text content.
@@ -634,7 +723,7 @@ mod tests {
             media_type: "image/png".into(),
             data: "X".into(),
         }];
-        let line = build_user_message("", &images);
+        let line = build_claude_user_message("", &images);
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         let content = v["message"]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
@@ -711,6 +800,43 @@ mod tests {
         assert!(slot.lock().is_none());
     }
 
+    /// Codex stamps the upstream id only on its very first
+    /// `thread.started` envelope, under `thread_id` (not the
+    /// `session_id` field claude uses).
+    #[test]
+    fn capture_session_id_picks_up_codex_thread_started() {
+        let (slot, fork) = slot_pair();
+        let captured = capture_session_id(
+            &serde_json::json!({
+                "type": "thread.started",
+                "thread_id": "019e0581-dff2-7a42-942c-e85ce089694b",
+            }),
+            &slot,
+            &fork,
+        );
+        assert_eq!(
+            captured.as_deref(),
+            Some("019e0581-dff2-7a42-942c-e85ce089694b"),
+        );
+    }
+
+    #[test]
+    fn capture_session_id_ignores_thread_id_outside_thread_started() {
+        // Defensive: only `thread.started` carries an id we trust.
+        // A made-up `{"type": "turn.started", "thread_id": "..."}`
+        // line should be ignored — codex never emits it, and we
+        // would not want a future codex change to silently start
+        // attaching ids to other envelopes.
+        let (slot, fork) = slot_pair();
+        assert!(capture_session_id(
+            &serde_json::json!({"type": "turn.started", "thread_id": "abc-123"}),
+            &slot,
+            &fork,
+        )
+        .is_none());
+        assert!(slot.lock().is_none());
+    }
+
     /// The fork flag is one-shot: the very first observed upstream id
     /// (failed turn or otherwise) must consume it, so a later retry
     /// cannot accidentally fork a second time.
@@ -746,6 +872,72 @@ mod tests {
         let (status, kind, _) = classify_turn(TurnOutcome::LineCapExceeded, Some(0));
         assert_eq!(status, SessionStatus::Error);
         assert_eq!(kind, Some(ErrorKind::ProtocolViolation));
+    }
+
+    #[test]
+    fn build_codex_args_first_turn_appends_stdin_dash() {
+        // Construct just the argv shape — `Session` needs an
+        // `AppHandle`, but the arg builder reads only `cli_type`,
+        // `base_args`, and the `upstream_session_id` slot. We test
+        // it via free helpers below to avoid a Tauri runtime.
+        let base = vec![
+            "exec".into(),
+            "--json".into(),
+            "--skip-git-repo-check".into(),
+            "--model".into(),
+            "gpt-5.2".into(),
+        ];
+        let prev: Option<String> = None;
+        let args = codex_args_for_test(&base, prev.as_deref());
+        assert_eq!(
+            args,
+            vec![
+                "exec".to_string(),
+                "--json".into(),
+                "--skip-git-repo-check".into(),
+                "--model".into(),
+                "gpt-5.2".into(),
+                "-".into(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_codex_args_resumed_turn_inserts_resume_subcommand() {
+        let base = vec!["exec".into(), "--json".into(), "--skip-git-repo-check".into()];
+        let args = codex_args_for_test(&base, Some("019e0580-72"));
+        assert_eq!(
+            args,
+            vec![
+                "exec".to_string(),
+                "resume".into(),
+                "019e0580-72".into(),
+                "--json".into(),
+                "--skip-git-repo-check".into(),
+                "-".into(),
+            ]
+        );
+    }
+
+    /// Free-function mirror of `Session::build_codex_args` so the
+    /// argv shape can be unit-tested without a `Session` instance
+    /// (which requires a Tauri `AppHandle`).
+    fn codex_args_for_test(base: &[String], prev: Option<&str>) -> Vec<String> {
+        let mut args = match prev {
+            Some(id) => {
+                let mut a = Vec::with_capacity(base.len() + 3);
+                a.push("exec".into());
+                a.push("resume".into());
+                a.push(id.to_string());
+                if let Some((_, rest)) = base.split_first() {
+                    a.extend_from_slice(rest);
+                }
+                a
+            }
+            None => base.to_vec(),
+        };
+        args.push("-".into());
+        args
     }
 
     #[test]
