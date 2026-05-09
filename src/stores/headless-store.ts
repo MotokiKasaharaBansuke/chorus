@@ -205,7 +205,12 @@ function applyEvent(event: HeadlessEvent): void {
             target.streaming = false;
             target.finishReason = event.finishReason;
           }
-          if (session.status !== "error") session.status = "idle";
+          // Lifecycle status is owned by the backend `Status` event
+          // (see `HeadlessEvent::Status` doc-comment). A single turn
+          // can contain multiple assistant messages (tool round-trips,
+          // intermediate thinking blocks), so flipping to `idle` here
+          // hides the BusySpinner mid-turn until the next delta /
+          // tool-use revives it.
           break;
         }
         case "tool-use": {
@@ -219,6 +224,9 @@ function applyEvent(event: HeadlessEvent): void {
               input: event.input,
             });
           }
+          // Unlike message-complete, tool-use actively advances the
+          // progress indicator (thinking → running) without hiding
+          // the spinner, so the optimistic bump is safe here.
           if (session.status !== "error") session.status = "running";
           break;
         }
