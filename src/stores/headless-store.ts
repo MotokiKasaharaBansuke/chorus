@@ -14,6 +14,7 @@ import { createStore, produce } from "solid-js/store";
 
 import type {
   HeadlessEvent,
+  HeadlessMessage,
   HeadlessSessionState,
   TabId,
   UsageReport,
@@ -164,6 +165,43 @@ function appendUserMessage(
 }
 
 /**
+ * Replace the session's message list and upstream session id wholesale.
+ * Used when the user picks a past JSONL via the session picker — the
+ * UI must show the historical turns immediately and subsequent live
+ * turns must `--resume` against the matching upstream id.
+ *
+ * Resets transient fields (`status`, `errorKind`, `errorMessage`,
+ * `rateLimit`, `usage`) so a previously errored session does not
+ * bleed its trailing system row or stale usage banner into the
+ * freshly-loaded conversation.
+ *
+ * Caller-owned messages: the array is shallow-copied but inner
+ * `HeadlessMessage` / `HeadlessToolCall` objects are shared by
+ * reference. Callers must not mutate values they have handed in.
+ */
+function hydrateMessages(
+  tabId: TabId,
+  messages: HeadlessMessage[],
+  upstreamSessionId: string | undefined,
+): void {
+  ensureSession(tabId);
+  setStore(
+    produce((s) => {
+      const session = s.sessions[tabId];
+      if (!session) return;
+      session.messages = [...messages];
+      session.upstreamSessionId = upstreamSessionId;
+      session.status = "idle";
+      session.errorKind = undefined;
+      session.errorMessage = undefined;
+      session.rateLimit = undefined;
+      session.usage = { ...ZERO_USAGE };
+    }),
+  );
+  persistTab(tabId);
+}
+
+/**
  * Apply one wire event to the matching session row.
  *
  * Unknown event types short-circuit to a `console.warn` rather than
@@ -283,6 +321,7 @@ export function useHeadlessStore() {
     removeSession,
     appendUserMessage,
     applyEvent,
+    hydrateMessages,
     flushAllPersist,
     _reset,
   } as const;
