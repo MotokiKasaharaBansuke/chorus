@@ -19,7 +19,12 @@
  * `tool_result` block; `MessageBubble` pairs them up by `toolId` and
  * renders the unified card.
  */
-import type { ChatBlock, ChatMessage } from "../../types";
+import type {
+  AskUserQuestionItem,
+  AskUserQuestionOption,
+  ChatBlock,
+  ChatMessage,
+} from "../../types";
 import type {
   HeadlessMessage,
   HeadlessSessionState,
@@ -61,6 +66,20 @@ function adaptMessage(msg: HeadlessMessage): ChatMessage {
     blocks.push({ kind: "text", text: msg.text });
   }
   for (const call of msg.toolCalls) {
+    if (call.name === "AskUserQuestion") {
+      const parsed = parseAskUserInput(call.input);
+      if (parsed) {
+        blocks.push({
+          kind: "ask_user_question",
+          toolId: call.toolUseId,
+          questions: parsed,
+          answered: !!call.result,
+        });
+        // Suppress the error tool_result ("Answer questions?") — it is
+        // an artifact of stdin being closed, not a real error.
+        continue;
+      }
+    }
     blocks.push({
       kind: "tool_use",
       toolName: call.name,
@@ -105,6 +124,49 @@ function stringifyToolInput(input: unknown): string {
   }
 }
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function parseAskUserInput(input: unknown): AskUserQuestionItem[] | null {
+  if (!isRecord(input)) return null;
+  if (!Array.isArray(input.questions)) return null;
+  const items: AskUserQuestionItem[] = [];
+  for (const q of input.questions) {
+    if (!isRecord(q)) continue;
+    items.push({
+      header: String(q.header ?? ""),
+      isMultiSelect: !!q.multiSelect,
+      options: parseAskUserOptions(q.options),
+    });
+  }
+  return items.length > 0 ? items : null;
+}
+
+function parseAskUserOptions(raw: unknown): AskUserQuestionOption[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((o) => {
+    const obj = isRecord(o) ? o : null;
+    return { description: String(obj?.description ?? o ?? "") };
+  });
+}
+
+/** True when the last assistant message has a parseable, unanswered AskUserQuestion. */
+function hasPendingAskUserQuestion(session: HeadlessSessionState): boolean {
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    const msg = session.messages[i]!;
+    if (msg.role === "user") return false;
+    if (msg.role === "assistant") {
+      return msg.toolCalls.some(
+        (c) =>
+          c.name === "AskUserQuestion" &&
+          parseAskUserInput(c.input) !== null,
+      );
+    }
+  }
+  return false;
+}
+
 function buildSystemRow(session: HeadlessSessionState): ChatMessage | null {
   const text = formatSystemRowText(session);
   if (!text) return null;
@@ -123,6 +185,12 @@ function buildSystemRow(session: HeadlessSessionState): ChatMessage | null {
  * just echoes the kind.
  */
 function formatSystemRowText(session: HeadlessSessionState): string | null {
+  if (session.status === "error" && hasPendingAskUserQuestion(session)) {
+    // The turn ended because AskUserQuestion could not be answered
+    // (stdin was already closed). Suppress the error row — the
+    // question card itself is the actionable UI.
+    return null;
+  }
   if (session.status === "error") {
     const kind = session.errorKind;
     const message = session.errorMessage;

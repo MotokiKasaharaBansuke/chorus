@@ -294,6 +294,150 @@ describe("adaptHeadlessMessages", () => {
     ]);
   });
 
+  it("converts AskUserQuestion tool_use into an ask_user_question block", () => {
+    const [m] = adaptHeadlessMessages(
+      emptySession({
+        messages: [
+          {
+            role: "assistant",
+            id: "msg-1",
+            text: "",
+            toolCalls: [
+              {
+                toolUseId: "tu-q",
+                name: "AskUserQuestion",
+                input: {
+                  questions: [
+                    {
+                      header: "Choose style",
+                      multiSelect: false,
+                      options: [
+                        { description: "Option A" },
+                        { description: "Option B" },
+                      ],
+                    },
+                  ],
+                },
+              },
+            ],
+            streaming: false,
+          },
+        ],
+      }),
+    );
+    expect(m!.blocks).toHaveLength(1);
+    const block = m!.blocks[0]!;
+    expect(block.kind).toBe("ask_user_question");
+    if (block.kind === "ask_user_question") {
+      expect(block.toolId).toBe("tu-q");
+      expect(block.answered).toBe(false);
+      expect(block.questions).toHaveLength(1);
+      expect(block.questions[0]!.header).toBe("Choose style");
+      expect(block.questions[0]!.isMultiSelect).toBe(false);
+      expect(block.questions[0]!.options).toEqual([
+        { description: "Option A" },
+        { description: "Option B" },
+      ]);
+    }
+  });
+
+  it("suppresses error tool_result for AskUserQuestion", () => {
+    const [m] = adaptHeadlessMessages(
+      emptySession({
+        messages: [
+          {
+            role: "assistant",
+            id: "msg-1",
+            text: "",
+            toolCalls: [
+              {
+                toolUseId: "tu-q",
+                name: "AskUserQuestion",
+                input: {
+                  questions: [
+                    {
+                      header: "Pick",
+                      multiSelect: false,
+                      options: [{ description: "Yes" }],
+                    },
+                  ],
+                },
+                result: { output: "Answer questions?", isError: true },
+              },
+            ],
+            streaming: false,
+          },
+        ],
+      }),
+    );
+    // Should be ask_user_question only, no tool_result block
+    expect(m!.blocks).toHaveLength(1);
+    expect(m!.blocks[0]!.kind).toBe("ask_user_question");
+    if (m!.blocks[0]!.kind === "ask_user_question") {
+      expect(m!.blocks[0]!.answered).toBe(true);
+    }
+  });
+
+  it("suppresses error system row when AskUserQuestion is pending", () => {
+    const out = adaptHeadlessMessages(
+      emptySession({
+        status: "error",
+        errorKind: "agent_crashed",
+        errorMessage: "child exited with no status",
+        messages: [
+          {
+            role: "assistant",
+            id: "msg-1",
+            text: "Let me ask",
+            toolCalls: [
+              {
+                toolUseId: "tu-q",
+                name: "AskUserQuestion",
+                input: {
+                  questions: [
+                    {
+                      header: "Pick",
+                      multiSelect: false,
+                      options: [{ description: "A" }],
+                    },
+                  ],
+                },
+                result: { output: "Answer questions?", isError: true },
+              },
+            ],
+            streaming: false,
+          },
+        ],
+      }),
+    );
+    // No system error row — only the assistant message
+    expect(out).toHaveLength(1);
+    expect(out[0]!.role).toBe("assistant");
+  });
+
+  it("falls back to generic tool_use when AskUserQuestion input is malformed", () => {
+    const [m] = adaptHeadlessMessages(
+      emptySession({
+        messages: [
+          {
+            role: "assistant",
+            id: "msg-1",
+            text: "",
+            toolCalls: [
+              {
+                toolUseId: "tu-q",
+                name: "AskUserQuestion",
+                input: { unexpected: "shape" },
+              },
+            ],
+            streaming: false,
+          },
+        ],
+      }),
+    );
+    expect(m!.blocks[0]!.kind).toBe("tool_use");
+  });
+
   it("does not push an empty text block when assistant text is empty", () => {
     const [m] = adaptHeadlessMessages(
       emptySession({

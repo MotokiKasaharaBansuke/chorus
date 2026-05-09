@@ -12,7 +12,18 @@ export type ChatBlock =
   | { kind: "thinking"; text: string; isStreaming: boolean }
   | { kind: "tool_use"; toolName: string; toolId: string; input: string; isStreaming: boolean }
   | { kind: "tool_result"; toolId: string; output: string; isError: boolean }
+  | { kind: "ask_user_question"; toolId: string; questions: AskUserQuestionItem[]; answered: boolean }
   | { kind: "stderr"; text: string };
+
+export interface AskUserQuestionOption {
+  description: string;
+}
+
+export interface AskUserQuestionItem {
+  header: string;
+  isMultiSelect: boolean;
+  options: AskUserQuestionOption[];
+}
 
 export interface ChatMessage {
   role: "assistant" | "user" | "system";
