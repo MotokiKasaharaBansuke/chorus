@@ -502,30 +502,24 @@ export function HeadlessPanel(props: HeadlessPanelProps) {
       );
       images.clearAll();
     } catch (error) {
-      if (isTurnInFlightError(error)) {
-        // The previous turn is still running — the optimistic status
-        // bump in `appendUserMessage` should normally prevent the user
-        // from reaching this branch, but a state-machine race (very
-        // fast Enter / cancel) can still trigger it. Silently drop
-        // the second send rather than scaring the user with a fake
-        // error row; their next attempt after `Status::Idle` will
-        // succeed.
-        return;
-      }
-      // Permanent failure (image rejected, spawn died, etc). Drop
-      // the attached images so a retry does not re-send the same
-      // poisoned payload — the user can re-attach if the failure
-      // was transient. The error row that follows tells them why.
+      // Permanent failure (image rejected, spawn died, etc) and
+      // racy `SendError::Busy` (the previous turn's tear-down has
+      // not finished — should be rare now that
+      // `cancel_headless_message` awaits the slot clear, but a
+      // genuine concurrent send can still hit it). Both paths drop
+      // the attachments so a retry does not re-send the same
+      // poisoned payload, and surface a system row so the failure is
+      // never invisible — silently dropping was the bug that made a
+      // stuck turn manifest as "my input disappeared".
       images.clearAll();
-      // Surface the failure as an error status so the next render
-      // shows the system row (`adaptHeadlessMessages` builds the
-      // trailing system message from `errorMessage`).
       store.applyEvent({
         type: "status",
         tabId: props.tab.id,
         status: "error",
         errorKind: "other",
-        message: describeIpcError(error),
+        message: isTurnInFlightError(error)
+          ? "Previous turn is still finishing — please send again."
+          : describeIpcError(error),
       });
     }
   }
