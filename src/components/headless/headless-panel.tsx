@@ -6,11 +6,18 @@
  *
  * What headless deliberately drops compared to the PTY panel:
  * - image attachment / paste (claude headless input is text-only)
- * - REPL terminal modal, worktree reset confirm, session picker
+ * - REPL terminal modal, worktree reset confirm
  *   (those rely on PTY-side artifacts that headless does not produce)
  * - virtualizer (`@tanstack/solid-virtual`) — kept simple here so the
  *   first parity pass ships small; can be ported in a follow-up if a
  *   long headless session shows scroll-perf issues
+ *
+ * What headless adds beyond the PTY panel:
+ * - session picker (`SessionPicker` from chat/) reuses the same JSONL
+ *   files claude/codex write under `~/.claude/projects/...` and
+ *   `~/.codex/sessions/...`; selecting a row hydrates the message
+ *   list via `parseSessionJsonl` and re-spawns the backend with
+ *   `resumeSessionAt` so the next turn lands in the historical thread.
  *
  * Subscription lifecycle mirrors `chat-panel.tsx`'s effect pattern:
  * register the listener inside `createEffect`, tear it down in
@@ -32,10 +39,19 @@ import { ChatInput } from "../chat/chat-input";
 import { MessageBubble } from "../chat/message-bubble";
 import chatStyles from "../chat/chat-panel.module.css";
 import { appendToHistory } from "../chat/input-history";
+import { SessionPicker } from "../chat/session-picker";
 import { useImageAttachment } from "../../hooks/use-image-attachment";
+import {
+  listSessions,
+  listCodexSessions,
+  readSession,
+  readCodexSession,
+  type SessionInfo,
+} from "../../lib/commands";
 import {
   cancelHeadlessMessage,
   classifyHeadlessError,
+  killHeadless,
   spawnHeadless,
   writeHeadlessInput,
 } from "../../lib/headless/commands";
@@ -45,6 +61,7 @@ import { useHeadlessStore } from "../../stores/headless-store";
 import type { Tab } from "../../types";
 
 import { adaptHeadlessMessages } from "./adapt-messages";
+import { parseSessionJsonl } from "./jsonl-to-headless";
 
 interface HeadlessPanelProps {
   tab: Tab;
@@ -79,6 +96,12 @@ export function HeadlessPanel(props: HeadlessPanelProps) {
     updateStickyPrompt();
   }
 
+  // Hoisted out of `createEffect` so `loadSessionFromPicker` can pause
+  // and resume the subscription around `killHeadless` — without that
+  // gap, events still in flight from the dying CLI process would
+  // `applyEvent` onto the just-hydrated thread.
+  let unsubscribeFromTab: (() => void) | undefined;
+
   // Subscribe to the per-tab event channel and ensure the backend
   // session exists. `subscribeToHeadlessTab` calls `registerSession`
   // which hydrates from localStorage if a prior run persisted state;
@@ -96,28 +119,36 @@ export function HeadlessPanel(props: HeadlessPanelProps) {
         // the scroll affordance so we do not inherit the previous
         // tab's "user scrolled up" state.
         isNearBottom = true;
-        let unsubscribe: (() => void) | undefined;
         let cancelled = false;
         void subscribeToHeadlessTab(tabId).then(async (off) => {
           if (cancelled) {
             off();
             return;
           }
-          unsubscribe = off;
+          unsubscribeFromTab = off;
           await ensureBackendSession(tabId);
         });
+        // Past sessions live in `~/.claude/projects/...` /
+        // `~/.codex/sessions/...` and are populated by both PTY and
+        // headless turns of the same CLI in the same cwd. Loading them
+        // here (rather than in `onMount`) means a tab swap re-fetches
+        // for the new working directory.
+        void loadPastSessions();
         onCleanup(() => {
           cancelled = true;
-          unsubscribe?.();
+          unsubscribeFromTab?.();
+          unsubscribeFromTab = undefined;
         });
       },
     ),
   );
 
-  /// Spawn the backend session if it does not already exist. Safe to
-  /// call after every mount: a `session_busy` error means another
-  /// owner already has the session alive (the normal case during a
-  /// session's lifetime) and we treat it as success.
+  /**
+   * Spawn the backend session if it does not already exist. Safe to
+   * call after every mount: a `session_busy` error means another
+   * owner already has the session alive (the normal case during a
+   * session's lifetime) and we treat it as success.
+   */
   async function ensureBackendSession(tabId: string): Promise<void> {
     const persisted = store.sessionFor(tabId);
     const cliType = props.tab.cliConfig.cliType;
@@ -169,6 +200,182 @@ export function HeadlessPanel(props: HeadlessPanelProps) {
     ),
   );
 
+  /**
+   * Populate the session-picker list. A missing project directory is
+   * the common case (no past sessions yet) so we keep the button
+   * hidden, but we still log so a misconfigured `~/.claude/projects/`
+   * (e.g. permission errors) shows up in dev tools rather than
+   * vanishing silently.
+   */
+  async function loadPastSessions(): Promise<void> {
+    const cliType = props.tab.cliConfig.cliType;
+    try {
+      if (cliType === "claude-code") {
+        setPastSessions(await listSessions(props.tab.cliConfig.workingDir));
+      } else if (cliType === "codex") {
+        setPastSessions(await listCodexSessions(props.tab.cliConfig.workingDir));
+      }
+    } catch (error) {
+      console.warn("[headless] loadPastSessions failed", error);
+    }
+  }
+
+  /**
+   * Re-entrancy guard. `loadSessionFromPicker` runs IPC reads + a
+   * possibly multi-second JSONL parse; without a guard, a fast
+   * double-click on the picker (or two rows in quick succession)
+   * interleaves two orchestrations and the panel can end up with
+   * thread A's UI and thread B's resume id. Set on entry, reset in
+   * `finally`.
+   */
+  const [isResumingSession, setIsResumingSession] = createSignal(false);
+
+  /**
+   * Hydrate the panel from a chosen JSONL file and rebuild the
+   * backend session against the recovered upstream id so the next
+   * turn `--resume`s the historical thread.
+   *
+   * The orchestration order is load-bearing for correctness:
+   *
+   *   1. `pauseLiveChannel` — events still in flight from the
+   *      about-to-be-killed CLI process must NOT be `applyEvent`-ed
+   *      onto the freshly-loaded thread (they would tail-append a
+   *      stranger's tokens to the loaded conversation).
+   *   2. `killOrAbort` — graceful close → SIGTERM → SIGKILL. If this
+   *      fails we abort: `spawnHeadless` would return
+   *      `StreamSessionBusy` (silenced as success) and the next user
+   *      turn would silently land in the OLD thread. The helper
+   *      surfaces an error row and restores the live channel so the
+   *      original session keeps streaming.
+   *   3. `hydrateFromPickedSession` — read JSONL → parse → store. On
+   *      a transient failure (read error, codex thread_id missing) it
+   *      restores the channel against a fresh spawn so the panel
+   *      stays usable, and returns false so we abort steps 4+5.
+   *   4 + 5. `restoreLiveChannel` — resubscribe BEFORE respawning so
+   *      the listener is in place for the new session's first
+   *      `Status::Idle`, then `ensureBackendSession` re-spawns with
+   *      the resume id picked up from the hydrated session.
+   *
+   * `isResumingSession` is held high across the whole sequence so the
+   * `<ChatInput>` stays disabled — without it, a user typing fast in
+   * the gap could submit a turn that lands in the wrong session or
+   * gets dropped because the listener is not yet wired.
+   */
+  async function loadSessionFromPicker(picked: SessionInfo): Promise<void> {
+    if (isResumingSession()) return;
+    const tabId = props.tab.id;
+    const cliType = props.tab.cliConfig.cliType;
+    if (cliType !== "claude-code" && cliType !== "codex") return;
+
+    setIsResumingSession(true);
+    setShowSessionPicker(false);
+    try {
+      pauseLiveChannel();
+      if (!(await killOrAbort(tabId))) return;
+      if (!(await hydrateFromPickedSession(tabId, cliType, picked))) return;
+      await restoreLiveChannel(tabId);
+    } finally {
+      setIsResumingSession(false);
+    }
+  }
+
+  /** Step 1: stop dispatching events from the dying session. */
+  function pauseLiveChannel(): void {
+    unsubscribeFromTab?.();
+    unsubscribeFromTab = undefined;
+  }
+
+  /**
+   * Step 2: tear down the live session before hydration. Returns
+   * `false` when the kill failed — the OLD session is still alive,
+   * so we resubscribe to it (without spawning a duplicate) and let
+   * the user retry rather than silently divert their next turn into
+   * the wrong thread.
+   */
+  async function killOrAbort(tabId: string): Promise<boolean> {
+    try {
+      await killHeadless(tabId);
+      return true;
+    } catch (error) {
+      emitErrorStatus(
+        tabId,
+        `Could not switch to past session: ${describeIpcError(error)}`,
+      );
+      unsubscribeFromTab = await subscribeToHeadlessTab(tabId);
+      return false;
+    }
+  }
+
+  /**
+   * Step 3: load the JSONL, parse it, and stamp the store. Returns
+   * `false` for two failures, both of which leave the backend dead
+   * (kill already succeeded): an IPC read error, or a codex session
+   * with no recoverable `thread_id` (would silently start a new
+   * thread). Both restore a fresh live session before returning so
+   * the panel stays usable.
+   */
+  async function hydrateFromPickedSession(
+    tabId: string,
+    cliType: "claude-code" | "codex",
+    picked: SessionInfo,
+  ): Promise<boolean> {
+    let lines: string[];
+    try {
+      lines = cliType === "codex"
+        ? await readCodexSession(picked.sessionId)
+        : await readSession(props.tab.cliConfig.workingDir, picked.sessionId);
+    } catch (error) {
+      emitErrorStatus(tabId, describeIpcError(error));
+      await restoreLiveChannel(tabId);
+      return false;
+    }
+
+    const parsed = parseSessionJsonl(cliType, lines);
+    // For claude the picker row id IS the upstream session id (it's
+    // the JSONL filename — a UUID). For codex the row id is a file
+    // path that `validate_session_id` would reject, so we lean on
+    // the `thread_id` extracted from the JSONL itself.
+    const resumeId = cliType === "claude-code"
+      ? picked.sessionId
+      : parsed.upstreamSessionId;
+
+    if (cliType === "codex" && !resumeId) {
+      emitErrorStatus(
+        tabId,
+        "Could not recover the codex thread id from the picked session — the conversation cannot be resumed.",
+      );
+      await restoreLiveChannel(tabId);
+      return false;
+    }
+
+    store.hydrateMessages(tabId, parsed.messages, resumeId);
+    return true;
+  }
+
+  /**
+   * Steps 4 + 5: own the channel before the respawn so the new
+   * session's very first event fires onto a live listener; then
+   * issue `spawnHeadless` with the resume id picked up from the
+   * hydrated session. Also reused as the recovery path inside
+   * `hydrateFromPickedSession` when an abort needs a fresh session.
+   */
+  async function restoreLiveChannel(tabId: string): Promise<void> {
+    unsubscribeFromTab = await subscribeToHeadlessTab(tabId);
+    await ensureBackendSession(tabId);
+  }
+
+  /** Surface a recoverable failure as a trailing system row via the
+   *  same `applyEvent` path the live stream uses. */
+  function emitErrorStatus(tabId: string, message: string): void {
+    store.applyEvent({
+      type: "status",
+      tabId,
+      status: "error",
+      errorKind: "other",
+      message,
+    });
+  }
+
   const session = () => store.sessionFor(props.tab.id);
   const messages = createMemo(() => adaptHeadlessMessages(session()));
 
@@ -179,16 +386,25 @@ export function HeadlessPanel(props: HeadlessPanelProps) {
 
   const [inputHistory, setInputHistory] = createSignal<readonly string[]>([]);
 
+  // Past JSONL sessions for this tab's working directory. Loaded once
+  // per tab in the subscribe effect above; the empty default keeps
+  // the picker button hidden when no history (or a non-resumable cli
+  // type) is available.
+  const [pastSessions, setPastSessions] = createSignal<SessionInfo[]>([]);
+  const [showSessionPicker, setShowSessionPicker] = createSignal(false);
+
   // Sticky overlay text — the last user message whose top edge has
   // scrolled above the viewport. Mirrors the chat-panel UX so reading
   // long assistant responses keeps the prompt that triggered them
   // visible at the top of the messages container.
   const [stickyPrompt, setStickyPrompt] = createSignal<string | null>(null);
 
-  /// DOM elements for each rendered message, keyed by index. Used by
-  /// `updateStickyPrompt` to read `offsetTop` without a virtualizer.
-  /// `Map` is rebuilt on every render slot via the ref callbacks
-  /// below; entries are removed when the slot is torn down.
+  /**
+   * DOM elements for each rendered message, keyed by index. Used by
+   * `updateStickyPrompt` to read `offsetTop` without a virtualizer.
+   * `Map` is rebuilt on every render slot via the ref callbacks
+   * below; entries are removed when the slot is torn down.
+   */
   const messageEls = new Map<number, HTMLElement>();
 
   function updateStickyPrompt() {
@@ -352,6 +568,25 @@ export function HeadlessPanel(props: HeadlessPanelProps) {
           <span>Drop files here</span>
         </div>
       </Show>
+      <Show when={showSessionPicker()}>
+        <SessionPicker
+          sessions={pastSessions()}
+          onSelect={(s) => void loadSessionFromPicker(s)}
+          onClose={() => setShowSessionPicker(false)}
+        />
+      </Show>
+      <Show when={pastSessions().length > 0}>
+        <button
+          class={chatStyles.sessionPickerBtn}
+          onClick={() => setShowSessionPicker(true)}
+          title="Past Conversations"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <polyline points="12 6 12 12 16 14"/>
+          </svg>
+        </button>
+      </Show>
       <Show when={stickyPrompt()}>
         {(text) => (
           <div class={chatStyles.stickyOverlay}>
@@ -390,7 +625,11 @@ export function HeadlessPanel(props: HeadlessPanelProps) {
         cliType={props.tab.cliConfig.cliType}
         mode={props.tab.cliConfig.mode}
         workingDir={props.tab.cliConfig.workingDir}
-        isStreaming={isStreaming()}
+        // Treat the resume orchestration as "streaming" from the
+        // input's perspective: the kill→hydrate→respawn window must
+        // not accept new turns, otherwise a fast Enter could race
+        // the listener wiring or land in the wrong upstream session.
+        isStreaming={isStreaming() || isResumingSession()}
         attachedImages={images.attachedImages()}
         onRemoveImage={images.removeImage}
         onPaste={images.handlePaste}
