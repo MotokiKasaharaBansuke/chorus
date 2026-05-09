@@ -45,6 +45,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -151,6 +152,10 @@ struct TurnContext {
     upstream_session_id: Arc<Mutex<Option<String>>>,
     fork_on_next_turn: Arc<Mutex<bool>>,
     in_flight: Arc<Mutex<Option<InFlightTurn>>>,
+    /// Woken (`notify_waiters`) when `finish_turn` clears the in-flight
+    /// slot, so `Session::wait_for_in_flight_clear` can resolve without
+    /// polling. See `cancel_headless_message` for the read side.
+    slot_cleared: Arc<Notify>,
     turn_id: u64,
     /// Last in-stream error message observed for this turn (e.g.
     /// codex `error` / `turn.failed` envelopes carry the API's
@@ -180,6 +185,10 @@ pub struct Session {
     fork_on_next_turn: Arc<Mutex<bool>>,
     /// In-flight turn slot. `Some` exactly while a child is alive.
     in_flight: Arc<Mutex<Option<InFlightTurn>>>,
+    /// Notified once the run task clears `in_flight` back to `None`.
+    /// Lets `cancel_headless_message` await the actual tear-down rather
+    /// than racing the `kill_now` SIGKILL with the next `send_user_message`.
+    slot_cleared: Arc<Notify>,
     /// Monotonic id used to detect "is this still my slot?" on cleanup
     /// after a kill / respawn race.
     next_turn_id: AtomicU64,
@@ -218,6 +227,7 @@ impl Session {
             upstream_session_id: Arc::new(Mutex::new(initial_session_id)),
             fork_on_next_turn: Arc::new(Mutex::new(fork_session)),
             in_flight: Arc::new(Mutex::new(None)),
+            slot_cleared: Arc::new(Notify::new()),
             next_turn_id: AtomicU64::new(1),
             _lock: Arc::new(lock),
         })
@@ -280,6 +290,7 @@ impl Session {
             upstream_session_id: self.upstream_session_id.clone(),
             fork_on_next_turn: self.fork_on_next_turn.clone(),
             in_flight: self.in_flight.clone(),
+            slot_cleared: self.slot_cleared.clone(),
             turn_id,
             captured_error: Arc::new(Mutex::new(None)),
         };
@@ -298,6 +309,17 @@ impl Session {
         if let Some(in_flight) = self.in_flight.lock().as_ref() {
             in_flight.killer.kill_now();
         }
+    }
+
+    /// Wait until the run task has cleared the in-flight slot. Pairs
+    /// with `kill_now`: SIGKILL is asynchronous, and the slot is only
+    /// emptied once `finish_turn` observes the child's stdout EOF and
+    /// reaps it. Without this `await`, an immediate follow-up
+    /// `send_user_message` would race the cleanup and reject with
+    /// `SendError::Busy` even though the user-visible turn is already
+    /// dead.
+    pub async fn wait_for_in_flight_clear(&self) {
+        wait_for_slot_clear(&self.in_flight, &self.slot_cleared).await;
     }
 
     /// Build per-turn argv. Continuity flags differ per CLI:
@@ -371,9 +393,25 @@ impl Drop for Session {
         // after we have torn down. Without `abort` a delayed task
         // could clobber a freshly-registered successor session that
         // happens to share the same `Arc<Mutex<...>>` shape.
-        if let Some(in_flight) = self.in_flight.lock().take() {
-            in_flight.killer.kill_now();
-            in_flight.handle.abort();
+        let cleared = {
+            let mut guard = self.in_flight.lock();
+            if let Some(in_flight) = guard.take() {
+                in_flight.killer.kill_now();
+                in_flight.handle.abort();
+                true
+            } else {
+                false
+            }
+        };
+        // The aborted run task cannot reach `finish_turn`'s
+        // `notify_waiters` call, so wake any pending
+        // `wait_for_in_flight_clear` here. In practice the cancel IPC
+        // holds an `Arc<Session>` for the duration of its await, so
+        // this path is defensive — but a future refactor that lets
+        // Session drop concurrently with a waiter must not silently
+        // hang.
+        if cleared {
+            self.slot_cleared.notify_waiters();
         }
     }
 }
@@ -511,6 +549,22 @@ fn process_jsonl_line(line: &str, ctx: &TurnContext, parser: &mut StreamParser) 
     );
 }
 
+/// Wait until `slot` becomes `None`, signalled by `notify_waiters`.
+/// Resolves immediately when the slot is already empty. The waiter is
+/// `enable()`d **before** the slot check so a notification fired in the
+/// gap cannot be lost — without that ordering, `finish_turn` could
+/// clear-and-notify between our read and our await, and we would then
+/// block forever waiting for the next clear (which may never come).
+async fn wait_for_slot_clear<T>(slot: &Mutex<Option<T>>, notify: &Notify) {
+    let notified = notify.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    if slot.lock().is_none() {
+        return;
+    }
+    notified.await;
+}
+
 async fn finish_turn(
     mut transport: ChildProcessTransport,
     ctx: TurnContext,
@@ -527,12 +581,20 @@ async fn finish_turn(
     // Only clear the slot if we still own it. If a kill_now already
     // replaced or cleared us, leave the new state alone — otherwise a
     // delayed task would clobber the next turn's slot.
-    {
+    let cleared_slot = {
         let mut g = ctx.in_flight.lock();
         let owns_slot = g.as_ref().map(|f| f.turn_id) == Some(ctx.turn_id);
         if owns_slot {
             *g = None;
         }
+        owns_slot
+    };
+    // Wake any `wait_for_in_flight_clear` callers — typically the
+    // cancel-message IPC waiting for tear-down to land before allowing
+    // the next user turn. `notify_waiters` after the lock release so
+    // woken tasks see the cleared slot.
+    if cleared_slot {
+        ctx.slot_cleared.notify_waiters();
     }
 
     let captured_error = ctx.captured_error.lock().clone();
@@ -1166,5 +1228,54 @@ mod tests {
             extract_inline_error(&v).as_deref(),
             Some("{\"reason\":\"too many requests\"}"),
         );
+    }
+
+    /// `cancel_headless_message` returns to the IPC caller only after
+    /// the in-flight slot is empty. This test pins the wait helper
+    /// that backs `Session::wait_for_in_flight_clear`: it must not
+    /// resolve while the slot holds a value, and must resolve as soon
+    /// as a parallel "clear and notify" lands. A regression here
+    /// (e.g., reordering enable/check, dropping the `notify_waiters`
+    /// in `finish_turn`) would re-introduce the cancel→write race
+    /// that silently dropped user input.
+    #[tokio::test]
+    async fn wait_for_slot_clear_resolves_after_clear_and_notify() {
+        let slot: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(Some(1)));
+        let notify = Arc::new(Notify::new());
+
+        let waiter_slot = slot.clone();
+        let waiter_notify = notify.clone();
+        let waiter = tokio::spawn(async move {
+            wait_for_slot_clear(&waiter_slot, &waiter_notify).await;
+        });
+
+        // Give the waiter a tick to register on the Notify before we
+        // clear-and-notify, so we exercise the awaited path rather
+        // than the early-return-on-empty branch.
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished(), "must not resolve while slot holds a value");
+
+        *slot.lock() = None;
+        notify.notify_waiters();
+
+        tokio::time::timeout(std::time::Duration::from_millis(500), waiter)
+            .await
+            .expect("waiter must resolve within 500ms")
+            .expect("waiter task must not panic");
+    }
+
+    /// Empty-slot fast path. Without this branch the cancel IPC would
+    /// always pay one round-trip through `notify` even when no turn
+    /// was in flight — a no-op cancel must stay free.
+    #[tokio::test]
+    async fn wait_for_slot_clear_returns_immediately_when_already_empty() {
+        let slot: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+        let notify = Arc::new(Notify::new());
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            wait_for_slot_clear(&slot, &notify),
+        )
+        .await
+        .expect("empty slot must short-circuit without awaiting notify");
     }
 }

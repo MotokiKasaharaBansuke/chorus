@@ -296,10 +296,16 @@ pub struct CancelHeadlessRequest {
     pub tab_id: String,
 }
 
-/// Cancel the in-flight turn by SIGKILLing the child group. The
-/// underlying `Session::kill_now` is idempotent and a no-op when no
-/// turn is in flight, so the UI cancel button can be wired here
-/// without extra guards.
+/// Cancel the in-flight turn by SIGKILLing the child group, then wait
+/// for the run task to actually clear the in-flight slot. The wait is
+/// load-bearing: SIGKILL only schedules tear-down, and a follow-up
+/// `write_headless_input` issued before `finish_turn` reaps the slot
+/// would race and reject with `SendError::Busy`. Awaiting here makes
+/// the IPC's success a hard guarantee that the next turn can spawn.
+///
+/// `Session::kill_now` and `wait_for_in_flight_clear` are both
+/// idempotent / no-ops when no turn is in flight, so the UI cancel
+/// button can be wired here without extra guards.
 #[tauri::command]
 pub async fn cancel_headless_message(
     state: State<'_, HeadlessManager>,
@@ -309,6 +315,7 @@ pub async fn cancel_headless_message(
         .get(&request.tab_id)
         .ok_or_else(|| AppError::PtyNotFound(request.tab_id.clone()))?;
     session.kill_now();
+    session.wait_for_in_flight_clear().await;
     Ok(())
 }
 
