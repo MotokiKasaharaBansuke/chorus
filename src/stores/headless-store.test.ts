@@ -137,7 +137,7 @@ describe("useHeadlessStore", () => {
     });
   });
 
-  it("message-complete clears the streaming flag and reverts status to idle", () => {
+  it("message-complete clears the streaming flag without touching lifecycle status", () => {
     createRoot((dispose) => {
       const store = useHeadlessStore();
       store.applyEvent({ type: "message-delta", tabId: "t1", messageId: "m-1", index: 0, delta: "x" });
@@ -153,6 +153,26 @@ describe("useHeadlessStore", () => {
         expect(msg.streaming).toBe(false);
         expect(msg.finishReason).toBe("stop");
       }
+      // Status remains `thinking` — turn lifecycle is owned by the
+      // backend `Status` event, not by per-message completion. The
+      // BusySpinner must keep spinning across tool round-trips.
+      expect(store.sessionFor("t1")?.status).toBe("thinking");
+      dispose();
+    });
+  });
+
+  it("status only returns to idle when the backend emits a Status event", () => {
+    createRoot((dispose) => {
+      const store = useHeadlessStore();
+      store.applyEvent({ type: "message-delta", tabId: "t1", messageId: "m-1", index: 0, delta: "x" });
+      store.applyEvent({
+        type: "message-complete",
+        tabId: "t1",
+        messageId: "m-1",
+        finishReason: "stop",
+      });
+      expect(store.sessionFor("t1")?.status).toBe("thinking");
+      store.applyEvent({ type: "status", tabId: "t1", status: "idle" });
       expect(store.sessionFor("t1")?.status).toBe("idle");
       dispose();
     });
@@ -178,6 +198,51 @@ describe("useHeadlessStore", () => {
         expect(msg.toolCalls[0]!.toolUseId).toBe("tu-1");
       }
       expect(store.sessionFor("t1")?.status).toBe("running");
+      dispose();
+    });
+  });
+
+  it("message-complete after Status::Error does not overwrite error status", () => {
+    createRoot((dispose) => {
+      const store = useHeadlessStore();
+      store.applyEvent({ type: "message-delta", tabId: "t1", messageId: "m-1", index: 0, delta: "x" });
+      store.applyEvent({ type: "status", tabId: "t1", status: "error", errorKind: "other", message: "child crashed" });
+      // A straggling message-complete may arrive after the child exits
+      // non-zero because the stream parser still has buffered lines.
+      store.applyEvent({
+        type: "message-complete",
+        tabId: "t1",
+        messageId: "m-1",
+        finishReason: "stop",
+      });
+      expect(store.sessionFor("t1")?.status).toBe("error");
+      dispose();
+    });
+  });
+
+  it("multi-message tool round-trip keeps spinner alive until backend Status::Idle", () => {
+    createRoot((dispose) => {
+      const store = useHeadlessStore();
+      // 1st assistant message: text + tool call
+      store.applyEvent({ type: "message-delta", tabId: "t1", messageId: "m-1", index: 0, delta: "Let me check" });
+      store.applyEvent({ type: "tool-use", tabId: "t1", messageId: "m-1", toolUseId: "tu-1", name: "Read", input: {} });
+      expect(store.sessionFor("t1")?.status).toBe("running");
+      store.applyEvent({ type: "message-complete", tabId: "t1", messageId: "m-1", finishReason: "tool_use" });
+      // Status must NOT be idle — the turn is not over
+      expect(store.sessionFor("t1")?.status).toBe("running");
+
+      // Tool result arrives
+      store.applyEvent({ type: "tool-result", tabId: "t1", toolUseId: "tu-1", output: "file contents", isError: false });
+
+      // 2nd assistant message: final answer
+      store.applyEvent({ type: "message-delta", tabId: "t1", messageId: "m-2", index: 0, delta: "Here is the answer" });
+      store.applyEvent({ type: "message-complete", tabId: "t1", messageId: "m-2", finishReason: "stop" });
+      // Still not idle — waiting for backend Status event
+      expect(store.sessionFor("t1")?.status).not.toBe("idle");
+
+      // Backend emits Status::Idle when child exits
+      store.applyEvent({ type: "status", tabId: "t1", status: "idle" });
+      expect(store.sessionFor("t1")?.status).toBe("idle");
       dispose();
     });
   });

@@ -5,11 +5,14 @@ import { highlightDiffLine } from "../../lib/format/html";
 import { applyInline as applyInlineRaw } from "../../lib/format/inline";
 import { formatInline } from "../../lib/format/markdown";
 import { isValidTempImagePath } from "../../lib/validate-path";
+import { AskUserQuestionCard } from "../headless/ask-user-question-card";
 import { ImagePreviewModal } from "./image-preview-modal";
 import styles from "./chat-panel.module.css";
 
 interface MessageBubbleProps {
   message: ChatMessage;
+  /** Required for headless AskUserQuestion cards to dispatch answers. */
+  tabId?: string;
 }
 
 function CopyIcon() {
@@ -432,6 +435,26 @@ export function MessageBubble(props: MessageBubbleProps) {
                   ) as (ChatBlock & { kind: "tool_result" }) | undefined;
                   return <ToolUseBlock block={block} result={result} />;
                 }
+                case "ask_user_question":
+                  return (
+                    <div class={`${styles.timelineRow} ${block.answered ? styles.dotSuccess : styles.dotWarning}`}>
+                      <div class={styles.toolContent}>
+                        <div class={styles.toolHeader}>
+                          <span class={styles.toolName}>AskUserQuestion</span>
+                        </div>
+                        <div class={styles.toolBlock}>
+                          <div style={{ padding: "6px 10px" }}>
+                            <AskUserQuestionCard
+                              toolId={block.toolId}
+                              questions={block.questions}
+                              answered={block.answered}
+                              tabId={props.tabId ?? ""}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
                 case "tool_result":
                   // Skip - already rendered inline with tool_use above
                   return null;

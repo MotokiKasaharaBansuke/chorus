@@ -13,7 +13,7 @@ export type {
 export { effectivePaneKind, effectivePtyId, isTabStreaming } from "./tab";
 
 export type { FileNode } from "./file-tree";
-export type { AttachedImage, ChatBlock, ChatMessage } from "./chat";
+export type { AttachedImage, ChatBlock, ChatMessage, AskUserQuestionItem, AskUserQuestionOption } from "./chat";
 export type { SplitDirection, SplitNode, PaneGroupNode, LayoutNode, LayoutEdges } from "./layout";
 export { ALL_EDGES } from "./layout";
 
