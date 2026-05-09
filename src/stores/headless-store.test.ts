@@ -363,4 +363,78 @@ describe("useHeadlessStore", () => {
       dispose();
     });
   });
+
+  it("hydrateMessages replaces message list and stamps the upstream id", () => {
+    createRoot((dispose) => {
+      const store = useHeadlessStore();
+      store.registerSession("t1");
+      store.appendUserMessage("t1", "req-1", "first turn");
+      store.hydrateMessages(
+        "t1",
+        [
+          { role: "user", id: "u-0", text: "loaded user", sentAt: 0 },
+          {
+            role: "assistant",
+            id: "a-0",
+            text: "loaded assistant",
+            toolCalls: [],
+            streaming: false,
+            finishReason: "stop",
+          },
+        ],
+        "claude-uuid-resume",
+      );
+      const session = store.sessionFor("t1");
+      expect(session?.messages).toHaveLength(2);
+      expect(session?.messages[0]?.role).toBe("user");
+      expect(session?.upstreamSessionId).toBe("claude-uuid-resume");
+      dispose();
+    });
+  });
+
+  it("hydrateMessages clears stale error state so the loaded thread renders cleanly", () => {
+    createRoot((dispose) => {
+      const store = useHeadlessStore();
+      store.registerSession("t1");
+      store.applyEvent({
+        type: "status",
+        tabId: "t1",
+        status: "error",
+        errorKind: "rate_limited",
+        message: "boom",
+      });
+      store.hydrateMessages("t1", [], undefined);
+      const session = store.sessionFor("t1");
+      expect(session?.status).toBe("idle");
+      expect(session?.errorKind).toBeUndefined();
+      expect(session?.errorMessage).toBeUndefined();
+      expect(session?.upstreamSessionId).toBeUndefined();
+      dispose();
+    });
+  });
+
+  it("hydrateMessages resets usage so a stale token banner does not bleed into the loaded thread", () => {
+    createRoot((dispose) => {
+      const store = useHeadlessStore();
+      store.registerSession("t1");
+      store.applyEvent({
+        type: "usage",
+        tabId: "t1",
+        usage: {
+          inputTokens: 1000,
+          outputTokens: 2000,
+          cacheReadTokens: 500,
+          cacheCreationTokens: 100,
+        },
+      });
+      store.hydrateMessages("t1", [], "fresh-id");
+      expect(store.sessionFor("t1")?.usage).toEqual({
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      });
+      dispose();
+    });
+  });
 });
