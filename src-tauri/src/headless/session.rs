@@ -39,7 +39,7 @@
 
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -140,6 +140,13 @@ struct InFlightTurn {
     turn_id: u64,
     killer: ProcessKiller,
     handle: JoinHandle<()>,
+    /// Set to `true` by `Session::kill_now` *before* SIGKILL so the
+    /// run task's `finish_turn` can tell "user-initiated cancel" from
+    /// "child crashed". Without this, every cancel surfaces as
+    /// `AgentCrashed: child exited with no status` because
+    /// `wait().status.code()` is `None` for any signal-killed process.
+    /// Shared with `TurnContext` so the run task reads the same cell.
+    cancel_requested: Arc<AtomicBool>,
 }
 
 /// Per-task context. Cloned out of `Session` once at spawn time so the
@@ -163,6 +170,11 @@ struct TurnContext {
     /// over a bare `exit code N` so the user sees "model not
     /// supported" instead of an opaque crash code.
     captured_error: Arc<Mutex<Option<String>>>,
+    /// Mirror of `InFlightTurn::cancel_requested`. `finish_turn`
+    /// reads this after `wait_for_exit`; if set, the child died
+    /// because we killed it (cancel / tab close), not because it
+    /// crashed, and we emit `Idle` instead of `AgentCrashed`.
+    cancel_requested: Arc<AtomicBool>,
 }
 
 /// Per-tab session handle. See module doc for the lifecycle model.
@@ -281,6 +293,7 @@ impl Session {
                 })?;
 
         let killer = ProcessKiller::from_transport(&transport);
+        let cancel_requested = Arc::new(AtomicBool::new(false));
         emit_status(&self.app, &self.tab_id, SessionStatus::Thinking, None, None);
 
         let ctx = TurnContext {
@@ -293,10 +306,11 @@ impl Session {
             slot_cleared: self.slot_cleared.clone(),
             turn_id,
             captured_error: Arc::new(Mutex::new(None)),
+            cancel_requested: cancel_requested.clone(),
         };
         let handle = tokio::spawn(run_turn(transport, text, images, ctx));
 
-        *guard = Some(InFlightTurn { turn_id, killer, handle });
+        *guard = Some(InFlightTurn { turn_id, killer, handle, cancel_requested });
 
         Ok(RequestId::new())
     }
@@ -305,8 +319,14 @@ impl Session {
     /// between turns. Idempotent. Callable from sync (`Drop`, window
     /// destroy) and async paths alike — the single tear-down verb for
     /// both "user pressed cancel" and "tab is closing" UX flows.
+    ///
+    /// Flips `cancel_requested` *before* the SIGKILL so the run task's
+    /// `finish_turn` can distinguish "we asked the child to die" from
+    /// "the child crashed on its own". Without this, every cancel
+    /// would surface as `AgentCrashed: child exited with no status`.
     pub fn kill_now(&self) {
         if let Some(in_flight) = self.in_flight.lock().as_ref() {
+            in_flight.cancel_requested.store(true, Ordering::SeqCst);
             in_flight.killer.kill_now();
         }
     }
@@ -396,6 +416,7 @@ impl Drop for Session {
         let cleared = {
             let mut guard = self.in_flight.lock();
             if let Some(in_flight) = guard.take() {
+                in_flight.cancel_requested.store(true, Ordering::SeqCst);
                 in_flight.killer.kill_now();
                 in_flight.handle.abort();
                 true
@@ -598,8 +619,29 @@ async fn finish_turn(
     }
 
     let captured_error = ctx.captured_error.lock().clone();
-    let (status, kind, message) = classify_turn(outcome, exit_code, captured_error);
+    let cancelled = ctx.cancel_requested.load(Ordering::SeqCst);
+    let (status, kind, message) =
+        classify_turn_or_cancelled(cancelled, outcome, exit_code, captured_error);
     emit_status(&ctx.app, &ctx.tab_id, status, kind, message);
+}
+
+/// A user-initiated cancel SIGKILLs the child, which makes
+/// `wait().status.code()` `None` — exactly the shape `classify_turn`
+/// would otherwise mis-label as `AgentCrashed`. Short-circuit to
+/// `Idle` so the cancel button (and `kill_now` from `Drop`) leaves the
+/// UI in a clean, retry-able state instead of flashing a bogus crash
+/// row. A real upstream error captured *before* the cancel is also
+/// suppressed: the user has already moved on.
+fn classify_turn_or_cancelled(
+    cancelled: bool,
+    outcome: TurnOutcome,
+    exit_code: Option<i32>,
+    captured_error: Option<String>,
+) -> (SessionStatus, Option<ErrorKind>, Option<String>) {
+    if cancelled {
+        return (SessionStatus::Idle, None, None);
+    }
+    classify_turn(outcome, exit_code, captured_error)
 }
 
 fn classify_turn(
@@ -1044,6 +1086,43 @@ mod tests {
         let (status, kind, _) = classify_turn(TurnOutcome::LineCapExceeded, Some(0), None);
         assert_eq!(status, SessionStatus::Error);
         assert_eq!(kind, Some(ErrorKind::ProtocolViolation));
+    }
+
+    /// User-initiated cancel SIGKILLs the child; on Unix that produces
+    /// `wait().code() == None`, which `classify_turn` would otherwise
+    /// stamp as `AgentCrashed: child exited with no status`. The
+    /// short-circuit must turn this into a clean `Idle` so the cancel
+    /// button does not look like a crash to the user. Regression
+    /// coverage for the "agent_crashed: child exited with no status"
+    /// false-positive bug.
+    #[test]
+    fn classify_turn_or_cancelled_returns_idle_when_cancel_requested() {
+        let (status, kind, msg) = classify_turn_or_cancelled(
+            true,
+            TurnOutcome::Drained,
+            None,
+            Some("ignored upstream error".into()),
+        );
+        assert_eq!(status, SessionStatus::Idle);
+        assert!(kind.is_none(), "cancel must not surface an ErrorKind");
+        assert!(msg.is_none(), "cancel must not leak the captured error string");
+    }
+
+    /// When no cancel was requested, the helper must defer to
+    /// `classify_turn` unchanged — i.e. real crashes still surface as
+    /// `AgentCrashed`. Otherwise the fix would silently mask genuine
+    /// child-process failures.
+    #[test]
+    fn classify_turn_or_cancelled_defers_when_not_cancelled() {
+        let (status, kind, msg) = classify_turn_or_cancelled(
+            false,
+            TurnOutcome::Drained,
+            Some(7),
+            None,
+        );
+        assert_eq!(status, SessionStatus::Error);
+        assert_eq!(kind, Some(ErrorKind::AgentCrashed));
+        assert!(msg.unwrap().contains('7'));
     }
 
     #[test]
