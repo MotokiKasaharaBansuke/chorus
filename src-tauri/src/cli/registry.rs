@@ -83,6 +83,12 @@ pub fn resolve_command(
                 CliMode::Default => {}
             }
 
+            // Load user-scope (~/.claude.json), project-scope, and
+            // local-scope settings so that MCP servers registered by the
+            // user are available inside Chorus sessions — matching the
+            // behaviour of the Cursor Claude Code extension.
+            args.push("--setting-sources=user,project,local".into());
+
             if let Some(m) = model {
                 args.push("--model".into());
                 args.push(m.clone());
@@ -122,5 +128,77 @@ pub fn resolve_command(
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
             Ok((shell, vec!["-l".into()]))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `resolve_command` が ClaudeCode に対して `--setting-sources` を返すことを検証
+    #[test]
+    fn claude_code_includes_setting_sources() {
+        // claude バイナリが存在しない環境では CliNotFound になるためスキップ
+        let Ok((_bin, args)) = resolve_command(
+            &CliType::ClaudeCode,
+            &CliMode::Default,
+            &None,
+        ) else {
+            eprintln!("skipping: claude binary not found");
+            return;
+        };
+
+        assert!(
+            args.iter().any(|a| a == "--setting-sources=user,project,local"),
+            "expected --setting-sources=user,project,local in args: {args:?}",
+        );
+    }
+
+    /// DangerouslySkipPermissions モードでも `--setting-sources` が含まれる
+    #[test]
+    fn claude_code_dangerous_mode_includes_setting_sources() {
+        let Ok((_bin, args)) = resolve_command(
+            &CliType::ClaudeCode,
+            &CliMode::DangerouslySkipPermissions,
+            &None,
+        ) else {
+            return;
+        };
+
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(args.contains(&"--setting-sources=user,project,local".to_string()));
+    }
+
+    /// model 指定時も `--setting-sources` が含まれる
+    #[test]
+    fn claude_code_with_model_includes_setting_sources() {
+        let Ok((_bin, args)) = resolve_command(
+            &CliType::ClaudeCode,
+            &CliMode::Default,
+            &Some("claude-sonnet-4-5-20250514".into()),
+        ) else {
+            return;
+        };
+
+        assert!(args.contains(&"--setting-sources=user,project,local".to_string()));
+        assert!(args.contains(&"--model".to_string()));
+        assert!(args.contains(&"claude-sonnet-4-5-20250514".to_string()));
+    }
+
+    /// Codex には `--setting-sources` が含まれない
+    #[test]
+    fn codex_does_not_include_setting_sources() {
+        let Ok((_bin, args)) = resolve_command(
+            &CliType::Codex,
+            &CliMode::Default,
+            &None,
+        ) else {
+            return;
+        };
+
+        assert!(
+            !args.iter().any(|a| a.contains("setting-sources")),
+            "codex should not have --setting-sources: {args:?}",
+        );
     }
 }
